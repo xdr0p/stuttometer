@@ -1,0 +1,32 @@
+# Build directories
+build/
+out/
+bin/
+lib/
+CMakeUserPresets.json
+
+# Visual Studio files
+.vs/
+*.user
+*.suo
+*.VC.db
+*.opendb
+
+# Compilation artifacts
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.dll
+*.exp
+
+# CMake FetchContent & cache
+_deps/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Test / JSON outputs
+stutto_*.json
+*.etl
