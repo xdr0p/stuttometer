@@ -10,19 +10,7 @@ TriggerEngine::TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq)
     , post_window_qpc_(ms_to_qpc_delta(config.window_post_ms, qpc_freq))
     , cooldown_qpc_(ms_to_qpc_delta(config.cooldown_ms, qpc_freq))
 {
-}
-
-bool TriggerEngine::should_trigger_on_process(uint32_t pid) const {
-    if (config_.target_pid != 0 && config_.target_pid != pid) {
-        return false;
-    }
-    if (!config_.target_process_name.empty()) {
-        const std::string proc_name = get_process_name_by_pid(pid);
-        if (proc_name.find(config_.target_process_name) == std::string::npos) {
-            return false;
-        }
-    }
-    return true;
+    active_target_pid_.store(config.target_pid, std::memory_order_relaxed);
 }
 
 void TriggerEngine::initiate_trigger(
@@ -49,7 +37,7 @@ void TriggerEngine::initiate_trigger(
     }
 }
 
-bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc) {
+bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc) noexcept {
     if (duration_ms < config_.present_threshold_ms) {
         return false;
     }
@@ -67,7 +55,7 @@ bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_
     }
 }
 
-bool TriggerEngine::on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc) {
+bool TriggerEngine::on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc) noexcept {
     if (!config_.audio_trigger_enabled || glitch_count == 0) {
         return false;
     }

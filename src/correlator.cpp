@@ -71,6 +71,7 @@ DiagnosticReport CorrelationEngine::correlate(
 
     uint32_t profile_ticks = 0;
     uint64_t total_dpc_us = 0;
+    uint64_t total_cswitch_preempt_us = 0;
 
     for (const auto& rec : snapshot) {
         const double offset_ms = (rec.qpc_timestamp >= trigger.trigger_timestamp_qpc)
@@ -115,6 +116,7 @@ DiagnosticReport CorrelationEngine::correlate(
             case EventCategory::CSWITCH:
                 ++report.event_counts.cswitch;
                 if (rec.tid == trigger.target_tid && !(rec.flags & EventFlags::CSWITCH_VOLUNTARY)) {
+                    total_cswitch_preempt_us += rec.duration_us;
                     if (rec.duration_us >= (thresholds_.cswitch_preempt_ms * 1000)) {
                         CSwitchCandidate cand;
                         cand.record = rec;
@@ -143,7 +145,7 @@ DiagnosticReport CorrelationEngine::correlate(
         const auto& worst = dpc_candidates.front();
         const double duration_severity = std::min(1.0, static_cast<double>(worst.record.duration_us) / 3000.0);
         const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 150.0));
-        const double core_match = 1.0; // Core execution verified
+        const double core_match = 1.0;
 
         const double confidence = std::min(0.98, 0.45 + (0.35 * duration_severity) + (0.18 * temporal_proximity));
 
@@ -234,8 +236,8 @@ DiagnosticReport CorrelationEngine::correlate(
 
         std::stringstream ss;
         ss << "Critical thread " << trigger.target_tid << " was involuntarily preempted for "
-           << std::fixed << std::setprecision(1) << preempt_ms << "ms by competing process PID "
-           << worst.record.payload.cswitch.prev_pid << " (TID " << worst.record.payload.cswitch.prev_tid << ").";
+           << std::fixed << std::setprecision(1) << preempt_ms << "ms (switched out for TID "
+           << worst.record.payload.cswitch.prev_tid << ").";
         diag.summary = ss.str();
 
         for (const auto& cand : cswitch_candidates) {
@@ -246,7 +248,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.duration_us = cand.record.duration_us;
             ev.cpu_core = cand.record.cpu_index;
             ev.offset_from_trigger_ms = cand.offset_ms;
-            ev.extra_info = "Preempted by PID " + std::to_string(cand.record.payload.cswitch.prev_pid);
+            ev.extra_info = "Descheduled for " + std::to_string(cand.record.duration_us / 1000) + "ms";
             diag.evidence.push_back(std::move(ev));
         }
 
@@ -254,11 +256,11 @@ DiagnosticReport CorrelationEngine::correlate(
     }
 
     // 5. Constrained SMI / Unprofiled Hardware Gap Check
-    if (hypotheses.empty() && trigger.duration_ms >= 30.0 && total_dpc_us < 1000) {
+    if (hypotheses.empty() && trigger.duration_ms >= 30.0 && total_dpc_us < 1000 && total_cswitch_preempt_us < 2000) {
         Diagnosis diag;
         diag.hypothesis = "unprofiled_hardware_or_smi_stall";
-        diag.confidence = 0.38; // Strictly capped <= 0.40
-        diag.factors = { 0.38, 0.0, 1.0 };
+        diag.confidence = 0.35; // Strictly capped <= 0.35
+        diag.factors = { 0.35, 0.0, 1.0 };
         diag.summary = "Severe frame delay occurred without corresponding software DPC/ISR or context-switch stalls. "
                        "Unprofiled hardware interrupt, BIOS SMI, or GPU pipeline wait is suspected.";
         hypotheses.push_back(std::move(diag));

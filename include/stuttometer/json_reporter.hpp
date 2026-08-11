@@ -21,8 +21,8 @@ public:
     // Writes report to file path
     bool save_to_file(const DiagnosticReport& report, const std::string& file_path, bool redact = false) const;
 
-    // Prints human-readable summary to standard console
-    void print_console_summary(const DiagnosticReport& report, std::ostream& out = std::cout) const;
+    // Prints human-readable summary to standard console with optional redaction
+    void print_console_summary(const DiagnosticReport& report, std::ostream& out = std::cout, bool redact = false) const;
 };
 
 } // namespace stuttometer

@@ -9,15 +9,17 @@
 
 namespace stuttometer {
 
-// Default capacity: 2^18 = 262,144 slots (~16.8 MB)
+// Default capacity: 2^18 = 262,144 slots (strictly 16.77 MB)
 inline constexpr size_t DEFAULT_RING_CAPACITY = 262144;
 
 class FlightRecorder {
 public:
+    // Slot is strictly 64 bytes (1 CPU cache line)
     struct alignas(64) Slot {
-        std::atomic<uint64_t> sequence{0};
-        EtwEventRecord record{};
+        std::atomic<uint64_t> sequence{0}; // Offset 0 (8 bytes)
+        EtwEventRecord record{};           // Offset 8 (56 bytes)
     };
+    static_assert(sizeof(Slot) == 64, "Slot must be strictly 64 bytes");
 
     explicit FlightRecorder(size_t capacity = DEFAULT_RING_CAPACITY);
     ~FlightRecorder() = default;

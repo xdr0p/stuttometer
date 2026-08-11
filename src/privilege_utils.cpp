@@ -96,7 +96,7 @@ void DriverSymbolResolver::refresh() {
             }
         }
 
-        // Sort descending by base address for binary search / lower_bound
+        // Sort descending by base address for binary search
         std::sort(drivers_.begin(), drivers_.end(), [](const DriverEntry& a, const DriverEntry& b) {
             return a.base_address > b.base_address;
         });
@@ -108,11 +108,16 @@ std::string DriverSymbolResolver::resolve_driver_name(uint64_t routine_address) 
         return "unknown_module";
     }
 
-    // Since drivers_ is sorted descending by base_address, find first driver with base <= address
-    for (const auto& driver : drivers_) {
-        if (routine_address >= driver.base_address) {
-            return driver.name;
+    // Binary search (lower_bound with greater comparator on descending list)
+    auto it = std::lower_bound(
+        drivers_.begin(), drivers_.end(), routine_address,
+        [](const DriverEntry& entry, uint64_t addr) {
+            return entry.base_address > addr;
         }
+    );
+
+    if (it != drivers_.end()) {
+        return it->name;
     }
     return "unknown_kernel_address";
 }
@@ -154,6 +159,43 @@ std::string get_process_name_by_pid(uint32_t pid) {
         cache[pid] = name;
     }
     return name;
+}
+
+uint32_t resolve_process_name_to_pid(const std::string& process_name) {
+    if (process_name.empty()) return 0;
+
+    DWORD pids[2048];
+    DWORD cb_needed = 0;
+
+    if (!EnumProcesses(pids, sizeof(pids), &cb_needed)) {
+        return 0;
+    }
+
+    const DWORD count = cb_needed / sizeof(DWORD);
+    char full_path[MAX_PATH];
+
+    for (DWORD i = 0; i < count; ++i) {
+        const DWORD pid = pids[i];
+        if (pid == 0 || pid == 4) continue;
+
+        HANDLE h_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (h_proc) {
+            DWORD size = sizeof(full_path);
+            if (QueryFullProcessImageNameA(h_proc, 0, full_path, &size)) {
+                std::string full_str(full_path);
+                const size_t slash_pos = full_str.find_last_of("\\/");
+                const std::string exe_name = (slash_pos != std::string::npos) ? full_str.substr(slash_pos + 1) : full_str;
+
+                if (_stricmp(exe_name.c_str(), process_name.c_str()) == 0 ||
+                    exe_name.find(process_name) != std::string::npos) {
+                    CloseHandle(h_proc);
+                    return pid;
+                }
+            }
+            CloseHandle(h_proc);
+        }
+    }
+    return 0;
 }
 
 } // namespace stuttometer

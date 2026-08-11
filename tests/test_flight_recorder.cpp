@@ -1,4 +1,5 @@
 #include "stuttometer/flight_recorder.hpp"
+#include "stuttometer/fixed_table.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include <iostream>
 #include <thread>
@@ -6,10 +7,51 @@
 #include <cassert>
 
 static void test_struct_size() {
-    std::cout << "[TEST] Validating EtwEventRecord memory layout...\n";
-    static_assert(sizeof(stuttometer::EtwEventRecord) == 64, "EtwEventRecord must be exactly 64 bytes");
-    assert(sizeof(stuttometer::EtwEventRecord) == 64);
-    std::cout << "  -> EtwEventRecord is exactly 64 bytes (Zero implicit padding).\n";
+    std::cout << "[TEST] Validating EtwEventRecord & Slot memory layout...\n";
+    static_assert(sizeof(stuttometer::EtwEventRecord) == 56, "EtwEventRecord must be exactly 56 bytes");
+    static_assert(sizeof(stuttometer::FlightRecorder::Slot) == 64, "Slot must be strictly 64 bytes");
+    assert(sizeof(stuttometer::EtwEventRecord) == 56);
+    assert(sizeof(stuttometer::FlightRecorder::Slot) == 64);
+    std::cout << "  -> EtwEventRecord is 56 bytes, Slot is strictly 64 bytes (Zero implicit padding, 1 L1 cache line).\n";
+}
+
+static void test_fixed_in_flight_table() {
+    std::cout << "[TEST] Running FixedInFlightTable multi-threaded concurrency test (8 threads, 100,000 ops)...\n";
+
+    struct DummyVal {
+        uint64_t timestamp;
+        uint32_t pid;
+        uint32_t tid;
+    };
+
+    stuttometer::FixedInFlightTable<DummyVal, 2048> table;
+    constexpr int NUM_THREADS = 8;
+    constexpr int OPS_PER_THREAD = 12500;
+
+    std::vector<std::thread> workers;
+    workers.reserve(NUM_THREADS);
+
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        workers.emplace_back([&table, t]() {
+            for (int i = 0; i < OPS_PER_THREAD; ++i) {
+                const uint64_t key = (static_cast<uint64_t>(t + 1) << 32) | (i + 1);
+                DummyVal val{ 1000ULL + i, static_cast<uint32_t>(t), static_cast<uint32_t>(i) };
+
+                table.insert(key, val);
+
+                DummyVal out{};
+                if (table.find_and_erase(key, out)) {
+                    assert(out.pid == static_cast<uint32_t>(t));
+                    assert(out.tid == static_cast<uint32_t>(i));
+                }
+            }
+        });
+    }
+
+    for (auto& w : workers) {
+        w.join();
+    }
+    std::cout << "  -> FixedInFlightTable concurrent insert & find_and_erase PASSED with zero leaks.\n";
 }
 
 static void test_multithreaded_flight_recorder() {
@@ -65,8 +107,9 @@ static void test_multithreaded_flight_recorder() {
 }
 
 int main() {
-    std::cout << "=== Stuttometer Flight Recorder Tests ===\n";
+    std::cout << "=== Stuttometer Flight Recorder & FixedTable Tests ===\n";
     test_struct_size();
+    test_fixed_in_flight_table();
     test_multithreaded_flight_recorder();
     std::cout << ">>> All Flight Recorder tests PASSED! <<<\n\n";
     return 0;

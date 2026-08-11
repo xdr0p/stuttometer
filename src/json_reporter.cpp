@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 namespace stuttometer {
 
@@ -102,12 +103,14 @@ bool JsonReporter::save_to_file(const DiagnosticReport& report, const std::strin
     return true;
 }
 
-void JsonReporter::print_console_summary(const DiagnosticReport& report, std::ostream& out) const {
+void JsonReporter::print_console_summary(const DiagnosticReport& report, std::ostream& out, bool redact) const {
+    const std::string proc_name = redact ? ("Process_" + std::to_string(report.trigger.target_pid)) : report.trigger.target_process;
+
     out << "\n================================================================================\n";
     out << " [STUTTOMETER REPORT] Stutter Anomaly Detected at " << report.timestamp_utc << "\n";
     out << "================================================================================\n";
     out << " Trigger Source : " << trigger_source_to_string(report.trigger.source) << "\n";
-    out << " Process        : " << report.trigger.target_process << " (PID " << report.trigger.target_pid << ", TID " << report.trigger.target_tid << ")\n";
+    out << " Process        : " << proc_name << " (PID " << report.trigger.target_pid << ", TID " << report.trigger.target_tid << ")\n";
     out << " Duration       : " << std::fixed << std::setprecision(2) << report.trigger.duration_ms << " ms\n";
     out << " Captured Events: " << report.total_events << " events (Drops: " << report.dropped_events << ")\n";
     out << "--------------------------------------------------------------------------------\n";
@@ -121,8 +124,9 @@ void JsonReporter::print_console_summary(const DiagnosticReport& report, std::os
             out << "     Top Evidence:\n";
             for (size_t i = 0; i < std::min<size_t>(3, diag.evidence.size()); ++i) {
                 const auto& ev = diag.evidence[i];
+                const std::string addr_str = redact ? "0xREDACTED" : ev.routine_address;
                 out << "       - " << ev.event_type << ": " << ev.driver_module 
-                    << " (" << ev.routine_address << ") duration=" << (ev.duration_us / 1000.0) 
+                    << " (" << addr_str << ") duration=" << (ev.duration_us / 1000.0) 
                     << "ms on Core " << static_cast<int>(ev.cpu_core)
                     << " (offset: " << std::fixed << std::setprecision(1) << ev.offset_from_trigger_ms << "ms)\n";
             }

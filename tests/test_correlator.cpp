@@ -78,6 +78,45 @@ static void test_disk_stall_correlation() {
               << " (" << (report.diagnoses[0].confidence * 100.0) << "% confidence) PASSED.\n";
 }
 
+static void test_cswitch_preemption_correlation() {
+    std::cout << "[TEST] Validating Context Switch Involuntary Preemption Hypothesis...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger;
+    trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+    trigger.duration_ms = 40.0;
+    trigger.target_pid = 4000;
+    trigger.target_tid = 8000;
+    trigger.target_process = "Game.exe";
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // Inject 12ms involuntary preemption of target thread 8000
+    stuttometer::EtwEventRecord cs{};
+    cs.category = static_cast<uint16_t>(stuttometer::EventCategory::CSWITCH);
+    cs.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+    cs.pid = 4000;
+    cs.tid = 8000; // Target thread resumed
+    cs.duration_us = 12000; // Descheduled for 12ms
+    cs.flags = 0; // Involuntary (CSWITCH_VOLUNTARY not set)
+    cs.payload.cswitch.prev_tid = 9999; // Preempting thread
+    snapshot.push_back(cs);
+
+    auto report = correlator.correlate(snapshot, trigger, qpc_freq);
+
+    assert(!report.diagnoses.empty());
+    assert(report.diagnoses[0].hypothesis == "context_switch_interference");
+    assert(report.diagnoses[0].confidence >= 0.65);
+    std::cout << "  -> Rank 1: " << report.diagnoses[0].hypothesis 
+              << " (" << (report.diagnoses[0].confidence * 100.0) << "% confidence) PASSED.\n";
+}
+
 static void test_smi_hardware_gap_correlation() {
     std::cout << "[TEST] Validating Constrained Hardware / SMI Gap Hypothesis...\n";
 
@@ -102,15 +141,16 @@ static void test_smi_hardware_gap_correlation() {
 
     assert(!report.diagnoses.empty());
     assert(report.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
-    assert(report.diagnoses[0].confidence <= 0.40); // Strictly capped
+    assert(report.diagnoses[0].confidence <= 0.35); // Strictly capped <= 0.35
     std::cout << "  -> Rank 1: " << report.diagnoses[0].hypothesis 
-              << " (" << (report.diagnoses[0].confidence * 100.0) << "% confidence, capped <= 40%) PASSED.\n";
+              << " (" << (report.diagnoses[0].confidence * 100.0) << "% confidence, capped <= 35%) PASSED.\n";
 }
 
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     test_dpc_spike_correlation();
     test_disk_stall_correlation();
+    test_cswitch_preemption_correlation();
     test_smi_hardware_gap_correlation();
     std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
     return 0;

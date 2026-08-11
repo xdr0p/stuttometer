@@ -83,7 +83,7 @@ static void run_mock_simulation() {
         std::cout << "[SIM] Extracted " << snapshot.size() << " events in window. Correlating...\n";
 
         auto report = correlator.correlate(snapshot, trigger_info, qpc_freq);
-        reporter.print_console_summary(report);
+        reporter.print_console_summary(report, std::cout, false);
 
         std::cout << "[SIM] Generating sample JSON report:\n";
         std::cout << reporter.to_json_string(report, false, 2) << "\n";
@@ -156,6 +156,16 @@ int main(int argc, char** argv) {
 
     stuttometer::enable_system_profile_privilege();
 
+    // Resolve target process name to PID at startup if provided
+    if (target_pid == 0 && !target_process_name.empty()) {
+        target_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
+        if (target_pid != 0) {
+            std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' matched PID " << target_pid << "\n";
+        } else {
+            std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' not currently running. Will monitor all processes.\n";
+        }
+    }
+
     std::cout << "[STUTTOMETER] Initializing Stuttometer v0.1.0 (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
@@ -198,12 +208,23 @@ int main(int argc, char** argv) {
     stuttometer::JsonReporter reporter;
 
     uint32_t report_count = 0;
+    uint32_t loop_counter = 0;
 
     while (!g_stop_requested.load(std::memory_order_relaxed)) {
         const uint64_t current_qpc = stuttometer::get_current_qpc();
         stuttometer::TriggerInfo trigger_info;
         uint64_t from_qpc = 0;
         uint64_t to_qpc = 0;
+
+        // Periodic background process PID refresh (every ~100 iterations = ~1s)
+        if (++loop_counter % 100 == 0 && !target_process_name.empty() && target_pid == 0) {
+            uint32_t found_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
+            if (found_pid != 0) {
+                target_pid = found_pid;
+                trigger_engine.update_target_pid(target_pid);
+                std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' detected (PID " << target_pid << ")\n";
+            }
+        }
 
         if (trigger_engine.poll_state(current_qpc, trigger_info, from_qpc, to_qpc)) {
             uint64_t drops = 0;
@@ -215,7 +236,7 @@ int main(int argc, char** argv) {
             report.provider_tier = provider_tier;
             report.redacted = redact;
 
-            reporter.print_console_summary(report);
+            reporter.print_console_summary(report, std::cout, redact);
 
             if (!output_file.empty()) {
                 reporter.save_to_file(report, output_file, redact);

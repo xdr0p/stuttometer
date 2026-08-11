@@ -36,7 +36,10 @@ private:
     std::vector<DriverEntry> drivers_;
 };
 
-// Process ID to process name resolver
+// Process ID to process name resolver (used in background/reporting)
 std::string get_process_name_by_pid(uint32_t pid);
+
+// Process name to Process ID resolver (used at startup/background watcher)
+uint32_t resolve_process_name_to_pid(const std::string& process_name);
 
 } // namespace stuttometer

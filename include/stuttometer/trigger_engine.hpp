@@ -46,8 +46,8 @@ struct TriggerConfig {
     double present_threshold_ms{25.0};
     bool audio_trigger_enabled{true};
     double cooldown_ms{1000.0};
-    uint32_t target_pid{0};             // 0 = auto-detect
-    std::string target_process_name;   // empty = all
+    uint32_t target_pid{0};             // 0 = auto-detect / all
+    std::string target_process_name;   // resolved at startup/background watcher
 };
 
 class TriggerEngine {
@@ -55,11 +55,11 @@ public:
     explicit TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq);
     ~TriggerEngine() = default;
 
-    // Evaluates DXGI present latency; returns true if it initiated a new trigger
-    bool on_dxgi_present(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc);
+    // Evaluates DXGI present latency; returns true if it initiated a new trigger (zero syscalls)
+    bool on_dxgi_present(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc) noexcept;
 
-    // Evaluates AudioGlitch event; returns true if it initiated a new trigger
-    bool on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc);
+    // Evaluates AudioGlitch event; returns true if it initiated a new trigger (zero syscalls)
+    bool on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc) noexcept;
 
     // Polls the state machine. When a capture window is finalized (FROZEN), returns true
     // and populates out_trigger, out_from_qpc, and out_to_qpc.
@@ -68,11 +68,24 @@ public:
     // Notifies that analysis/reporting is done, moving state to COOLDOWN
     void on_report_completed(uint64_t current_qpc);
 
+    // Dynamically update the active target PID from the background watcher (zero lock contention)
+    void update_target_pid(uint32_t pid) noexcept {
+        active_target_pid_.store(pid, std::memory_order_release);
+    }
+
+    uint32_t active_target_pid() const noexcept {
+        return active_target_pid_.load(std::memory_order_relaxed);
+    }
+
     TriggerState current_state() const noexcept { return state_.load(std::memory_order_relaxed); }
     uint64_t suppressed_trigger_count() const noexcept { return suppressed_triggers_.load(std::memory_order_relaxed); }
 
 private:
-    bool should_trigger_on_process(uint32_t pid) const;
+    inline bool should_trigger_on_process(uint32_t pid) const noexcept {
+        const uint32_t target = active_target_pid_.load(std::memory_order_relaxed);
+        return (target == 0 || target == pid);
+    }
+
     void initiate_trigger(TriggerSource src, uint64_t timestamp_qpc, double duration_ms, uint32_t pid, uint32_t tid);
 
     const TriggerConfig config_;
@@ -81,6 +94,7 @@ private:
     const uint64_t post_window_qpc_;
     const uint64_t cooldown_qpc_;
 
+    std::atomic<uint32_t> active_target_pid_{0};
     std::atomic<TriggerState> state_{TriggerState::ARMED};
     std::atomic<uint64_t> suppressed_triggers_{0};
 

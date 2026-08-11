@@ -5,7 +5,6 @@ namespace stuttometer {
 
 FlightRecorder::FlightRecorder(size_t capacity)
     : capacity_([capacity]() {
-          // Ensure capacity is a power of 2
           size_t cap = 1;
           while (cap < capacity) {
               cap <<= 1;
@@ -39,9 +38,8 @@ void FlightRecorder::push(const EtwEventRecord& event) noexcept {
 
     slot.sequence.store(writing_seq, std::memory_order_release);
 
-    // Copy event record and stamp sequence number
-    slot.record = event;
-    slot.record.sequence_num = seq;
+    // Linear memory copy to prevent instruction reordering
+    std::memcpy(&slot.record, &event, sizeof(EtwEventRecord));
 
     // Even sequence indicates payload is ready and valid
     slot.sequence.store(ready_seq, std::memory_order_release);
@@ -73,8 +71,9 @@ std::vector<EtwEventRecord> FlightRecorder::snapshot(
             continue;
         }
 
-        // Copy record
-        EtwEventRecord temp = slot.record;
+        // Copy record using memcpy
+        EtwEventRecord temp{};
+        std::memcpy(&temp, &slot.record, sizeof(EtwEventRecord));
 
         // Verify sequence did not change during copy
         const uint64_t seq2 = slot.sequence.load(std::memory_order_acquire);

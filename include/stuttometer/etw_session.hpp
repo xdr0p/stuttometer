@@ -3,6 +3,7 @@
 #include "event_types.hpp"
 #include "flight_recorder.hpp"
 #include "trigger_engine.hpp"
+#include "fixed_table.hpp"
 #include <windows.h>
 #include <evntrace.h>
 #include <evntcons.h>
@@ -10,8 +11,6 @@
 #include <memory>
 #include <thread>
 #include <atomic>
-#include <unordered_map>
-#include <mutex>
 
 namespace stuttometer {
 
@@ -43,6 +42,20 @@ struct EtwSessionConfig {
     uint32_t flush_interval_ms{30};
 };
 
+struct PresentInFlight {
+    uint64_t start_qpc{0};
+    uint32_t pid{0};
+    uint32_t tid{0};
+};
+
+struct DiskInFlight {
+    uint64_t start_qpc{0};
+    uint32_t pid{0};
+    uint32_t tid{0};
+    uint32_t size{0};
+    bool is_write{false};
+};
+
 class EtwSessionManager {
 public:
     EtwSessionManager(
@@ -67,7 +80,6 @@ private:
     void active_flush_worker_loop();
     void user_trace_consumer_loop();
     void kernel_trace_consumer_loop();
-    static void cleanup_stale_sessions();
 
     FlightRecorder& flight_recorder_;
     TriggerEngine& trigger_engine_;
@@ -84,25 +96,10 @@ private:
     std::thread user_consumer_thread_;
     std::thread kernel_consumer_thread_;
 
-    // In-flight Disk I/O tracking table
-    struct DiskInFlight {
-        uint64_t start_qpc{0};
-        uint32_t pid{0};
-        uint32_t tid{0};
-        uint32_t size{0};
-        bool is_write{false};
-    };
-    std::unordered_map<uint64_t, DiskInFlight> in_flight_disk_;
-    std::mutex disk_mutex_;
-
-    // In-flight DXGI Present tracking table: key = (TID << 32) | SwapchainHash
-    struct PresentInFlight {
-        uint64_t start_qpc{0};
-        uint32_t pid{0};
-        uint32_t tid{0};
-    };
-    std::unordered_map<uint64_t, PresentInFlight> in_flight_present_;
-    std::mutex present_mutex_;
+    // Lock-free in-flight tracking tables (zero dynamic allocations in hot path)
+    FixedInFlightTable<PresentInFlight, 2048> in_flight_present_;
+    FixedInFlightTable<DiskInFlight, 2048> in_flight_disk_;
+    FixedInFlightTable<uint64_t, 4096> in_flight_threads_;
 };
 
 } // namespace stuttometer

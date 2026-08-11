@@ -1,6 +1,7 @@
 #include "stuttometer/json_reporter.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include <iostream>
+#include <sstream>
 #include <cassert>
 
 static void test_json_serialization_and_redaction() {
@@ -49,16 +50,26 @@ static void test_json_serialization_and_redaction() {
     assert(j_plain["diagnoses"][0]["evidence"][0]["routine_address"] == "0xFFFFF8012A34B100");
     std::cout << "  -> Plain JSON Schema v1.0 validation PASSED.\n";
 
-    // Test redacted output
+    // Test redacted JSON output
     auto j_redacted = reporter.to_json(report, true);
     assert(j_redacted["configuration"]["redacted"] == true);
     assert(j_redacted["trigger"]["target_process"] == "Process_7788");
     assert(j_redacted["diagnoses"][0]["evidence"][0]["routine_address"] == "0xREDACTED");
     std::cout << "  -> Redacted JSON sanitization validation PASSED.\n";
+
+    // Test console summary redaction
+    std::stringstream ss_redacted;
+    reporter.print_console_summary(report, ss_redacted, true);
+    const std::string console_str = ss_redacted.str();
+    assert(console_str.find("Process_7788") != std::string::npos);
+    assert(console_str.find("ConfidentialGame.exe") == std::string::npos);
+    assert(console_str.find("0xREDACTED") != std::string::npos);
+    assert(console_str.find("0xFFFFF8012A34B100") == std::string::npos);
+    std::cout << "  -> Redacted Console Summary sanitization validation PASSED.\n";
 }
 
 int main() {
-    std::cout << "=== Stuttometer JSON Schema Tests ===\n";
+    std::cout << "=== Stuttometer JSON Schema & Redaction Tests ===\n";
     test_json_serialization_and_redaction();
     std::cout << ">>> All JSON Schema tests PASSED! <<<\n\n";
     return 0;
