@@ -39,6 +39,7 @@ DiagnosticReport CorrelationEngine::correlate(
     const std::vector<EtwEventRecord>& snapshot,
     const TriggerInfo& trigger,
     uint64_t qpc_freq,
+    const ProviderContext& provider_ctx,
     uint64_t dropped_events,
     uint64_t unpaired_evictions
 ) const {
@@ -48,6 +49,8 @@ DiagnosticReport CorrelationEngine::correlate(
     report.total_events = snapshot.size();
     report.dropped_events = dropped_events;
     report.unpaired_evictions = unpaired_evictions;
+    report.etw_events_lost = provider_ctx.etw_events_lost;
+    report.etw_buffers_lost = provider_ctx.etw_buffers_lost;
 
     // 1. Accumulate category counts & search for anomaly candidates
     struct DpcCandidate {
@@ -66,6 +69,7 @@ DiagnosticReport CorrelationEngine::correlate(
     struct CSwitchCandidate {
         EtwEventRecord record;
         double offset_ms{0.0};
+        bool is_resumption{true};
     };
     std::vector<CSwitchCandidate> cswitch_candidates;
 
@@ -81,6 +85,9 @@ DiagnosticReport CorrelationEngine::correlate(
         switch (static_cast<EventCategory>(rec.category)) {
             case EventCategory::DXGI:
                 ++report.event_counts.dxgi;
+                break;
+            case EventCategory::AUDIO:
+                ++report.event_counts.audio;
                 break;
             case EventCategory::DPC:
                 ++report.event_counts.dpc;
@@ -115,13 +122,15 @@ DiagnosticReport CorrelationEngine::correlate(
                 break;
             case EventCategory::CSWITCH:
                 ++report.event_counts.cswitch;
-                if (rec.tid == trigger.target_tid && !(rec.flags & EventFlags::CSWITCH_VOLUNTARY)) {
-                    total_cswitch_preempt_us += rec.duration_us;
-                    if (rec.duration_us >= (thresholds_.cswitch_preempt_ms * 1000)) {
-                        CSwitchCandidate cand;
-                        cand.record = rec;
-                        cand.offset_ms = offset_ms;
-                        cswitch_candidates.push_back(std::move(cand));
+                // Both switch-in resumption (rec.tid == target) and switch-out preemption (prev_tid == target)
+                if (trigger.target_tid != 0) {
+                    if (rec.tid == trigger.target_tid && !(rec.flags & EventFlags::CSWITCH_VOLUNTARY)) {
+                        total_cswitch_preempt_us += rec.duration_us;
+                        if (rec.duration_us >= (thresholds_.cswitch_preempt_ms * 1000)) {
+                            cswitch_candidates.push_back({ rec, offset_ms, true });
+                        }
+                    } else if (rec.payload.cswitch.prev_tid == trigger.target_tid && !(rec.flags & EventFlags::CSWITCH_VOLUNTARY)) {
+                        cswitch_candidates.push_back({ rec, offset_ms, false });
                     }
                 }
                 break;
@@ -236,8 +245,8 @@ DiagnosticReport CorrelationEngine::correlate(
 
         std::stringstream ss;
         ss << "Critical thread " << trigger.target_tid << " was involuntarily preempted for "
-           << std::fixed << std::setprecision(1) << preempt_ms << "ms (switched out for TID "
-           << worst.record.payload.cswitch.prev_tid << ").";
+           << std::fixed << std::setprecision(1) << preempt_ms << "ms (switched for TID "
+           << (worst.is_resumption ? worst.record.payload.cswitch.prev_tid : worst.record.tid) << ").";
         diag.summary = ss.str();
 
         for (const auto& cand : cswitch_candidates) {
@@ -248,15 +257,20 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.duration_us = cand.record.duration_us;
             ev.cpu_core = cand.record.cpu_index;
             ev.offset_from_trigger_ms = cand.offset_ms;
-            ev.extra_info = "Descheduled for " + std::to_string(cand.record.duration_us / 1000) + "ms";
+            ev.extra_info = cand.is_resumption ? ("Resumed after " + std::to_string(cand.record.duration_us / 1000) + "ms") : "Preempted";
             diag.evidence.push_back(std::move(ev));
         }
 
         hypotheses.push_back(std::move(diag));
     }
 
-    // 5. Constrained SMI / Unprofiled Hardware Gap Check
-    if (hypotheses.empty() && trigger.duration_ms >= 30.0 && total_dpc_us < 1000 && total_cswitch_preempt_us < 2000) {
+    // 5. Constrained SMI / Unprofiled Hardware Gap Check (strictly requires active kernel providers)
+    if (hypotheses.empty() && 
+        provider_ctx.kernel_dpc_active && 
+        provider_ctx.kernel_cswitch_active && 
+        trigger.duration_ms >= 33.3 && 
+        total_dpc_us < 1000 && 
+        total_cswitch_preempt_us < 2000) {
         Diagnosis diag;
         diag.hypothesis = "unprofiled_hardware_or_smi_stall";
         diag.confidence = 0.35; // Strictly capped <= 0.35

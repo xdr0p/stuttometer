@@ -9,32 +9,42 @@ TriggerEngine::TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq)
     , pre_window_qpc_(ms_to_qpc_delta(config.window_pre_ms, qpc_freq))
     , post_window_qpc_(ms_to_qpc_delta(config.window_post_ms, qpc_freq))
     , cooldown_qpc_(ms_to_qpc_delta(config.cooldown_ms, qpc_freq))
+    , watchdog_qpc_(ms_to_qpc_delta(5000.0, qpc_freq)) // 5.0s recovery
 {
     active_target_pid_.store(config.target_pid, std::memory_order_relaxed);
 }
 
-void TriggerEngine::initiate_trigger(
+bool TriggerEngine::initiate_trigger_atomic(
     TriggerSource src,
     uint64_t timestamp_qpc,
     double duration_ms,
     uint32_t pid,
     uint32_t tid
-) {
-    std::lock_guard<std::mutex> lock(trigger_mutex_);
+) noexcept {
+    // Step 1: Atomic CAS ARMED -> CLAIMED
+    TriggerState expected = TriggerState::ARMED;
+    if (!state_.compare_exchange_strong(expected, TriggerState::CLAIMED, std::memory_order_acq_rel)) {
+        suppressed_triggers_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Step 2: Populate metadata (zero allocations, raw numeric IDs only)
     active_trigger_.source = src;
     active_trigger_.trigger_timestamp_qpc = timestamp_qpc;
     active_trigger_.duration_ms = duration_ms;
     active_trigger_.target_pid = pid;
     active_trigger_.target_tid = tid;
-    active_trigger_.target_process = get_process_name_by_pid(pid);
+    active_trigger_.target_process.clear(); // resolved on correlation thread
 
     post_target_qpc_ = timestamp_qpc + post_window_qpc_;
 
-    if (config_.window_post_ms > 0.0) {
-        state_.store(TriggerState::COLLECTING_POST, std::memory_order_release);
-    } else {
-        state_.store(TriggerState::FROZEN, std::memory_order_release);
-    }
+    // Step 3: Transition state to COLLECTING_POST or FROZEN with release semantics
+    const TriggerState next_state = (config_.window_post_ms > 0.0) 
+        ? TriggerState::COLLECTING_POST 
+        : TriggerState::FROZEN;
+
+    state_.store(next_state, std::memory_order_release);
+    return true;
 }
 
 bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc) noexcept {
@@ -45,14 +55,7 @@ bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_
         return false;
     }
 
-    TriggerState current = state_.load(std::memory_order_acquire);
-    if (current == TriggerState::ARMED) {
-        initiate_trigger(TriggerSource::DXGI_PRESENT_STUTTER, timestamp_qpc, duration_ms, pid, tid);
-        return true;
-    } else {
-        suppressed_triggers_.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
+    return initiate_trigger_atomic(TriggerSource::DXGI_PRESENT_STUTTER, timestamp_qpc, duration_ms, pid, tid);
 }
 
 bool TriggerEngine::on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc) noexcept {
@@ -63,14 +66,7 @@ bool TriggerEngine::on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_
         return false;
     }
 
-    TriggerState current = state_.load(std::memory_order_acquire);
-    if (current == TriggerState::ARMED) {
-        initiate_trigger(TriggerSource::AUDIO_GLITCH, timestamp_qpc, static_cast<double>(glitch_count), pid, tid);
-        return true;
-    } else {
-        suppressed_triggers_.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
+    return initiate_trigger_atomic(TriggerSource::AUDIO_GLITCH, timestamp_qpc, static_cast<double>(glitch_count), pid, tid);
 }
 
 bool TriggerEngine::poll_state(
@@ -81,16 +77,26 @@ bool TriggerEngine::poll_state(
 ) {
     TriggerState current = state_.load(std::memory_order_acquire);
 
+    // Ignore CLAIMED state while metadata is being populated
+    if (current == TriggerState::CLAIMED) {
+        return false;
+    }
+
     if (current == TriggerState::COLLECTING_POST) {
-        std::lock_guard<std::mutex> lock(trigger_mutex_);
         if (current_qpc >= post_target_qpc_) {
+            frozen_timestamp_qpc_ = current_qpc;
             state_.store(TriggerState::FROZEN, std::memory_order_release);
             current = TriggerState::FROZEN;
         }
     }
 
     if (current == TriggerState::FROZEN) {
-        std::lock_guard<std::mutex> lock(trigger_mutex_);
+        // Check 5-second watchdog to prevent getting permanently stuck
+        if (frozen_timestamp_qpc_ > 0 && (current_qpc - frozen_timestamp_qpc_) > watchdog_qpc_) {
+            on_report_completed(current_qpc);
+            return false;
+        }
+
         out_trigger = active_trigger_;
         const uint64_t trig_qpc = active_trigger_.trigger_timestamp_qpc;
         out_from_qpc = (trig_qpc > pre_window_qpc_) ? (trig_qpc - pre_window_qpc_) : 0;
@@ -99,7 +105,6 @@ bool TriggerEngine::poll_state(
     }
 
     if (current == TriggerState::COOLDOWN) {
-        std::lock_guard<std::mutex> lock(trigger_mutex_);
         if (current_qpc >= cooldown_target_qpc_) {
             state_.store(TriggerState::ARMED, std::memory_order_release);
         }
@@ -108,9 +113,9 @@ bool TriggerEngine::poll_state(
     return false;
 }
 
-void TriggerEngine::on_report_completed(uint64_t current_qpc) {
-    std::lock_guard<std::mutex> lock(trigger_mutex_);
+void TriggerEngine::on_report_completed(uint64_t current_qpc) noexcept {
     cooldown_target_qpc_ = current_qpc + cooldown_qpc_;
+    frozen_timestamp_qpc_ = 0;
     state_.store(TriggerState::COOLDOWN, std::memory_order_release);
 }
 

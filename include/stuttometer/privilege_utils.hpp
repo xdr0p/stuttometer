@@ -12,6 +12,9 @@ bool is_running_as_admin();
 // Check and enable SeSystemprofilePrivilege for kernel ETW tracing
 bool enable_system_profile_privilege();
 
+// Validate Windows OS version is Windows 10/11 x64 (build >= 19041)
+bool is_supported_windows_build();
+
 // High-resolution QPC helpers
 uint64_t get_qpc_frequency();
 uint64_t get_current_qpc();
@@ -19,7 +22,7 @@ double qpc_delta_to_ms(uint64_t delta_qpc, uint64_t qpc_freq);
 double qpc_delta_to_us(uint64_t delta_qpc, uint64_t qpc_freq);
 uint64_t ms_to_qpc_delta(double ms, uint64_t qpc_freq);
 
-// Kernel driver address to module name resolver (e.g. nvlddmkm.sys, ndis.sys)
+// Kernel driver address to module name resolver
 class DriverSymbolResolver {
 public:
     DriverSymbolResolver();
@@ -36,10 +39,10 @@ private:
     std::vector<DriverEntry> drivers_;
 };
 
-// Process ID to process name resolver (used in background/reporting)
+// Process ID to process name resolver with TTL cache
 std::string get_process_name_by_pid(uint32_t pid);
 
-// Process name to Process ID resolver (used at startup/background watcher)
+// Process name to Process ID resolver
 uint32_t resolve_process_name_to_pid(const std::string& process_name);
 
 } // namespace stuttometer

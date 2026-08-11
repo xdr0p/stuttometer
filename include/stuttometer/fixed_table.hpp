@@ -4,10 +4,12 @@
 #include <atomic>
 #include <cstring>
 #include <type_traits>
+#include <immintrin.h>
+#include <thread>
 
 namespace stuttometer {
 
-// Lock-free, zero-allocation, pre-allocated open-addressing table for in-flight tracking
+// Lock-free, zero-allocation, pre-allocated open-addressing table with spin-wait & eviction
 template <typename Value, size_t Capacity = 2048>
 class FixedInFlightTable {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
@@ -43,11 +45,16 @@ public:
             slots_[i].state.store(STATE_EMPTY, std::memory_order_relaxed);
             std::memset(&slots_[i].value, 0, sizeof(Value));
         }
+        insertion_failures_.store(0, std::memory_order_relaxed);
+        unpaired_evictions_.store(0, std::memory_order_relaxed);
     }
 
-    // Insert or update an in-flight key-value pair (lock-free CAS)
+    // Insert or update an in-flight key-value pair with bounded spin-wait on STATE_WRITING
     bool insert(uint64_t key, const Value& val) noexcept {
-        if (key == 0) return false;
+        if (key == 0) {
+            insertion_failures_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
 
         const size_t start_idx = hash_key(key) & MASK;
         constexpr size_t MAX_PROBES = 64;
@@ -57,6 +64,12 @@ public:
             Slot& slot = slots_[idx];
 
             uint8_t current_state = slot.state.load(std::memory_order_acquire);
+
+            // Bounded spin-wait if slot is currently being written
+            for (int spin = 0; spin < 16 && current_state == STATE_WRITING; ++spin) {
+                _mm_pause();
+                current_state = slot.state.load(std::memory_order_acquire);
+            }
 
             // If slot already holds this key and is valid, update value
             if (current_state == STATE_VALID && slot.key.load(std::memory_order_relaxed) == key) {
@@ -77,6 +90,8 @@ public:
                 }
             }
         }
+
+        insertion_failures_.fetch_add(1, std::memory_order_relaxed);
         return false; // Table at capacity or high collision
     }
 
@@ -92,6 +107,12 @@ public:
             Slot& slot = slots_[idx];
 
             uint8_t current_state = slot.state.load(std::memory_order_acquire);
+
+            // Bounded spin-wait if slot is currently being written
+            for (int spin = 0; spin < 16 && current_state == STATE_WRITING; ++spin) {
+                _mm_pause();
+                current_state = slot.state.load(std::memory_order_acquire);
+            }
 
             if (current_state == STATE_EMPTY) {
                 return false; // Key not present
@@ -120,7 +141,12 @@ public:
             const size_t idx = (start_idx + probe) & MASK;
             const Slot& slot = slots_[idx];
 
-            const uint8_t current_state = slot.state.load(std::memory_order_acquire);
+            uint8_t current_state = slot.state.load(std::memory_order_acquire);
+            for (int spin = 0; spin < 16 && current_state == STATE_WRITING; ++spin) {
+                _mm_pause();
+                current_state = slot.state.load(std::memory_order_acquire);
+            }
+
             if (current_state == STATE_EMPTY) {
                 return false;
             }
@@ -132,6 +158,33 @@ public:
         }
         return false;
     }
+
+    // Background eviction for reclaiming stale entries (called strictly from background flush worker)
+    template <typename TimestampExtractor>
+    size_t evict_stale(uint64_t current_qpc, uint64_t max_age_qpc, TimestampExtractor extractor) noexcept {
+        size_t evicted = 0;
+        for (size_t i = 0; i < Capacity; ++i) {
+            Slot& slot = slots_[i];
+            uint8_t current_state = slot.state.load(std::memory_order_acquire);
+            if (current_state == STATE_VALID) {
+                const uint64_t ts = extractor(slot.value);
+                if (current_qpc > ts && (current_qpc - ts) > max_age_qpc) {
+                    if (slot.state.compare_exchange_strong(current_state, STATE_WRITING, std::memory_order_acquire)) {
+                        slot.key.store(0, std::memory_order_relaxed);
+                        slot.state.store(STATE_TOMBSTONE, std::memory_order_release);
+                        ++evicted;
+                    }
+                }
+            }
+        }
+        if (evicted > 0) {
+            unpaired_evictions_.fetch_add(evicted, std::memory_order_relaxed);
+        }
+        return evicted;
+    }
+
+    uint64_t insertion_failures() const noexcept { return insertion_failures_.load(std::memory_order_relaxed); }
+    uint64_t unpaired_evictions() const noexcept { return unpaired_evictions_.load(std::memory_order_relaxed); }
 
 private:
     static constexpr size_t MASK = Capacity - 1;
@@ -147,6 +200,8 @@ private:
     }
 
     Slot slots_[Capacity];
+    alignas(64) std::atomic<uint64_t> insertion_failures_{0};
+    alignas(64) std::atomic<uint64_t> unpaired_evictions_{0};
 };
 
 } // namespace stuttometer

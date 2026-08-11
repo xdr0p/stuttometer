@@ -32,13 +32,25 @@ void FlightRecorder::push(const EtwEventRecord& event) noexcept {
     const size_t slot_idx = static_cast<size_t>(seq & mask_);
     Slot& slot = slots_[slot_idx];
 
-    // Odd sequence indicates write in progress
+    // Wraparound protection: check if producer was delayed and ring wrapped past its ticket
+    const uint64_t cur_head = head_.load(std::memory_order_relaxed);
+    if (cur_head > seq && (cur_head - seq) > capacity_) {
+        dropped_events_.fetch_add(1, std::memory_order_relaxed);
+        return; // Safe abort: do not overwrite newer generation
+    }
+
     const uint64_t writing_seq = (seq * 2) + 1;
     const uint64_t ready_seq   = (seq * 2) + 2;
 
-    slot.sequence.store(writing_seq, std::memory_order_release);
+    // Slot sequence generation CAS to ensure we don't clobber a newer slot
+    uint64_t expected_seq = (seq < capacity_) ? 0 : (((seq - capacity_) * 2) + 2);
+    if (!slot.sequence.compare_exchange_strong(expected_seq, writing_seq, std::memory_order_acq_rel)) {
+        // Slot has already moved to a different generation
+        dropped_events_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
-    // Linear memory copy to prevent instruction reordering
+    // Linear memory copy bounded by seqlock fences
     std::memcpy(&slot.record, &event, sizeof(EtwEventRecord));
 
     // Even sequence indicates payload is ready and valid

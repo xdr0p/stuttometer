@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <mutex>
+#include <chrono>
 
 namespace stuttometer {
 
@@ -47,6 +48,24 @@ bool enable_system_profile_privilege() {
     return (ok && err == ERROR_SUCCESS);
 }
 
+typedef LONG(WINAPI* RtlGetVersionPtr)(OSVERSIONINFOEXW*);
+
+bool is_supported_windows_build() {
+    HMODULE h_ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!h_ntdll) return true;
+
+    auto p_fn = reinterpret_cast<RtlGetVersionPtr>(GetProcAddress(h_ntdll, "RtlGetVersion"));
+    if (!p_fn) return true;
+
+    OSVERSIONINFOEXW vi{};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    if (p_fn(&vi) == 0) { // STATUS_SUCCESS (0)
+        // Windows 10/11 build >= 19041 (20H1 and newer)
+        return (vi.dwMajorVersion > 10) || (vi.dwMajorVersion == 10 && vi.dwBuildNumber >= 19041);
+    }
+    return true;
+}
+
 uint64_t get_qpc_frequency() {
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
@@ -79,28 +98,37 @@ DriverSymbolResolver::DriverSymbolResolver() {
 
 void DriverSymbolResolver::refresh() {
     drivers_.clear();
-    LPVOID drivers[1024];
     DWORD cb_needed = 0;
+    std::vector<LPVOID> drivers(1024);
 
-    if (EnumDeviceDrivers(drivers, sizeof(drivers), &cb_needed) && cb_needed < sizeof(drivers)) {
-        const int num_drivers = cb_needed / sizeof(LPVOID);
-        drivers_.reserve(num_drivers);
-
-        char base_name[MAX_PATH];
-        for (int i = 0; i < num_drivers; ++i) {
-            if (GetDeviceDriverBaseNameA(drivers[i], base_name, sizeof(base_name))) {
-                DriverEntry entry;
-                entry.base_address = reinterpret_cast<uint64_t>(drivers[i]);
-                entry.name = base_name;
-                drivers_.push_back(std::move(entry));
-            }
+    while (true) {
+        if (!EnumDeviceDrivers(drivers.data(), static_cast<DWORD>(drivers.size() * sizeof(LPVOID)), &cb_needed)) {
+            return;
         }
 
-        // Sort descending by base address for binary search
-        std::sort(drivers_.begin(), drivers_.end(), [](const DriverEntry& a, const DriverEntry& b) {
-            return a.base_address > b.base_address;
-        });
+        const size_t num_drivers = cb_needed / sizeof(LPVOID);
+        if (num_drivers <= drivers.size()) {
+            drivers.resize(num_drivers);
+            break;
+        }
+        drivers.resize(num_drivers * 2);
     }
+
+    drivers_.reserve(drivers.size());
+    char base_name[MAX_PATH];
+    for (LPVOID drv : drivers) {
+        if (drv && GetDeviceDriverBaseNameA(drv, base_name, sizeof(base_name))) {
+            DriverEntry entry;
+            entry.base_address = reinterpret_cast<uint64_t>(drv);
+            entry.name = base_name;
+            drivers_.push_back(std::move(entry));
+        }
+    }
+
+    // Sort descending by base address for binary search
+    std::sort(drivers_.begin(), drivers_.end(), [](const DriverEntry& a, const DriverEntry& b) {
+        return a.base_address > b.base_address;
+    });
 }
 
 std::string DriverSymbolResolver::resolve_driver_name(uint64_t routine_address) const {
@@ -117,23 +145,38 @@ std::string DriverSymbolResolver::resolve_driver_name(uint64_t routine_address) 
     );
 
     if (it != drivers_.end()) {
-        return it->name;
+        const size_t index = std::distance(drivers_.begin(), it);
+        const uint64_t upper_bound = (index > 0) ? drivers_[index - 1].base_address : UINT64_MAX;
+
+        // Relative upper bound validation
+        if (routine_address >= it->base_address && routine_address < upper_bound) {
+            return it->name;
+        }
     }
     return "unknown_kernel_address";
 }
+
+struct CachedProcessName {
+    std::string name;
+    std::chrono::steady_clock::time_point cached_at;
+};
 
 std::string get_process_name_by_pid(uint32_t pid) {
     if (pid == 0) return "System Idle";
     if (pid == 4) return "System";
 
-    static std::unordered_map<uint32_t, std::string> cache;
+    static std::unordered_map<uint32_t, CachedProcessName> cache;
     static std::mutex cache_mutex;
+
+    const auto now = std::chrono::steady_clock::now();
 
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
         auto it = cache.find(pid);
         if (it != cache.end()) {
-            return it->second;
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second.cached_at).count() < 5) {
+                return it->second.name;
+            }
         }
     }
 
@@ -156,7 +199,7 @@ std::string get_process_name_by_pid(uint32_t pid) {
 
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        cache[pid] = name;
+        cache[pid] = { name, now };
     }
     return name;
 }

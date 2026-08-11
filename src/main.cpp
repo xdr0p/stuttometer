@@ -11,6 +11,8 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <filesystem>
+#include <set>
 
 static std::atomic<bool> g_stop_requested{false};
 
@@ -64,7 +66,7 @@ static void run_mock_simulation() {
         dpc.tid = 0;
         dpc.cpu_index = 2;
         dpc.duration_us = 3800; // 3.8ms DPC
-        dpc.payload.routine_addr = 0xFFFFF80100000000ULL; // Synthetic address
+        dpc.payload.routine_addr = 0xFFFFF80100000000ULL;
         recorder.push(dpc);
     }
 
@@ -78,11 +80,17 @@ static void run_mock_simulation() {
 
     const uint64_t poll_qpc = trigger_qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
     if (trigger_engine.poll_state(poll_qpc, trigger_info, from_qpc, to_qpc)) {
+        trigger_info.target_process = stuttometer::get_process_name_by_pid(trigger_info.target_pid);
+
         std::cout << "[SIM] Trigger state FROZEN. Extracting snapshot...\n";
         auto snapshot = recorder.snapshot(from_qpc, to_qpc);
         std::cout << "[SIM] Extracted " << snapshot.size() << " events in window. Correlating...\n";
 
-        auto report = correlator.correlate(snapshot, trigger_info, qpc_freq);
+        stuttometer::ProviderContext p_ctx;
+        p_ctx.kernel_dpc_active = true;
+        p_ctx.kernel_cswitch_active = true;
+
+        auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, p_ctx);
         reporter.print_console_summary(report, std::cout, false);
 
         std::cout << "[SIM] Generating sample JSON report:\n";
@@ -111,13 +119,13 @@ int main(int argc, char** argv) {
     bool mock_test = false;
     bool print_version = false;
 
-    app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (default: 250)");
-    app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (default: 30)");
-    app.add_option("--present-threshold-ms", present_threshold_ms, "DXGI Present stutter threshold in ms (default: 25.0)");
+    app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (50-1000, default: 250)");
+    app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (0-200, default: 30)");
+    app.add_option("--present-threshold-ms", present_threshold_ms, "DXGI Present stutter threshold in ms (5-200, default: 25.0)");
     app.add_flag("--audio-trigger,!--no-audio", enable_audio, "Enable/disable AudioGlitch Event ID 11 trigger");
-    app.add_option("--cooldown-ms", cooldown_ms, "Minimum cooldown between reports in ms (default: 1000)");
-    app.add_option("--dpc-threshold-us", dpc_threshold_us, "DPC anomaly threshold in microseconds (default: 1000)");
-    app.add_option("--disk-threshold-ms", disk_threshold_ms, "Disk latency anomaly threshold in ms (default: 20)");
+    app.add_option("--cooldown-ms", cooldown_ms, "Minimum cooldown between reports in ms (100-10000, default: 1000)");
+    app.add_option("--dpc-threshold-us", dpc_threshold_us, "DPC anomaly threshold in microseconds (100-50000, default: 1000)");
+    app.add_option("--disk-threshold-ms", disk_threshold_ms, "Disk latency anomaly threshold in ms (1-1000, default: 20)");
     app.add_option("--target-pid", target_pid, "Target Process ID to monitor (default: auto-detect)");
     app.add_option("--target-process", target_process_name, "Target process name substring (e.g. Game.exe)");
     app.add_option("--output", output_file, "Output file path for JSON reports");
@@ -141,22 +149,62 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // CLI Range and Option Validation
+    if (window_pre_ms < 50.0 || window_pre_ms > 1000.0) {
+        std::cerr << "[STUTTOMETER] Error: --window-ms must be between 50.0 and 1000.0 ms.\n";
+        return 1;
+    }
+    if (window_post_ms < 0.0 || window_post_ms > 200.0) {
+        std::cerr << "[STUTTOMETER] Error: --post-trigger-ms must be between 0.0 and 200.0 ms.\n";
+        return 1;
+    }
+    if (present_threshold_ms < 5.0 || present_threshold_ms > 200.0) {
+        std::cerr << "[STUTTOMETER] Error: --present-threshold-ms must be between 5.0 and 200.0 ms.\n";
+        return 1;
+    }
+    if (cooldown_ms < 100.0 || cooldown_ms > 10000.0) {
+        std::cerr << "[STUTTOMETER] Error: --cooldown-ms must be between 100.0 and 10000.0 ms.\n";
+        return 1;
+    }
+    if (dpc_threshold_us < 100 || dpc_threshold_us > 50000) {
+        std::cerr << "[STUTTOMETER] Error: --dpc-threshold-us must be between 100 and 50000 us.\n";
+        return 1;
+    }
+    if (disk_threshold_ms < 1 || disk_threshold_ms > 1000) {
+        std::cerr << "[STUTTOMETER] Error: --disk-threshold-ms must be between 1 and 1000 ms.\n";
+        return 1;
+    }
+
+    const std::set<std::string> valid_tiers = { "minimal", "standard", "full" };
+    if (valid_tiers.find(provider_tier) == valid_tiers.end()) {
+        std::cerr << "[STUTTOMETER] Error: Invalid --tier '" << provider_tier << "'. Must be 'minimal', 'standard', or 'full'.\n";
+        return 1;
+    }
+
+    if (!output_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(output_dir, ec);
+        if (ec) {
+            std::cerr << "[STUTTOMETER] Error: Failed to create output directory '" << output_dir << "': " << ec.message() << "\n";
+            return 1;
+        }
+    }
+
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
     const bool is_admin = stuttometer::is_running_as_admin();
     if (!is_admin) {
-        std::cout << "\n[STUTTOMETER] Notice: Running in Standard (Non-Elevated) Mode.\n";
-        std::cout << "Kernel ETW providers (DPC, ISR, Disk I/O, Context Switches) require Administrator privileges.\n";
-        std::cout << "To test the diagnostic engine right now, run:\n";
-        std::cout << "  .\\stuttometer.exe --mock-test\n\n";
-        std::cout << "To run full real-time capture against games, please launch PowerShell as Administrator and run:\n";
-        std::cout << "  .\\stuttometer.exe [OPTIONS]\n\n";
-        return 0;
+        std::cerr << "\n[STUTTOMETER] Error: Running in Standard (Non-Elevated) Mode.\n";
+        std::cerr << "Kernel ETW providers (DPC, ISR, Disk I/O, Context Switches) require Administrator privileges.\n";
+        std::cerr << "To test the diagnostic engine without elevation, run:\n";
+        std::cerr << "  .\\stuttometer.exe --mock-test\n\n";
+        std::cerr << "To run live capture, please launch PowerShell as Administrator and run:\n";
+        std::cerr << "  .\\stuttometer.exe [OPTIONS]\n\n";
+        return 1;
     }
 
     stuttometer::enable_system_profile_privilege();
 
-    // Resolve target process name to PID at startup if provided
     if (target_pid == 0 && !target_process_name.empty()) {
         target_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
         if (target_pid != 0) {
@@ -191,9 +239,12 @@ int main(int argc, char** argv) {
 
     stuttometer::EtwSessionManager session_mgr(flight_recorder, trigger_engine, etw_config);
 
-    if (!session_mgr.start()) {
+    const auto start_result = session_mgr.start();
+    if (start_result == stuttometer::SessionStartResult::FAILED) {
         std::cerr << "[STUTTOMETER] Error: Failed to start ETW sessions.\n";
         return 1;
+    } else if (start_result == stuttometer::SessionStartResult::DEGRADED_USER_ONLY) {
+        std::cout << "[STUTTOMETER] Notice: Running in DEGRADED USER-ONLY mode (Kernel trace session unavailable).\n";
     }
 
     std::cout << "[STUTTOMETER] Active. Monitoring DXGI Present latency (> " << present_threshold_ms << "ms)...\n";
@@ -216,20 +267,37 @@ int main(int argc, char** argv) {
         uint64_t from_qpc = 0;
         uint64_t to_qpc = 0;
 
-        // Periodic background process PID refresh (every ~100 iterations = ~1s)
-        if (++loop_counter % 100 == 0 && !target_process_name.empty() && target_pid == 0) {
+        // Continuous background target process monitoring (every ~1s)
+        if (++loop_counter % 100 == 0 && !target_process_name.empty()) {
             uint32_t found_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
-            if (found_pid != 0) {
+            if (found_pid != trigger_engine.active_target_pid()) {
                 target_pid = found_pid;
                 trigger_engine.update_target_pid(target_pid);
-                std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' detected (PID " << target_pid << ")\n";
+                if (target_pid != 0) {
+                    std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' active (PID " << target_pid << ")\n";
+                } else {
+                    std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' closed. Waiting for restart...\n";
+                }
             }
         }
 
         if (trigger_engine.poll_state(current_qpc, trigger_info, from_qpc, to_qpc)) {
+            // Resolve process name asynchronously on correlation thread
+            trigger_info.target_process = stuttometer::get_process_name_by_pid(trigger_info.target_pid);
+
             uint64_t drops = 0;
             auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);
-            auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, drops);
+
+            stuttometer::ProviderContext p_ctx;
+            p_ctx.kernel_dpc_active = (start_result == stuttometer::SessionStartResult::SUCCESS) && etw_config.enable_kernel_dpc;
+            p_ctx.kernel_disk_active = (start_result == stuttometer::SessionStartResult::SUCCESS) && etw_config.enable_kernel_disk;
+            p_ctx.kernel_cswitch_active = (start_result == stuttometer::SessionStartResult::SUCCESS) && etw_config.enable_kernel_cswitch;
+            p_ctx.user_dxgi_active = etw_config.enable_dxgi;
+            p_ctx.user_audio_active = etw_config.enable_audio;
+            p_ctx.etw_events_lost = session_mgr.events_lost();
+            p_ctx.etw_buffers_lost = session_mgr.buffers_lost();
+
+            auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, p_ctx, drops);
             report.window_pre_ms = window_pre_ms;
             report.window_post_ms = window_post_ms;
             report.present_threshold_ms = present_threshold_ms;
@@ -239,11 +307,15 @@ int main(int argc, char** argv) {
             reporter.print_console_summary(report, std::cout, redact);
 
             if (!output_file.empty()) {
-                reporter.save_to_file(report, output_file, redact);
+                if (!reporter.save_to_file(report, output_file, redact)) {
+                    std::cerr << "[STUTTOMETER] Error: Failed to write report to '" << output_file << "'\n";
+                }
             }
             if (!output_dir.empty()) {
                 const std::string path = output_dir + "/stutto_" + std::to_string(current_qpc) + ".json";
-                reporter.save_to_file(report, path, redact);
+                if (!reporter.save_to_file(report, path, redact)) {
+                    std::cerr << "[STUTTOMETER] Error: Failed to write report to '" << path << "'\n";
+                }
             }
 
             trigger_engine.on_report_completed(stuttometer::get_current_qpc());

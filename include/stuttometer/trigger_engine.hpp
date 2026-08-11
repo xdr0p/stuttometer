@@ -3,7 +3,7 @@
 #include <string>
 #include <cstdint>
 #include <atomic>
-#include <mutex>
+#include <string_view>
 
 namespace stuttometer {
 
@@ -28,7 +28,8 @@ enum class TriggerState : uint8_t {
     TRIGGERED       = 1,
     COLLECTING_POST = 2,
     FROZEN          = 3,
-    COOLDOWN        = 4
+    COOLDOWN        = 4,
+    CLAIMED         = 5
 };
 
 struct TriggerInfo {
@@ -55,20 +56,19 @@ public:
     explicit TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq);
     ~TriggerEngine() = default;
 
-    // Evaluates DXGI present latency; returns true if it initiated a new trigger (zero syscalls)
+    // Evaluates DXGI present latency (lock-free, zero-allocation, noexcept)
     bool on_dxgi_present(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc) noexcept;
 
-    // Evaluates AudioGlitch event; returns true if it initiated a new trigger (zero syscalls)
+    // Evaluates AudioGlitch event (lock-free, zero-allocation, noexcept)
     bool on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc) noexcept;
 
-    // Polls the state machine. When a capture window is finalized (FROZEN), returns true
-    // and populates out_trigger, out_from_qpc, and out_to_qpc.
+    // Polls the state machine (called from analysis thread)
     bool poll_state(uint64_t current_qpc, TriggerInfo& out_trigger, uint64_t& out_from_qpc, uint64_t& out_to_qpc);
 
     // Notifies that analysis/reporting is done, moving state to COOLDOWN
-    void on_report_completed(uint64_t current_qpc);
+    void on_report_completed(uint64_t current_qpc) noexcept;
 
-    // Dynamically update the active target PID from the background watcher (zero lock contention)
+    // Dynamically update the active target PID from the background watcher
     void update_target_pid(uint32_t pid) noexcept {
         active_target_pid_.store(pid, std::memory_order_release);
     }
@@ -86,21 +86,23 @@ private:
         return (target == 0 || target == pid);
     }
 
-    void initiate_trigger(TriggerSource src, uint64_t timestamp_qpc, double duration_ms, uint32_t pid, uint32_t tid);
+    bool initiate_trigger_atomic(TriggerSource src, uint64_t timestamp_qpc, double duration_ms, uint32_t pid, uint32_t tid) noexcept;
 
     const TriggerConfig config_;
     const uint64_t qpc_freq_;
     const uint64_t pre_window_qpc_;
     const uint64_t post_window_qpc_;
     const uint64_t cooldown_qpc_;
+    const uint64_t watchdog_qpc_;
 
     std::atomic<uint32_t> active_target_pid_{0};
     std::atomic<TriggerState> state_{TriggerState::ARMED};
     std::atomic<uint64_t> suppressed_triggers_{0};
 
-    std::mutex trigger_mutex_;
+    // Stored trigger metadata populated under CLAIMED state
     TriggerInfo active_trigger_{};
     uint64_t post_target_qpc_{0};
+    uint64_t frozen_timestamp_qpc_{0};
     uint64_t cooldown_target_qpc_{0};
 };
 

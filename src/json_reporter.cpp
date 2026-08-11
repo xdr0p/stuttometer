@@ -3,6 +3,8 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <cmath>
+#include <algorithm>
 
 namespace stuttometer {
 
@@ -28,14 +30,14 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
         {"redacted", redact}
     };
 
-    // Trigger metadata
+    // Trigger metadata (with deep redaction)
     root["trigger"] = {
         {"source", trigger_source_to_string(report.trigger.source)},
         {"trigger_timestamp_qpc", report.trigger.trigger_timestamp_qpc},
         {"duration_ms", report.trigger.duration_ms},
-        {"target_pid", report.trigger.target_pid},
-        {"target_tid", report.trigger.target_tid},
-        {"target_process", redact ? ("Process_" + std::to_string(report.trigger.target_pid)) : report.trigger.target_process}
+        {"target_pid", redact ? 0 : report.trigger.target_pid},
+        {"target_tid", redact ? 0 : report.trigger.target_tid},
+        {"target_process", redact ? "Process_REDACTED" : report.trigger.target_process}
     };
 
     // Diagnoses & Evidence
@@ -77,6 +79,7 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
         {"total_events_in_window", report.total_events},
         {"events_by_category", {
             {"DXGI", report.event_counts.dxgi},
+            {"AUDIO", report.event_counts.audio},
             {"DPC", report.event_counts.dpc},
             {"ISR", report.event_counts.isr},
             {"DISK", report.event_counts.disk},
@@ -84,7 +87,9 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
             {"PROFILE", report.event_counts.profile}
         }},
         {"ring_buffer_dropped_events", report.dropped_events},
-        {"in_flight_unpaired_evictions", report.unpaired_evictions}
+        {"in_flight_unpaired_evictions", report.unpaired_evictions},
+        {"etw_events_lost_upstream", report.etw_events_lost},
+        {"etw_buffers_lost_upstream", report.etw_buffers_lost}
     };
 
     return root;
@@ -100,19 +105,25 @@ bool JsonReporter::save_to_file(const DiagnosticReport& report, const std::strin
         return false;
     }
     out << to_json_string(report, redact, 2);
-    return true;
+    out.flush();
+    return out.good();
 }
 
 void JsonReporter::print_console_summary(const DiagnosticReport& report, std::ostream& out, bool redact) const {
-    const std::string proc_name = redact ? ("Process_" + std::to_string(report.trigger.target_pid)) : report.trigger.target_process;
+    const std::string proc_name = redact ? "Process_REDACTED" : report.trigger.target_process;
 
     out << "\n================================================================================\n";
     out << " [STUTTOMETER REPORT] Stutter Anomaly Detected at " << report.timestamp_utc << "\n";
     out << "================================================================================\n";
     out << " Trigger Source : " << trigger_source_to_string(report.trigger.source) << "\n";
-    out << " Process        : " << proc_name << " (PID " << report.trigger.target_pid << ", TID " << report.trigger.target_tid << ")\n";
+    if (redact) {
+        out << " Process        : Process_REDACTED\n";
+    } else {
+        out << " Process        : " << proc_name << " (PID " << report.trigger.target_pid << ", TID " << report.trigger.target_tid << ")\n";
+    }
     out << " Duration       : " << std::fixed << std::setprecision(2) << report.trigger.duration_ms << " ms\n";
-    out << " Captured Events: " << report.total_events << " events (Drops: " << report.dropped_events << ")\n";
+    out << " Captured Events: " << report.total_events << " events (Drops: " << report.dropped_events 
+        << ", Upstream ETW Loss: " << report.etw_events_lost << ")\n";
     out << "--------------------------------------------------------------------------------\n";
     out << " RANKED ROOT CAUSE HYPOTHESES:\n";
 

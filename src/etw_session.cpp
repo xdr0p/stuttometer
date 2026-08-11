@@ -2,6 +2,7 @@
 #include "stuttometer/privilege_utils.hpp"
 #include <iostream>
 #include <chrono>
+#include <vector>
 
 namespace stuttometer {
 
@@ -28,12 +29,18 @@ EtwSessionManager::~EtwSessionManager() {
     g_active_manager.store(nullptr, std::memory_order_release);
 }
 
-bool EtwSessionManager::start() {
+SessionStartResult EtwSessionManager::start() {
     if (running_.load(std::memory_order_acquire)) {
-        return true;
+        return SessionStartResult::SUCCESS;
+    }
+
+    if (!is_supported_windows_build()) {
+        std::cerr << "[ETW] Warning: Windows build is older than 19041 or unrecognized. Kernel MOF parsing may be degraded.\n";
     }
 
     const size_t prop_size = sizeof(EVENT_TRACE_PROPERTIES) + 1024;
+    bool user_started = false;
+    bool kernel_started = false;
 
     // 1. Configure User-Mode Trace Session (DXGI & Audio)
     if (config_.enable_dxgi || config_.enable_audio) {
@@ -43,19 +50,19 @@ bool EtwSessionManager::start() {
         p_user_props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
         p_user_props->Wnode.ClientContext = 1; // QPC Clock
         p_user_props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        p_user_props->FlushTimer = 1;          // 1 second (active worker flushes every 30ms)
-        p_user_props->BufferSize = 64;         // 64 KB buffers
+        p_user_props->FlushTimer = 1;
+        p_user_props->BufferSize = 64;
         p_user_props->MinimumBuffers = 16;
         p_user_props->MaximumBuffers = 64;
         p_user_props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
 
-        // Clean up stale user session if previously left open
         ControlTraceW(0, USER_SESSION_NAME, p_user_props, EVENT_TRACE_CONTROL_STOP);
 
         ULONG status = StartTraceW(&user_session_handle_, USER_SESSION_NAME, p_user_props);
         if (status != ERROR_SUCCESS) {
             std::cerr << "[ETW] Warning: Failed to start User Trace Session (Error " << status << ")\n";
         } else {
+            user_started = true;
             if (config_.enable_dxgi) {
                 EnableTraceEx2(user_session_handle_, &DXGI_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
                                TRACE_LEVEL_INFORMATION, 0xFFFFFFFFFFFFFFFF, 0, 0, nullptr);
@@ -97,7 +104,6 @@ bool EtwSessionManager::start() {
         }
         p_kernel_props->EnableFlags = flags;
 
-        // Non-destructive check: query if NT Kernel Logger is already active
         ULONG query_status = ControlTraceW(0, KERNEL_SESSION_NAME, p_kernel_props, EVENT_TRACE_CONTROL_QUERY);
         if (query_status == ERROR_SUCCESS) {
             std::cerr << "[ETW] Notice: NT Kernel Logger is currently active on the system.\n";
@@ -107,17 +113,20 @@ bool EtwSessionManager::start() {
         if (status == ERROR_ALREADY_EXISTS) {
             std::cerr << "[ETW] Warning: NT Kernel Logger session already owned by another tool (e.g. WPA/Antivirus).\n";
         } else if (status != ERROR_SUCCESS) {
-            std::cerr << "[ETW] Warning: Failed to start Kernel Trace Session (Error " << status 
-                      << "). Note: Kernel tracing requires Administrator elevation.\n";
+            std::cerr << "[ETW] Warning: Failed to start Kernel Trace Session (Error " << status << ").\n";
+        } else {
+            kernel_started = true;
         }
+    }
+
+    if (!user_started && !kernel_started) {
+        return SessionStartResult::FAILED;
     }
 
     running_.store(true, std::memory_order_release);
 
-    // 3. Launch background active flush worker
     flush_worker_thread_ = std::thread(&EtwSessionManager::active_flush_worker_loop, this);
 
-    // 4. Launch consumer threads
     if (user_session_handle_) {
         user_consumer_thread_ = std::thread(&EtwSessionManager::user_trace_consumer_loop, this);
     }
@@ -125,7 +134,11 @@ bool EtwSessionManager::start() {
         kernel_consumer_thread_ = std::thread(&EtwSessionManager::kernel_trace_consumer_loop, this);
     }
 
-    return true;
+    if (!kernel_started && (config_.enable_kernel_dpc || config_.enable_kernel_disk || config_.enable_kernel_cswitch)) {
+        return SessionStartResult::DEGRADED_USER_ONLY;
+    }
+
+    return SessionStartResult::SUCCESS;
 }
 
 void EtwSessionManager::stop() {
@@ -133,7 +146,6 @@ void EtwSessionManager::stop() {
         return;
     }
 
-    // Close trace processing handles to unblock ProcessTrace loops
     if (user_trace_handle_ != INVALID_PROCESSTRACE_HANDLE) {
         CloseTrace(user_trace_handle_);
         user_trace_handle_ = INVALID_PROCESSTRACE_HANDLE;
@@ -143,7 +155,6 @@ void EtwSessionManager::stop() {
         kernel_trace_handle_ = INVALID_PROCESSTRACE_HANDLE;
     }
 
-    // Wait for consumer threads to finish
     if (flush_worker_thread_.joinable()) {
         flush_worker_thread_.join();
     }
@@ -154,7 +165,6 @@ void EtwSessionManager::stop() {
         kernel_consumer_thread_.join();
     }
 
-    // Stop ETW trace sessions
     const size_t prop_size = sizeof(EVENT_TRACE_PROPERTIES) + 1024;
     std::vector<uint8_t> buffer(prop_size, 0);
     auto p_props = reinterpret_cast<PEVENT_TRACE_PROPERTIES>(buffer.data());
@@ -162,10 +172,13 @@ void EtwSessionManager::stop() {
 
     if (user_session_handle_) {
         ControlTraceW(user_session_handle_, USER_SESSION_NAME, p_props, EVENT_TRACE_CONTROL_STOP);
+        events_lost_.fetch_add(p_props->EventsLost, std::memory_order_relaxed);
         user_session_handle_ = 0;
     }
     if (kernel_session_handle_) {
         ControlTraceW(kernel_session_handle_, KERNEL_SESSION_NAME, p_props, EVENT_TRACE_CONTROL_STOP);
+        events_lost_.fetch_add(p_props->EventsLost, std::memory_order_relaxed);
+        buffers_lost_.fetch_add(p_props->RealTimeBuffersLost, std::memory_order_relaxed);
         kernel_session_handle_ = 0;
     }
 }
@@ -177,6 +190,9 @@ void EtwSessionManager::active_flush_worker_loop() {
     p_props->Wnode.BufferSize = static_cast<ULONG>(prop_size);
 
     const auto interval = std::chrono::milliseconds(config_.flush_interval_ms);
+    const uint64_t max_age_qpc = ms_to_qpc_delta(500.0, qpc_freq_); // 500ms stale TTL
+
+    uint32_t loop_counter = 0;
 
     while (running_.load(std::memory_order_relaxed)) {
         if (user_session_handle_) {
@@ -184,7 +200,22 @@ void EtwSessionManager::active_flush_worker_loop() {
         }
         if (kernel_session_handle_) {
             ControlTraceW(kernel_session_handle_, KERNEL_SESSION_NAME, p_props, EVENT_TRACE_CONTROL_FLUSH);
+            if (p_props->EventsLost > 0) {
+                events_lost_.store(p_props->EventsLost, std::memory_order_relaxed);
+            }
+            if (p_props->RealTimeBuffersLost > 0) {
+                buffers_lost_.store(p_props->RealTimeBuffersLost, std::memory_order_relaxed);
+            }
         }
+
+        // Periodic background-driven table eviction every ~500ms (zero hot-path latency)
+        if (++loop_counter % 16 == 0) {
+            const uint64_t current_qpc = get_current_qpc();
+            in_flight_present_.evict_stale(current_qpc, max_age_qpc, [](const PresentInFlight& p) { return p.start_qpc; });
+            in_flight_disk_.evict_stale(current_qpc, max_age_qpc, [](const DiskInFlight& d) { return d.start_qpc; });
+            in_flight_threads_.evict_stale(current_qpc, max_age_qpc, [](uint64_t ts) { return ts; });
+        }
+
         std::this_thread::sleep_for(interval);
     }
 }
@@ -232,21 +263,19 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
     rec.cpu_index = cpu;
     rec.event_id = event_id;
 
-    // Check Provider GUID
+    // 1. DXGI Provider Events
     if (IsEqualGUID(p_event->EventHeader.ProviderId, DXGI_PROVIDER_GUID)) {
         rec.category = static_cast<uint16_t>(EventCategory::DXGI);
         
-        // Extract swapchain pointer from payload if present
         uint64_t swapchain_ptr = 0;
         if (p_event->UserDataLength >= 8) {
             swapchain_ptr = *reinterpret_cast<const uint64_t*>(p_event->UserData);
         }
-        const uint64_t present_key = (static_cast<uint64_t>(tid) << 32) | (swapchain_ptr & 0xFFFFFFFF);
+        const uint64_t present_key = (static_cast<uint64_t>(tid) << 32) ^ (swapchain_ptr ? swapchain_ptr : 0xDEADBEEFULL);
 
-        // Event ID 42 (Present Start), 43 (Present Stop)
-        if (event_id == 42 || opcode == 1) { // Start
+        if (event_id == 42 || opcode == 1) { // Present Start
             mgr->in_flight_present_.insert(present_key, { timestamp, pid, tid });
-        } else if (event_id == 43 || opcode == 2) { // Stop
+        } else if (event_id == 43 || opcode == 2) { // Present Stop
             PresentInFlight present_data{};
             if (mgr->in_flight_present_.find_and_erase(present_key, present_data)) {
                 if (timestamp >= present_data.start_qpc) {
@@ -258,6 +287,7 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         }
         mgr->flight_recorder_.push(rec);
     }
+    // 2. Audio Provider Events
     else if (IsEqualGUID(p_event->EventHeader.ProviderId, AUDIO_PROVIDER_GUID)) {
         rec.category = static_cast<uint16_t>(EventCategory::AUDIO);
         if (event_id == 11) { // AudioGlitch
@@ -267,13 +297,12 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         }
         mgr->flight_recorder_.push(rec);
     }
+    // 3. NT Kernel Logger Events
     else {
-        // Kernel Provider Events (HookId / Opcode parsing)
-        // DPC completion
+        // DPC Completion
         if (opcode == 69 || (p_event->EventHeader.EventDescriptor.Task == 1 && opcode == 2)) {
             rec.category = static_cast<uint16_t>(EventCategory::DPC);
             if (p_event->UserDataLength >= 16) {
-                // Layout: InitialTime (uint64), Routine (uint64)
                 const uint64_t initial_time = *reinterpret_cast<const uint64_t*>(p_event->UserData);
                 const uint64_t routine = *reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(p_event->UserData) + 8);
                 rec.payload.routine_addr = routine;
@@ -283,7 +312,7 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
             }
             mgr->flight_recorder_.push(rec);
         }
-        // ISR completion
+        // ISR Completion
         else if (opcode == 67 || (p_event->EventHeader.EventDescriptor.Task == 2 && opcode == 2)) {
             rec.category = static_cast<uint16_t>(EventCategory::ISR);
             if (p_event->UserDataLength >= 16) {
@@ -319,7 +348,6 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
                 rec.tid = new_tid;
                 rec.payload.cswitch.prev_tid = old_tid;
 
-                // State 5 = Waiting, WaitMode 1 = UserMode -> Voluntary switch
                 if (old_state == 5 || old_wait_mode == 1) {
                     rec.flags |= EventFlags::CSWITCH_VOLUNTARY;
                 }
@@ -331,38 +359,36 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
             rec.category = static_cast<uint16_t>(EventCategory::DISK);
 
             if (opcode == 12 || opcode == 13) {
-                // Disk I/O Init: record IRP with initiating PID/TID
+                // Disk I/O Init: extract Irp (offset 0) and IssuingThreadId (offset 8)
                 if (p_event->UserDataLength >= 16) {
                     const uint64_t irp = *reinterpret_cast<const uint64_t*>(p_event->UserData);
-                    const uint32_t size_bytes = (p_event->UserDataLength >= 24)
-                        ? *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p_event->UserData) + 16) : 0;
-                    mgr->in_flight_disk_.insert(irp, { timestamp, pid, tid, size_bytes, (opcode == 13) });
+                    mgr->in_flight_disk_.insert(irp, { timestamp, pid, tid, 0, (opcode == 13) });
                 }
             } else if (opcode == 10 || opcode == 11) {
-                // Disk I/O Complete: pair with Init to map true initiating process
+                // Disk I/O Complete: Irp at offset 8, TransferSize at offset 24, ElapsedTime at offset 28
                 if (opcode == 11) {
                     rec.flags |= EventFlags::DISK_IS_WRITE;
                 }
-                if (p_event->UserDataLength >= 8) {
-                    const uint64_t irp = *reinterpret_cast<const uint64_t*>(p_event->UserData);
-                    DiskInFlight disk_data{};
+                if (p_event->UserDataLength >= 32) {
+                    const uint64_t irp = *reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(p_event->UserData) + 8);
+                    const uint32_t size_bytes = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p_event->UserData) + 24);
+                    rec.payload.file_key = irp;
+                    rec.auxiliary_data = size_bytes;
 
+                    DiskInFlight disk_data{};
                     if (mgr->in_flight_disk_.find_and_erase(irp, disk_data)) {
                         rec.pid = disk_data.pid;
                         rec.tid = disk_data.tid;
                         if (timestamp >= disk_data.start_qpc) {
                             rec.duration_us = static_cast<uint32_t>(qpc_delta_to_us(timestamp - disk_data.start_qpc, mgr->qpc_freq_));
                         }
-                        rec.auxiliary_data = disk_data.size;
                         if (disk_data.is_write) {
                             rec.flags |= EventFlags::DISK_IS_WRITE;
                         }
                     } else {
-                        // Graceful fallback for unpaired completions
+                        // Fallback: read ElapsedTime directly
                         rec.pid = 0;
-                        if (p_event->UserDataLength >= 28) {
-                            rec.duration_us = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p_event->UserData) + 20);
-                        }
+                        rec.duration_us = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p_event->UserData) + 28);
                     }
                 }
                 mgr->flight_recorder_.push(rec);
