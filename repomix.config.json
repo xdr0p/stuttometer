@@ -1,0 +1,16 @@
+{
+  "output": {
+    "filePath": "codebase.txt",
+    "style": "xml"
+  },
+  "ignore": {
+    "customPatterns": [
+      "split_codebase.*",
+      "repomix.config.json",
+      "codebase*.txt",
+      "build/**",
+      "out/**",
+      "*.etl"
+    ]
+  }
+}

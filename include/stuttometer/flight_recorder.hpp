@@ -4,7 +4,6 @@
 #include <atomic>
 #include <vector>
 #include <memory>
-#include <algorithm>
 #include <cstdint>
 
 namespace stuttometer {
@@ -48,7 +47,7 @@ private:
     const size_t mask_;
     std::unique_ptr<Slot[]> slots_;
     alignas(64) std::atomic<uint64_t> head_{0};
-    alignas(64) mutable std::atomic<uint64_t> dropped_events_{0};
+    alignas(64) std::atomic<uint64_t> dropped_events_{0};
 };
 
 } // namespace stuttometer

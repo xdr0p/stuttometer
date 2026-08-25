@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Pure Transparent Background (No Squircle Box) -->
+  <g id="pure-sm-letters" transform="translate(14, 0)">
+    <!-- Bold 'S' in Crisp Pure White (#FFFFFF) -->
+    <path d="M 86 206 C 86 148 128 116 195 116 C 260 116 298 147 302 198 L 241 204 C 238 174 221 158 195 158 C 169 158 152 173 152 196 C 152 220 167 232 209 245 C 268 263 304 287 304 343 C 304 403 262 438 190 438 C 120 438 80 398 76 340 L 137 334 C 140 368 160 394 190 394 C 220 394 239 377 239 349 C 239 323 222 310 181 296 C 120 276 86 253 86 206 Z" fill="#FFFFFF"/>
+
+    <!-- 'M' in Stuttometer Fluent Emerald (#10B981) -->
+    <path d="M 318 118 L 366 118 C 365 174 357 218 350 248 L 412 376 L 474 248 C 467 218 459 174 458 118 L 506 118 L 506 438 L 456 438 L 456 242 L 412 338 L 368 242 L 368 438 L 318 438 Z" fill="#10B981"/>
+  </g>
+</svg>
