@@ -61,7 +61,6 @@ add_library(stuttometer_core STATIC
   src/correlator.cpp
   src/json_reporter.cpp
   src/privilege_utils.cpp
-  src/mock_simulation.cpp
 )
 
 target_include_directories(stuttometer_core

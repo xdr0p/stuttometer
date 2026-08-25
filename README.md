@@ -53,13 +53,12 @@ Buffer capacity can be adjusted with `--buffer-slots` (65,536 to 1,048,576).
 
 ---
 
-## Requirements & Building
+## Building
 
-- **OS:** Windows 10 or Windows 11 (x64)
-- **Compiler / Toolchain:** Visual Studio 2022 (MSVC C++20) and CMake 3.25+
-- **Privileges:** Administrator elevation for live kernel ETW tracing (`SeSystemProfilePrivilege`)
-
-### Build Commands
+### Prerequisites
+- Windows 10 or Windows 11 (x64)
+- Visual Studio 2022 (MSVC C++20) with C++ Desktop workload
+- CMake 3.25+
 
 ```powershell
 # Configure CMake
@@ -67,21 +66,20 @@ cmake -S . -B build
 
 # Build Release binaries
 cmake --build build --config Release
-```
 
-### Running Tests (Unprivileged)
-
-The test suite runs synthetic traces and JSON schema validations without requiring administrative privileges:
-
-```powershell
+# (Optional) Run unit test suite
 ctest --test-dir build -C Release --output-on-failure
 ```
+
+The build produces two executables:
+- `build\Release\stuttometer_gui.exe` (Standalone Win32 GUI dashboard)
+- `build\Release\stuttometer.exe` (Command-line diagnostic utility)
 
 ---
 
 ## Desktop GUI (`stuttometer_gui.exe`)
 
-Stuttometer includes a standalone native Win32 GUI (`build\Release\stuttometer_gui.exe`, ~1.2 MB) built on Common Controls v6 with zero external runtime dependencies.
+Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Controls v6 with zero external runtime dependencies.
 
 - **Stutter Inspector:** Live report feed with ranked root-cause diagnoses, confidence score meters, and evidence timelines.
 - **Process Picker:** Discovers running graphical games and applications via `EnumWindows`.
@@ -107,12 +105,9 @@ Live capture requires an elevated terminal (`Run as Administrator`):
 
 # Target a specific Process ID:
 .\build\Release\stuttometer.exe --target-pid 12345 --output-dir reports
-
-# Run synthetic trace simulation (no admin needed):
-.\build\Release\stuttometer.exe --mock-test
 ```
 
-### Complete CLI Options
+### CLI Options
 
 ```text
 Capture Window:
@@ -151,7 +146,6 @@ Targeting, Output & General:
   --tier TEXT                     Provider tier: minimal, standard, full (default: standard)
   --redact                        Redact process names, file paths, and user identifiers
   --verbose                       Print detailed event stream metrics to console
-  --mock-test                     Run internal synthetic trace simulation suite
   --version                       Print version information and exit
 ```
 

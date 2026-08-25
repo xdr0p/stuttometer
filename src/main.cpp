@@ -36,19 +36,6 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
     return FALSE;
 }
 
-#include "stuttometer/mock_simulation.hpp"
-
-static void run_mock_simulation(bool redact = false) {
-    std::cout << "\n================================================================================\n";
-    std::cout << " [STUTTOMETER] Running Synthetic Stutter Simulation Test (Non-Elevated Mode)\n";
-    std::cout << "================================================================================\n\n";
-
-    auto sim_result = stuttometer::run_mock_simulation_pipeline(redact);
-    std::cout << sim_result.summary_text << "\n";
-    std::cout << "[SIM] Generating sample JSON report:\n";
-    std::cout << sim_result.json_text << "\n";
-}
-
 int main(int argc, char** argv) {
     CLI::App app{"Stuttometer - Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"};
 
@@ -76,7 +63,6 @@ int main(int argc, char** argv) {
     std::string provider_tier = "standard";
     bool redact = false;
     bool verbose = false;
-    bool mock_test = false;
     bool print_version = false;
     std::string trigger_mode_str = "hybrid";
     double spike_multiplier = 2.0;
@@ -113,18 +99,12 @@ int main(int argc, char** argv) {
     app.add_option("--tier", provider_tier, "Provider tier: minimal, standard, full (default: standard)");
     app.add_flag("--redact", redact, "Redact process names, file paths, and user identifiers");
     app.add_flag("--verbose", verbose, "Print detailed event stream metrics to console");
-    app.add_flag("--mock-test", mock_test, "Run internal synthetic trace simulation suite");
     app.add_flag("--version", print_version, "Print version information and exit");
 
     CLI11_PARSE(app, argc, argv);
 
     if (print_version) {
         std::cout << "Stuttometer v0.1.0\n";
-        return 0;
-    }
-
-    if (mock_test) {
-        run_mock_simulation(redact);
         return 0;
     }
 
