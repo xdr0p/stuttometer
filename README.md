@@ -164,3 +164,10 @@ Targeting, Output & General:
 - **Platform & Privileges:** Windows 10/11 x64 only. Live tracing strictly requires administrator privileges.
 - **Heuristic Confidence:** Root-cause rankings are probabilistic correlation heuristics designed as high-signal starting points for investigation.
 - **Scope:** Stuttometer identifies root causes and isolates culpable subsystems; it does not alter driver behavior, inject into game processes, or modify system scheduler priorities.
+
+---
+
+## License
+
+This project is licensed under the **GNU General Public License v3.0** (GPLv3). See the [LICENSE](LICENSE) file for the full text.
+
