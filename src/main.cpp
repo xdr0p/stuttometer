@@ -399,6 +399,7 @@ int main(int argc, char** argv) {
                 p_ctx.user_antimalware_active = session_mgr.is_user_session_active() && etw_config.enable_antimalware;
                 p_ctx.user_d3d12_active = session_mgr.is_user_session_active() && etw_config.enable_d3d12;
                 p_ctx.user_vram_paging_active = session_mgr.is_user_session_active() && etw_config.enable_dxgkrnl;
+                // Note: Kernel-Memory provider runs on the user trace session, not the NT Kernel Logger
                 p_ctx.kernel_memory_active = session_mgr.is_user_session_active() && etw_config.enable_kernel_memory;
                 p_ctx.etw_events_lost = session_mgr.events_lost();
                 p_ctx.etw_buffers_lost = session_mgr.buffers_lost();

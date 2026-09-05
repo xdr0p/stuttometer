@@ -88,32 +88,47 @@ inline double calculate_stddev_ms(const RollingFrameStats& stats) noexcept {
     return std::sqrt(var_us) / 1000.0;
 }
 
+struct CadenceDeltaResult {
+    int32_t delta_us{0};
+    bool is_alternating{false};
+};
+
+inline CadenceDeltaResult calculate_cadence_delta(
+    const RollingFrameStats& stats,
+    uint32_t dur_us,
+    double swing_ratio
+) noexcept {
+    if (stats.sample_count == 0) return {};
+    const uint16_t prev_idx = (stats.write_idx - 1) & 63;
+    const uint32_t prev_dur = stats.durations_us[prev_idx];
+    const int32_t delta = static_cast<int32_t>(dur_us) - static_cast<int32_t>(prev_dur);
+
+    const double mean_us = static_cast<double>(stats.sum_dur_us) / stats.sample_count;
+    const double swing_threshold_us = mean_us * swing_ratio;
+
+    bool is_alt = false;
+    if (std::abs(delta) >= swing_threshold_us && stats.last_delta_us != 0) {
+        const bool sign_curr = (delta > 0);
+        const bool sign_prev = (stats.last_delta_us > 0);
+        is_alt = (sign_curr != sign_prev);
+    }
+    return { delta, is_alt };
+}
+
 // Pushes a non-stuttering clean frame into the rolling window
 inline void push_clean_frame(RollingFrameStats& stats, uint32_t dur_us, uint64_t qpc_ts, double swing_ratio = 0.35) noexcept {
     if (dur_us == 0) return;
 
     if (stats.sample_count > 0) {
-        const uint16_t prev_idx = (stats.write_idx - 1) & 63;
-        const uint32_t prev_dur = stats.durations_us[prev_idx];
-        const int32_t delta = static_cast<int32_t>(dur_us) - static_cast<int32_t>(prev_dur);
-
-        const double mean_us = static_cast<double>(stats.sum_dur_us) / stats.sample_count;
-        const double swing_threshold_us = mean_us * swing_ratio;
-
-        if (std::abs(delta) >= swing_threshold_us && stats.last_delta_us != 0) {
-            const bool sign_curr = (delta > 0);
-            const bool sign_prev = (stats.last_delta_us > 0);
-            if (sign_curr != sign_prev) {
-                if (stats.alternating_cadence_count < 255) {
-                    ++stats.alternating_cadence_count;
-                }
-            } else {
-                stats.alternating_cadence_count = 0;
+        const auto cadence = calculate_cadence_delta(stats, dur_us, swing_ratio);
+        if (cadence.is_alternating) {
+            if (stats.alternating_cadence_count < 255) {
+                ++stats.alternating_cadence_count;
             }
         } else {
             stats.alternating_cadence_count = 0;
         }
-        stats.last_delta_us = delta;
+        stats.last_delta_us = cadence.delta_us;
     } else {
         stats.last_delta_us = 0;
         stats.alternating_cadence_count = 0;
@@ -225,25 +240,13 @@ inline FramePacingResult evaluate_frame_pacing(
 
         // 2. Cadence Judder Check: >= 3 sign alternations (4 consecutive oscillating deltas)
         if (enable_judder && stats.sample_count > 0) {
-            const uint16_t prev_idx = (stats.write_idx - 1) & 63;
-            const uint32_t prev_dur = stats.durations_us[prev_idx];
-            const double current_dur_us = dur_ms * 1000.0;
-            const double delta = current_dur_us - static_cast<double>(prev_dur);
-            const double mean_us = mean_ms * 1000.0;
-            const double swing_threshold_us = mean_us * judder_swing_ratio;
-
-            if (std::abs(delta) >= swing_threshold_us && stats.last_delta_us != 0) {
-                const bool sign_curr = (delta > 0);
-                const bool sign_prev = (stats.last_delta_us > 0);
-                if (sign_curr != sign_prev) {
-                    if ((stats.alternating_cadence_count + 1) >= 3) {
-                        res.is_stutter = true;
-                        res.reason = TriggerReason::CADENCE_JUDDER;
-                        stats.last_delta_us = 0;
-                        stats.alternating_cadence_count = 0;
-                        return res;
-                    }
-                }
+            const auto cadence = calculate_cadence_delta(stats, static_cast<uint32_t>(dur_ms * 1000.0), judder_swing_ratio);
+            if (cadence.is_alternating && (stats.alternating_cadence_count + 1) >= 3) {
+                res.is_stutter = true;
+                res.reason = TriggerReason::CADENCE_JUDDER;
+                stats.last_delta_us = 0;
+                stats.alternating_cadence_count = 0;
+                return res;
             }
         }
     }

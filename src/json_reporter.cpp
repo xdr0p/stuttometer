@@ -99,6 +99,11 @@ static std::string redact_paths_and_usernames_in_text(std::string_view text) {
     return result;
 }
 
+// Redacts a positive integer ID (e.g. PID or TID) from free-form text strings while preserving:
+// 1. Larger numbers where the ID is just a substring of digits (e.g. TID 12 inside 51234 or 12000 bytes)
+// 2. Floating point / decimal numbers (e.g. 12.5ms or 3.12ms)
+// 3. Hexadecimal addresses or constants (e.g. 0x12ABCD00 or 0xFFFFF801000012FF)
+// 4. Negative numbers / offsets (e.g. -12ms where 12 is TID, but preserving hyphenated names like Thread-12)
 static std::string redact_id_in_text(std::string_view text, uint32_t id) {
     if (id == 0 || text.empty()) return std::string(text);
     const std::string id_str = std::to_string(id);
@@ -113,7 +118,8 @@ static std::string redact_id_in_text(std::string_view text, uint32_t id) {
             break;
         }
 
-        // Check previous context: must not be a hex/dec digit, 0x prefix, or '.' preceded by a digit
+        // Check previous context: must not be a hex/dec digit, 0x prefix, '.' preceded by a digit,
+        // or a unary minus for a negative number (e.g. "-12ms" or "offset: -12")
         bool prev_ok = true;
         if (match_pos > 0) {
             unsigned char prev_c = static_cast<unsigned char>(text[match_pos - 1]);
@@ -123,6 +129,18 @@ static std::string redact_id_in_text(std::string_view text, uint32_t id) {
                 prev_ok = false;
             } else if ((prev_c == 'x' || prev_c == 'X') && match_pos > 1 && text[match_pos - 2] == '0') {
                 prev_ok = false;
+            } else if (prev_c == '-') {
+                // If '-' is a unary minus (preceded by start of string, whitespace, or non-alphanumeric punctuation),
+                // treat as a negative numerical value, not a PID/TID. If preceded by alphanumeric (e.g. "Thread-12"),
+                // it is a hyphenated ID and should be redacted.
+                if (match_pos == 1) {
+                    prev_ok = false;
+                } else {
+                    unsigned char before_minus = static_cast<unsigned char>(text[match_pos - 2]);
+                    if (!std::isalnum(before_minus)) {
+                        prev_ok = false;
+                    }
+                }
             }
         }
 

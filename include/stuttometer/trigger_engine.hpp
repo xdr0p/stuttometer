@@ -98,7 +98,8 @@ public:
     // Evaluates AudioGlitch event (lock-free, zero-allocation, noexcept)
     bool on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc, uint8_t cpu_index = 0) noexcept;
 
-    // Polls the state machine (called from analysis thread)
+    // Polls the state machine (called exclusively from the single analysis/monitoring thread)
+    // Contract: Exactly one consumer thread must poll poll_state() to maintain single-consumer state transitions.
     bool poll_state(uint64_t current_qpc, TriggerInfo& out_trigger, uint64_t& out_from_qpc, uint64_t& out_to_qpc);
 
     // Notifies that analysis/reporting is done, moving state to COOLDOWN

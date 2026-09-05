@@ -347,9 +347,14 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
     const auto now = std::chrono::steady_clock::now();
     const std::wstring target_wname = utf8_to_utf16(clean_name);
 
+    std::string cache_key = clean_name;
+    std::transform(cache_key.begin(), cache_key.end(), cache_key.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+
     {
         std::lock_guard<std::mutex> lock(s_resolve_mutex);
-        auto it = s_resolve_cache.find(clean_name);
+        auto it = s_resolve_cache.find(cache_key);
         if (it != s_resolve_cache.end()) {
             const auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.cached_at).count();
             if (it->second.pid != 0) {
@@ -475,7 +480,7 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
                 }
             }
         }
-        s_resolve_cache[clean_name] = { resolved_pid, now };
+        s_resolve_cache[cache_key] = { resolved_pid, now };
     }
 
     return resolved_pid;

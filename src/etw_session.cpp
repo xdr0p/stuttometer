@@ -24,6 +24,17 @@ constexpr uint8_t KERNEL_OPCODE_DISK_READ         = 10;
 constexpr uint8_t KERNEL_OPCODE_DISK_WRITE        = 11;
 constexpr uint8_t KERNEL_OPCODE_HARDFAULT         = 32;
 
+// Named ETW Provider Keywords
+constexpr uint64_t ETW_KEYWORD_DXGI_DEFAULT             = 0x0000000000000003ULL;
+constexpr uint64_t ETW_KEYWORD_AUDIO_GLITCH             = 0x4000000000000000ULL;
+constexpr uint64_t ETW_KEYWORD_DXGKRNL_DEFAULT          = 0x00000000000004A7ULL;
+constexpr uint64_t ETW_KEYWORD_DWM_CORE_GLITCH          = 0x0000000000000001ULL;
+constexpr uint64_t ETW_KEYWORD_KERNEL_PROCESSOR_POWER   = 0x0000000000000085ULL;
+constexpr uint64_t ETW_KEYWORD_ANTIMALWARE_ALL          = 0x00000000FFFFFFFFULL;
+constexpr uint64_t ETW_KEYWORD_D3D12_DEFAULT            = 0x0000000000000C80ULL; // ObjectLifetime (0x80) | APIs (0x400) | SODB (0x800)
+constexpr uint64_t ETW_KEYWORD_KERNEL_MEMORY_DEFAULT    = 0x0000000000000280ULL; // WS_SWAP (0x80) | PHYSICAL_ALLOC (0x200)
+constexpr uint64_t ETW_KEYWORD_KERNEL_PROCESS_DEFAULT   = 0x0000000000000010ULL; // WINEVENT_KEYWORD_PROCESS (0x10)
+
 // Converts a 128-bit ActivityId GUID into a non-zero 64-bit key with SplitMix64/Murmur3 finalizer
 [[nodiscard]] static inline uint64_t activity_id_to_key(const GUID& guid) noexcept {
     uint64_t low = 0, high = 0;
@@ -48,6 +59,9 @@ EtwSessionManager::EtwSessionManager(
     , config_(config)
     , qpc_freq_(get_qpc_frequency())
 {
+    for (size_t i = 0; i < 16; ++i) {
+        recent_dwm_glitches_qpc_[i].store(0, std::memory_order_relaxed);
+    }
 }
 
 EtwSessionManager::~EtwSessionManager() {
@@ -117,7 +131,7 @@ SessionStartResult EtwSessionManager::start() {
             bool any_user_provider_enabled = false;
             if (config_.enable_dxgi) {
                 ULONG en_status = EnableTraceEx2(local_user_handle, &DXGI_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_VERBOSE, 0x0000000000000003ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_VERBOSE, ETW_KEYWORD_DXGI_DEFAULT, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable DXGI provider (Error " << en_status << ")\n";
                 } else {
@@ -125,9 +139,9 @@ SessionStartResult EtwSessionManager::start() {
                 }
             }
             if (config_.enable_audio) {
-                // Enable audio glitch channel (Event ID 11 keyword: 0x4000000000000000ULL)
+                // Enable audio glitch channel
                 ULONG en_status = EnableTraceEx2(local_user_handle, &AUDIO_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x4000000000000000ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_AUDIO_GLITCH, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Audio provider (Error " << en_status << ")\n";
                 } else {
@@ -136,7 +150,7 @@ SessionStartResult EtwSessionManager::start() {
             }
             if (config_.enable_dxgkrnl) {
                 ULONG en_status = EnableTraceEx2(local_user_handle, &DXGKRNL_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x00000000000004A7ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_DXGKRNL_DEFAULT, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable DxgKrnl provider (Error " << en_status << ")\n";
                 } else {
@@ -144,9 +158,9 @@ SessionStartResult EtwSessionManager::start() {
                 }
             }
             if (config_.enable_dwm_core) {
-                // Strict keyword masking: 0x00000001 (DWM Schedule/Glitch only) with TRACE_LEVEL_INFORMATION
+                // Strict keyword masking: DWM Schedule/Glitch only with TRACE_LEVEL_INFORMATION
                 ULONG en_status = EnableTraceEx2(local_user_handle, &DWM_CORE_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x0000000000000001ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_DWM_CORE_GLITCH, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable DWM-Core provider (Error " << en_status << ")\n";
                 } else {
@@ -155,7 +169,7 @@ SessionStartResult EtwSessionManager::start() {
             }
             if (config_.enable_processor_power) {
                 ULONG en_status = EnableTraceEx2(local_user_handle, &KERNEL_PROCESSOR_POWER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x0000000000000085ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_KERNEL_PROCESSOR_POWER, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Kernel-Processor-Power provider (Error " << en_status << ")\n";
                 } else {
@@ -164,7 +178,7 @@ SessionStartResult EtwSessionManager::start() {
             }
             if (config_.enable_antimalware) {
                 ULONG en_status = EnableTraceEx2(local_user_handle, &ANTIMALWARE_ENGINE_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x00000000FFFFFFFFULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_ANTIMALWARE_ALL, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Antimalware-Engine provider (Error " << en_status << ")\n";
                 } else {
@@ -172,9 +186,8 @@ SessionStartResult EtwSessionManager::start() {
                 }
             }
             if (config_.enable_d3d12) {
-                // ObjectLifetime (0x80), APIs (0x400), SODB (0x800)
                 ULONG en_status = EnableTraceEx2(local_user_handle, &DIRECT3D12_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x0000000000000C80ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_D3D12_DEFAULT, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Direct3D12 provider (Error " << en_status << ")\n";
                 } else {
@@ -182,9 +195,8 @@ SessionStartResult EtwSessionManager::start() {
                 }
             }
             if (config_.enable_kernel_memory) {
-                // WS_SWAP (0x80), PHYSICAL_ALLOC (0x200) -> 0x280
                 ULONG en_status = EnableTraceEx2(local_user_handle, &KERNEL_MEMORY_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x0000000000000280ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_KERNEL_MEMORY_DEFAULT, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Microsoft-Windows-Kernel-Memory provider (Error " << en_status << ")\n";
                 } else {
@@ -192,9 +204,8 @@ SessionStartResult EtwSessionManager::start() {
                 }
             }
             if (config_.enable_kernel_process_events) {
-                // WINEVENT_KEYWORD_PROCESS (0x10)
                 ULONG en_status = EnableTraceEx2(local_user_handle, &KERNEL_PROCESS_PROVIDER_GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                                 TRACE_LEVEL_INFORMATION, 0x0000000000000010ULL, 0, 0, nullptr);
+                                                 TRACE_LEVEL_INFORMATION, ETW_KEYWORD_KERNEL_PROCESS_DEFAULT, 0, 0, nullptr);
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Microsoft-Windows-Kernel-Process provider (Error " << en_status << ")\n";
                 } else {
@@ -448,6 +459,10 @@ void EtwSessionManager::active_flush_worker_loop() {
             last_present_table_.evict_stale(current_qpc, last_present_max_age_qpc, [](const LastPresentEntry& e) { return e.last_present_qpc; });
             last_flip_table_.evict_stale(current_qpc, last_present_max_age_qpc, [](const LastFlipEntry& e) { return e.last_flip_qpc; });
             trigger_engine_.evict_stale_pacing_entries(current_qpc, last_present_max_age_qpc);
+        }
+
+        if (!running_.load(std::memory_order_relaxed)) {
+            break;
         }
 
         std::this_thread::sleep_for(interval);
@@ -811,7 +826,7 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
             if (core_number <= 1024 && cap_duration_sec <= 86400) {
                 rec.cpu_index = static_cast<uint8_t>(std::min(core_number, 255U));
                 rec.auxiliary_data = cap_duration_sec;
-                rec.duration_us = 0; // Ambient state, not a discrete execution — duration lives in auxiliary_data
+                rec.duration_us = 0; // Ambient state, not a discrete execution -- duration lives in auxiliary_data
                 mgr->flight_recorder_.push(rec);
             }
         }
@@ -991,7 +1006,7 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
                             opcode == KERNEL_OPCODE_TIMER || event_id == KERNEL_OPCODE_TIMER || 
                             (p_event->EventHeader.EventDescriptor.Task == 1 && opcode == 2))) {
             rec.category = static_cast<uint16_t>(EventCategory::DPC);
-            if (p_event->UserData) {
+            if (p_event->UserDataLength >= 12 && p_event->UserData) {
                 uint64_t initial_time = 0;
                 uint64_t routine = 0;
                 if (p_event->UserDataLength == 12) {
@@ -1018,7 +1033,7 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         // ISR Completion (Opcode 67 in Classic MOF / Event ID 67 in Manifest / Task 2 Opcode 2)
         else if (is_perfinfo && (opcode == KERNEL_OPCODE_ISR_CLASSIC || event_id == KERNEL_OPCODE_ISR_CLASSIC || (p_event->EventHeader.EventDescriptor.Task == 2 && opcode == 2))) {
             rec.category = static_cast<uint16_t>(EventCategory::ISR);
-            if (p_event->UserData) {
+            if (p_event->UserDataLength >= 12 && p_event->UserData) {
                 uint64_t initial_time = 0;
                 uint64_t routine = 0;
                 if (p_event->UserDataLength == 12) {
@@ -1184,7 +1199,7 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
                 rec.auxiliary_data = byte_count;
 
                 uint64_t initial_time_ft = static_cast<uint64_t>(initial_time);
-                constexpr uint64_t MIN_VALID_FILETIME = 125000000000000000ULL; // Jan 1, 2000 UTC
+                constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL; // Jan 1, 2000 00:00:00 UTC
                 uint64_t sync_utc = mgr->sync_time_utc_.load(std::memory_order_relaxed);
                 uint64_t sync_qpc = mgr->sync_time_qpc_.load(std::memory_order_relaxed);
 

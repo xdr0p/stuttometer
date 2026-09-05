@@ -131,8 +131,7 @@ static void test_digit_boundary_tid_redaction() {
     stuttometer::Diagnosis diag;
     diag.rank = 1;
     diag.hypothesis = "context_switch_interference";
-    // Text contains 12 as TID, but also decimal 12.5ms, 3.12ms, 12000 bytes, port 9124, 51234 offsets, and hex addresses 0xFFFFF801000012FF / 0x12ABCD00
-    diag.summary = "Thread 12 blocked for 12.5ms while reading 12000 bytes with latency 3.12ms from address 9124 after 51234 ticks (driver 0xFFFFF801000012FF, routine 0x12ABCD00).";
+    diag.summary = "Thread 12 (Thread-12) blocked for 12.5ms while reading 12000 bytes with latency 3.12ms from address 9124 after 51234 ticks (offset: -12ms, driver 0xFFFFF801000012FF, routine 0x12ABCD00).";
     report.diagnoses.push_back(diag);
 
     stuttometer::JsonReporter reporter;
@@ -141,6 +140,10 @@ static void test_digit_boundary_tid_redaction() {
     const std::string red_summary = j_redacted["diagnoses"][0]["summary"];
     // "Thread 12 " -> "Thread REDACTED "
     STUTTO_ASSERT(red_summary.find("Thread REDACTED") != std::string::npos);
+    // "Thread-12" -> "Thread-REDACTED"
+    STUTTO_ASSERT(red_summary.find("Thread-REDACTED") != std::string::npos);
+    // "offset: -12ms" -> must NOT become "offset: -REDACTEDms"
+    STUTTO_ASSERT(red_summary.find("-12ms") != std::string::npos);
     // "12.5ms" -> must NOT become "REDACTED.5ms"
     STUTTO_ASSERT(red_summary.find("12.5ms") != std::string::npos);
     // "3.12ms" -> must NOT become "3.REDACTEDms"
@@ -156,7 +159,7 @@ static void test_digit_boundary_tid_redaction() {
     // "0x12ABCD00" -> must NOT become "0xREDACTEDABCD00"
     STUTTO_ASSERT(red_summary.find("0x12ABCD00") != std::string::npos);
 
-    std::cout << "  -> Digit-boundary and hex-address TID redaction PASSED (numbers & addresses with TID substrings preserved).\n";
+    std::cout << "  -> Digit-boundary, negative number, and hex-address TID redaction PASSED.\n";
 }
 
 static void test_audio_glitch_json_serialization() {

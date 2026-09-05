@@ -16,10 +16,10 @@ GuiLogRedirector::GuiLogRedirector(HWND target_hwnd)
 }
 
 GuiLogRedirector::~GuiLogRedirector() {
-    flush_buffer();
     set_shutting_down(true);
     if (old_cout_buf_) std::cout.rdbuf(old_cout_buf_);
     if (old_cerr_buf_) std::cerr.rdbuf(old_cerr_buf_);
+    flush_buffer();
 }
 
 void GuiLogRedirector::emit_line(std::string&& line) {
@@ -226,39 +226,39 @@ void GuiController::session_worker_loop(GuiConfig config) {
 
         auto session_mgr = std::make_unique<EtwSessionManager>(flight_recorder, *engine_ptr, etw_config);
 
-    const auto start_result = session_mgr->start();
-    if (start_result == SessionStartResult::FAILED) {
-        std::cerr << "[STUTTOMETER] Error: Failed to start ETW trace sessions.\n";
-        state_.store(GuiSessionState::IDLE, std::memory_order_release);
-        PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
-        session_mgr.reset();
-        {
-            std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-            active_trigger_engine_.reset();
+        const auto start_result = session_mgr->start();
+        if (start_result == SessionStartResult::FAILED) {
+            std::cerr << "[STUTTOMETER] Error: Failed to start ETW trace sessions.\n";
+            state_.store(GuiSessionState::IDLE, std::memory_order_release);
+            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
+            session_mgr.reset();
+            {
+                std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
+                active_trigger_engine_.reset();
+            }
+            return;
         }
-        return;
-    }
 
-    if (stop_worker_requested_.load(std::memory_order_acquire)) {
-        state_.store(GuiSessionState::IDLE, std::memory_order_release);
-        PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
-        session_mgr->stop();
-        session_mgr.reset();
-        {
-            std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-            active_trigger_engine_.reset();
+        if (stop_worker_requested_.load(std::memory_order_acquire)) {
+            state_.store(GuiSessionState::IDLE, std::memory_order_release);
+            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
+            session_mgr->stop();
+            session_mgr.reset();
+            {
+                std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
+                active_trigger_engine_.reset();
+            }
+            return;
+        } else if (start_result == SessionStartResult::DEGRADED_USER_ONLY) {
+            state_.store(GuiSessionState::DEGRADED_USER_ONLY, std::memory_order_release);
+            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::DEGRADED_USER_ONLY), 0);
+        } else if (start_result == SessionStartResult::DEGRADED_KERNEL_ONLY) {
+            state_.store(GuiSessionState::DEGRADED_KERNEL_ONLY, std::memory_order_release);
+            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::DEGRADED_KERNEL_ONLY), 0);
+        } else {
+            state_.store(GuiSessionState::RUNNING, std::memory_order_release);
+            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::RUNNING), 0);
         }
-        return;
-    } else if (start_result == SessionStartResult::DEGRADED_USER_ONLY) {
-        state_.store(GuiSessionState::DEGRADED_USER_ONLY, std::memory_order_release);
-        PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::DEGRADED_USER_ONLY), 0);
-    } else if (start_result == SessionStartResult::DEGRADED_KERNEL_ONLY) {
-        state_.store(GuiSessionState::DEGRADED_KERNEL_ONLY, std::memory_order_release);
-        PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::DEGRADED_KERNEL_ONLY), 0);
-    } else {
-        state_.store(GuiSessionState::RUNNING, std::memory_order_release);
-        PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::RUNNING), 0);
-    }
 
     DriverSymbolResolver driver_resolver;
     CorrelatorThresholds thresholds;
@@ -434,6 +434,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
                 p_ctx.user_antimalware_active = session_mgr->is_user_session_active() && etw_config.enable_antimalware;
                 p_ctx.user_d3d12_active = session_mgr->is_user_session_active() && etw_config.enable_d3d12;
                 p_ctx.user_vram_paging_active = session_mgr->is_user_session_active() && etw_config.enable_dxgkrnl;
+                // Note: Kernel-Memory provider runs on the user trace session, not the NT Kernel Logger
                 p_ctx.kernel_memory_active = session_mgr->is_user_session_active() && etw_config.enable_kernel_memory;
                 p_ctx.etw_events_lost = session_mgr->events_lost();
                 p_ctx.etw_buffers_lost = session_mgr->buffers_lost();

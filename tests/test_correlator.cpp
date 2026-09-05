@@ -747,6 +747,59 @@ static void test_smi_gap_suppression_on_autodetect_core_preemption() {
     std::cout << "  -> Auto-detect cumulative preemption SMI suppression PASSED.\n";
 }
 
+static void test_smi_gap_autodetect_unrelated_core_preemption_does_not_suppress_smi() {
+    std::cout << "[TEST] Validating auto-detect SMI is NOT suppressed by preemption on unrelated core...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger;
+    trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+    trigger.duration_ms = 45.0;
+    trigger.target_pid = 0; // Auto-detect mode
+    trigger.target_tid = 0;
+    trigger.cpu_index = 1; // Trigger on Core 1
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // Two 3ms involuntary preemptions on Core 7 (unrelated to Core 1, cumulative 6ms on Core 7)
+    stuttometer::EtwEventRecord cs1{};
+    cs1.category = static_cast<uint16_t>(stuttometer::EventCategory::CSWITCH);
+    cs1.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(15.0, qpc_freq);
+    cs1.cpu_index = 7; // Unrelated Core 7
+    cs1.duration_us = 3000;
+    cs1.tid = 7001;
+    cs1.payload.cswitch.prev_tid = 7002;
+    snapshot.push_back(cs1);
+
+    stuttometer::EtwEventRecord cs2{};
+    cs2.category = static_cast<uint16_t>(stuttometer::EventCategory::CSWITCH);
+    cs2.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+    cs2.cpu_index = 7; // Unrelated Core 7
+    cs2.duration_us = 3000;
+    cs2.tid = 7003;
+    cs2.payload.cswitch.prev_tid = 7004;
+    snapshot.push_back(cs2);
+
+    stuttometer::ProviderContext p_ctx;
+    p_ctx.kernel_dpc_active = true;
+    p_ctx.kernel_cswitch_active = true;
+
+    auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+
+    // SMI stall SHOULD be diagnosed for Core 1 despite Core 7 preemption
+    bool has_smi = false;
+    for (const auto& diag : report.diagnoses) {
+        if (diag.hypothesis == "unprofiled_hardware_or_smi_stall") has_smi = true;
+    }
+    STUTTO_ASSERT(has_smi);
+    std::cout << "  -> Auto-detect unrelated core preemption non-suppression PASSED.\n";
+}
+
 static void test_d3d12_pso_compilation_correlation() {
     std::cout << "[TEST] Validating Direct3D 12 PSO Compilation Hypothesis...\n";
 
@@ -1133,6 +1186,7 @@ int main() {
         test_smi_hardware_gap_and_provider_awareness();
         test_smi_gap_suppression_on_target_preemption();
         test_smi_gap_suppression_on_autodetect_core_preemption();
+        test_smi_gap_autodetect_unrelated_core_preemption_does_not_suppress_smi();
         test_smi_gap_standard_tier_without_cswitch();
         test_audio_glitch_smi_gap_correlation();
         test_smi_gap_with_benign_dpcs();

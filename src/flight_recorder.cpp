@@ -34,7 +34,10 @@ void FlightRecorder::push(const EtwEventRecord& event) noexcept {
     const size_t slot_idx = static_cast<size_t>(seq & mask_);
     Slot& slot = slots_[slot_idx];
 
-    // Wraparound protection: check if producer was delayed and ring wrapped past its ticket
+    // Wraparound protection: best-effort fast-path check if producer was preempted/delayed
+    // and the ring wrapped past its ticket before writing could begin.
+    // Note: head_ can advance further concurrently; full linearization and stale overwrite
+    // protection are guaranteed below by the slot.sequence CAS.
     const uint64_t cur_head = head_.load(std::memory_order_relaxed);
     if (cur_head > seq && (cur_head - seq) >= capacity_) {
         dropped_events_.fetch_add(1, std::memory_order_relaxed);

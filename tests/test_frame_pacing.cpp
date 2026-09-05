@@ -363,6 +363,65 @@ static void test_sustained_stutter_storm_baseline_preservation() {
     std::cout << "  -> Sustained stutter storm baseline preservation PASSED.\n";
 }
 
+static void test_cadence_helper_no_double_increment() {
+    std::cout << "[TEST] Verifying cadence helper does not double-increment on clean frames...\n";
+
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+    const uint64_t qpc_freq = 10000000ULL;
+    uint64_t current_qpc = 1000;
+
+    // Warm up 16 frames at 16.666ms
+    for (int i = 0; i < 16; ++i) {
+        current_qpc += stuttometer::ms_to_qpc_delta(16.666, qpc_freq);
+        stuttometer::push_clean_frame(stats, 16666, current_qpc);
+    }
+    STUTTO_ASSERT(stats.alternating_cadence_count == 0);
+
+    // Frame 1: +6.33ms swing -> delta positive, alternating_cadence_count remains 0
+    current_qpc += stuttometer::ms_to_qpc_delta(23.0, qpc_freq);
+    auto res1 = stuttometer::evaluate_frame_pacing(
+        stats, 23.0, current_qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.5, 10.0, true, 0.35, 50.0
+    );
+    STUTTO_ASSERT(!res1.is_stutter);
+    STUTTO_ASSERT(stats.alternating_cadence_count == 0);
+
+    // Frame 2: -13.0ms swing (opposite sign) -> exactly 1 alternation count (must NOT be 2!)
+    current_qpc += stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+    auto res2 = stuttometer::evaluate_frame_pacing(
+        stats, 10.0, current_qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.5, 10.0, true, 0.35, 50.0
+    );
+    STUTTO_ASSERT(!res2.is_stutter);
+    STUTTO_ASSERT(stats.alternating_cadence_count == 1);
+
+    // Frame 3: +13.0ms swing (opposite sign) -> exactly 2 alternation counts
+    current_qpc += stuttometer::ms_to_qpc_delta(23.0, qpc_freq);
+    auto res3 = stuttometer::evaluate_frame_pacing(
+        stats, 23.0, current_qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.5, 10.0, true, 0.35, 50.0
+    );
+    STUTTO_ASSERT(!res3.is_stutter);
+    STUTTO_ASSERT(stats.alternating_cadence_count == 2);
+
+    // Frame 4: -13.0ms swing (opposite sign) -> hits 3 alternations -> triggers CADENCE_JUDDER!
+    current_qpc += stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+    auto res4 = stuttometer::evaluate_frame_pacing(
+        stats, 10.0, current_qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.5, 10.0, true, 0.35, 50.0
+    );
+    STUTTO_ASSERT(res4.is_stutter);
+    STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::CADENCE_JUDDER);
+    STUTTO_ASSERT(stats.alternating_cadence_count == 0);
+
+    std::cout << "  -> Cadence helper single-increment & judder trigger PASSED.\n";
+}
+
 int main() {
     std::cout << "================================================================\n";
     std::cout << " STUTTOMETER FRAME PACING & STATISTICAL TRIGGER TEST SUITE\n";
@@ -378,8 +437,9 @@ int main() {
         test_dynamic_only_warmup_sanity_clamping();
         test_cadence_reset_after_stutter_frame();
         test_sustained_stutter_storm_baseline_preservation();
+        test_cadence_helper_no_double_increment();
 
-        std::cout << "\n>>> ALL 9 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
+        std::cout << "\n>>> ALL 10 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n[TEST FAILED] Exception: " << e.what() << "\n";

@@ -816,7 +816,7 @@ DiagnosticReport CorrelationEngine::correlate(
                            (trigger.duration_ms >= thresholds_.smi_severity_threshold_ms);
     const bool no_preemption_anomaly = (trigger.target_tid != 0) 
         ? (target_thread_preempt_us < (thresholds_.cswitch_preempt_ms * 1000)) 
-        : (cswitch_candidates.empty() && (core_cswitch_preempt_us[trigger.cpu_index] < (thresholds_.cswitch_preempt_ms * 1000)));
+        : (core_cswitch_preempt_us[trigger.cpu_index] < (thresholds_.cswitch_preempt_ms * 1000));
 
     if (hypotheses.empty() && 
         dwm_candidates.empty() &&

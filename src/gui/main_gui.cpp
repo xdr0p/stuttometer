@@ -315,13 +315,35 @@ struct GdiThemeCache {
         pen_focus_border = CreatePen(PS_SOLID, 1, COLOR_ACCENT_EMERALD);
 
         // Fallback for extreme GDI resource exhaustion
-        if (!br_bg) br_bg = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-        if (!br_header) br_header = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-        if (!br_card) br_card = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-        if (!br_input) br_input = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-        if (!br_list_bg) br_list_bg = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-        if (!pen_header_border) pen_header_border = static_cast<HPEN>(GetStockObject(BLACK_PEN));
-        if (!pen_card_border) pen_card_border = static_cast<HPEN>(GetStockObject(BLACK_PEN));
+        HBRUSH default_brush = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        HPEN default_pen = static_cast<HPEN>(GetStockObject(BLACK_PEN));
+
+        HBRUSH* brushes[] = {
+            &br_bg, &br_header, &br_card, &br_input, &br_list_bg,
+            &br_list_alt, &br_list_sel, &br_pill, &br_badge, &br_list_hdr_bg,
+            &br_btn_emerald, &br_btn_emerald_hover, &br_btn_emerald_pressed,
+            &br_btn_danger, &br_btn_danger_hover, &br_btn_danger_pressed,
+            &br_btn_slate, &br_btn_slate_hover, &br_btn_slate_pressed,
+            &br_btn_quick, &br_btn_quick_hover, &br_btn_quick_pressed,
+            &br_btn_disabled
+        };
+        for (auto* b : brushes) {
+            if (!*b) *b = default_brush;
+        }
+
+        HPEN* pens[] = {
+            &pen_header_border, &pen_card_border, &pen_card_divider,
+            &pen_input_border, &pen_pill_border, &pen_badge_border,
+            &pen_list_hdr_border, &pen_focus_border,
+            &pen_btn_emerald, &pen_btn_emerald_hover, &pen_btn_emerald_pressed,
+            &pen_btn_danger, &pen_btn_danger_hover, &pen_btn_danger_pressed,
+            &pen_btn_slate, &pen_btn_slate_hover, &pen_btn_slate_pressed,
+            &pen_btn_quick, &pen_btn_quick_hover, &pen_btn_quick_pressed,
+            &pen_btn_disabled
+        };
+        for (auto* p : pens) {
+            if (!*p) *p = default_pen;
+        }
     }
 
     void destroy() {
@@ -819,6 +841,9 @@ static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM 
                 return 0;
             }
 
+            // Note: Ctrl and Alt (along with standalone function/navigation keys) are the only
+            // modifier hotkeys supported by design to ensure reliable global registration and prevent
+            // conflicts with Windows shell shortcuts or accidental game interruption.
             UINT vk = static_cast<UINT>(wParam);
             bool ctrl_down  = ((GetKeyState(VK_CONTROL) & 0x8000) != 0) || ((GetKeyState(VK_LCONTROL) & 0x8000) != 0) || ((GetKeyState(VK_RCONTROL) & 0x8000) != 0);
             bool alt_down   = ((GetKeyState(VK_MENU) & 0x8000) != 0) || ((GetKeyState(VK_LMENU) & 0x8000) != 0) || ((GetKeyState(VK_RMENU) & 0x8000) != 0) || ((lParam & (1 << 29)) != 0);
@@ -2071,8 +2096,16 @@ static std::wstring g_metrics_text = L"Time: 00:00  |  Stutters: 0  |  Audio: 0"
 
 // Pure Tone Synthesizer for High-Precision Audio Cues (Zero disk files, zero latency, in-memory WASAPI/PlaySound)
 static std::vector<uint8_t> generate_sine_wav(float freq_hz, float duration_sec, float volume) {
+    if (freq_hz <= 0.0f || duration_sec <= 0.0f || volume <= 0.0f) {
+        return {};
+    }
+    volume = std::clamp(volume, 0.0f, 1.0f);
+
     uint32_t sample_rate = 44100;
     uint32_t total_samples = static_cast<uint32_t>(sample_rate * duration_sec);
+    if (total_samples == 0) {
+        return {};
+    }
     uint32_t data_size = total_samples * sizeof(int16_t);
     uint32_t overall_size = 36 + data_size;
 
@@ -2106,7 +2139,7 @@ static std::vector<uint8_t> generate_sine_wav(float freq_hz, float duration_sec,
     std::memcpy(p + 40, &data_size, 4);
 
     int16_t* samples = reinterpret_cast<int16_t*>(p + 44);
-    uint32_t fade_samples = static_cast<uint32_t>(sample_rate * 0.008f); // 8ms anti-click smooth fade envelope
+    uint32_t fade_samples = std::min(static_cast<uint32_t>(sample_rate * 0.008f), total_samples / 2); // anti-click fade envelope
 
     constexpr float pi = std::numbers::pi_v<float>;
 
