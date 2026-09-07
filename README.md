@@ -2,6 +2,8 @@
 
 Real-time micro-stutter, frame pacing, and audio-glitch diagnosis for Windows games and media apps via Event Tracing for Windows (ETW).
 
+![Stuttometer Main Dashboard](assets/main_dashboard.png)
+
 The standard way to diagnose a game stutter is to record a full system trace using WPR (`xperf`) and dig through multi-gigabyte `.etl` files after the fact—which only works if you happened to be recording when the stutter occurred. Stuttometer does the opposite: it traces continuously into a rolling in-memory flight recorder (~23.4 MB RAM), and when it detects a frame spike, cadence judder, compositor glitch, or audio dropout, it freezes that capture window, correlates the surrounding events across kernel, GPU, disk, memory, and audio subsystems, and writes a structured JSON diagnosis.
 
 Leave it running in the background; when a stutter happens, the evidence is already captured.
@@ -89,6 +91,12 @@ Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Con
 ```powershell
 .\build\Release\stuttometer_gui.exe
 ```
+
+### Settings & Configuration
+
+Fine-tune buffer capacity, pre/post capture windows, trigger modes (hybrid/judder/static), audio glitch detection, and per-subsystem anomaly thresholds directly from the UI:
+
+![Stuttometer Settings Dialog](assets/settings_dialog.png)
 
 ---
 
