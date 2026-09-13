@@ -3,10 +3,12 @@
 #include "stuttometer/flight_recorder.hpp"
 #include "stuttometer/trigger_engine.hpp"
 #include "stuttometer/privilege_utils.hpp"
+#include "stuttometer/ndjson_writer.hpp"
 #include <unordered_set>
 #include <vector>
 #include <filesystem>
 #include <sstream>
+#include <fstream>
 
 using namespace stuttometer;
 
@@ -668,6 +670,121 @@ static void test_environment_self_check_in_memory() {
     std::cout << "  -> run_environment_self_check in-memory test PASSED.\n";
 }
 
+static void test_etw_session_ndjson_streaming() {
+    std::cout << "[TEST] Validating EtwSessionManager streaming to NdjsonWriter...\n";
+
+    const std::string test_dir = "temp/test_etw_ndjson_stream";
+    std::error_code ec;
+    std::filesystem::remove_all(test_dir, ec);
+    std::filesystem::create_directories(test_dir, ec);
+
+    std::filesystem::path ndjson_path = std::filesystem::path(test_dir) / "stream.ndjson";
+    auto writer = NdjsonWriter::create_for_file(ndjson_path, 1024 * 1024, 3);
+    STUTTO_ASSERT(writer != nullptr);
+
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg{};
+    trig_cfg.target_pid = 1234;
+    const uint64_t qpc_freq = 10000000ULL; // 10 MHz -> 1 tick = 100 ns = 0.1 us
+    TriggerEngine engine(trig_cfg, qpc_freq);
+
+    EtwSessionConfig sess_cfg{};
+    EtwSessionManager mgr(recorder, engine, sess_cfg);
+    mgr.set_ndjson_writer(writer.get());
+    mgr.set_running_for_test(true);
+
+    // 1. Audio Glitch event
+    struct AudioPayload {
+        uint32_t glitch_count{7};
+        int32_t error_code{-100};
+    } audio_data;
+
+    EVENT_RECORD ev_audio{};
+    ev_audio.UserContext = &mgr;
+    ev_audio.EventHeader.ProviderId = AUDIO_PROVIDER_GUID;
+    ev_audio.EventHeader.EventDescriptor.Id = 11;
+    ev_audio.EventHeader.ProcessId = 1234;
+    ev_audio.EventHeader.ThreadId = 5678;
+    ev_audio.BufferContext.ProcessorNumber = 2;
+    ev_audio.EventHeader.TimeStamp.QuadPart = 10000000;
+    ev_audio.UserData = &audio_data;
+    ev_audio.UserDataLength = sizeof(audio_data);
+
+    EtwSessionManager::on_event_record(&ev_audio);
+
+    // 2. DXGI Present Start event
+    uint64_t swapchain = 0xDEADBEEF00ULL;
+    EVENT_RECORD ev_dxgi_start{};
+    ev_dxgi_start.UserContext = &mgr;
+    ev_dxgi_start.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
+    ev_dxgi_start.EventHeader.EventDescriptor.Id = 42;
+    ev_dxgi_start.EventHeader.ProcessId = 1234;
+    ev_dxgi_start.EventHeader.ThreadId = 5678;
+    ev_dxgi_start.BufferContext.ProcessorNumber = 2;
+    ev_dxgi_start.EventHeader.TimeStamp.QuadPart = 10000000 + 10000;
+    ev_dxgi_start.UserData = &swapchain;
+    ev_dxgi_start.UserDataLength = sizeof(swapchain);
+
+    EtwSessionManager::on_event_record(&ev_dxgi_start);
+
+    // 3. DXGI Present Stop event (16.6ms later)
+    EVENT_RECORD ev_dxgi_stop{};
+    ev_dxgi_stop.UserContext = &mgr;
+    ev_dxgi_stop.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
+    ev_dxgi_stop.EventHeader.EventDescriptor.Id = 43;
+    ev_dxgi_stop.EventHeader.ProcessId = 1234;
+    ev_dxgi_stop.EventHeader.ThreadId = 5678;
+    ev_dxgi_stop.BufferContext.ProcessorNumber = 2;
+    // 166000 ticks at 10MHz = 16.6ms = 16600 us
+    ev_dxgi_stop.EventHeader.TimeStamp.QuadPart = ev_dxgi_start.EventHeader.TimeStamp.QuadPart + 166000;
+    ev_dxgi_stop.UserData = &swapchain;
+    ev_dxgi_stop.UserDataLength = sizeof(swapchain);
+
+    EtwSessionManager::on_event_record(&ev_dxgi_stop);
+
+    // Stop and flush writer
+    writer->stop();
+    mgr.set_running_for_test(false);
+    mgr.set_ndjson_writer(nullptr);
+
+    // Read back and verify NDJSON records
+    STUTTO_ASSERT(std::filesystem::exists(ndjson_path));
+
+    std::ifstream file(ndjson_path);
+    STUTTO_ASSERT(file.is_open());
+    std::string line;
+    std::vector<std::string> lines;
+    while (std::getline(file, line)) {
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+    }
+
+    STUTTO_ASSERT(lines.size() == 3);
+
+    // Check Audio Glitch line
+    STUTTO_ASSERT(lines[0].find("\"v\":1") != std::string::npos);
+    STUTTO_ASSERT(lines[0].find("\"cat\":\"AUDIO\"") != std::string::npos);
+    STUTTO_ASSERT(lines[0].find("\"flags\":" + std::to_string(EventFlags::AUDIO_BUFFER_UNDERRUN)) != std::string::npos);
+    STUTTO_ASSERT(lines[0].find("\"aux\":7") != std::string::npos); // glitch_count = 7
+    STUTTO_ASSERT(lines[0].find("\"pid\":1234") != std::string::npos);
+
+    // Check DXGI Present Start line
+    STUTTO_ASSERT(lines[1].find("\"cat\":\"DXGI\"") != std::string::npos);
+    STUTTO_ASSERT(lines[1].find("\"id\":42") != std::string::npos);
+    STUTTO_ASSERT(lines[1].find("\"dur_us\":0") != std::string::npos);
+    STUTTO_ASSERT(lines[1].find("\"aux\":" + std::to_string(swapchain)) != std::string::npos);
+
+    // Check DXGI Present Stop line
+    STUTTO_ASSERT(lines[2].find("\"cat\":\"DXGI\"") != std::string::npos);
+    STUTTO_ASSERT(lines[2].find("\"id\":43") != std::string::npos);
+    STUTTO_ASSERT(lines[2].find("\"dur_us\":16600") != std::string::npos); // Duration accurately populated!
+    STUTTO_ASSERT(lines[2].find("\"aux\":" + std::to_string(swapchain)) != std::string::npos);
+
+    std::filesystem::remove_all(test_dir, ec);
+    std::cout << "  -> EtwSessionManager NDJSON streaming assertions PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer ETW Session Manager Tests ===\n";
     try {
@@ -690,6 +807,7 @@ int main() {
         test_cswitch_tid_recycling_pid_check();
         test_provider_permutation_config();
         test_environment_self_check_in_memory();
+        test_etw_session_ndjson_streaming();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

@@ -4,6 +4,8 @@
 #include "stuttometer/json_reporter.hpp"
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
+#include "stuttometer/ndjson_writer.hpp"
+#include "stuttometer/csv_exporter.hpp"
 
 #include <CLI/CLI.hpp>
 #include <iostream>
@@ -14,6 +16,10 @@
 #include <set>
 #include <mutex>
 #include <condition_variable>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 static std::atomic<bool> g_stop_requested{false};
 static std::atomic<bool> g_shutdown_done{false};
@@ -97,6 +103,19 @@ int main(int argc, char** argv) {
     app.add_option("--output-dir", output_dir, "Directory to save individual trigger reports");
     app.add_option("--max-reports", max_reports, "Maximum number of reports before exiting (0 = continuous)");
     app.add_option("--tier", provider_tier, "Provider tier: minimal, standard, full (default: standard)");
+    std::string dump_events_path;
+    size_t dump_max_mb = 100;
+    size_t dump_max_files = 3;
+    std::string export_csv_path;
+
+    app.add_option("--dump-events", dump_events_path, "Stream real-time ETW events to NDJSON file (or - for stdout)");
+    app.add_option("--dump-max-mb", dump_max_mb, "Maximum size per NDJSON file before rotation in MB (10-1024, default: 100; ignored when --dump-events is '-')")
+       ->check(CLI::Range(10ull, 1024ull))
+       ->needs("--dump-events");
+    app.add_option("--dump-max-files", dump_max_files, "Maximum number of rotated NDJSON files to retain (1-10, default: 3; ignored when --dump-events is '-')")
+       ->check(CLI::Range(1ull, 10ull))
+       ->needs("--dump-events");
+    app.add_option("--export-csv", export_csv_path, "Export frame pacing timeline to CSV (overwritten on each trigger; use --output-dir for per-trigger files)");
     app.add_flag("--redact", redact, "Redact process names, file paths, and user identifiers");
     app.add_flag("--verbose", verbose, "Print detailed event stream metrics to console");
     app.add_flag("--version", print_version, "Print version information and exit");
@@ -105,14 +124,26 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    if (dump_events_path == "-" && (print_version || run_self_check)) {
+        std::cerr << "[STUTTOMETER] Error: --dump-events - cannot be combined with --version or --self-check.\n";
+        return 1;
+    }
+
     if (print_version) {
-        std::cout << "Stuttometer v0.1.1\n";
+        std::cout << "Stuttometer v0.2.0\n";
         return 0;
     }
 
     if (run_self_check) {
         bool ok = stuttometer::run_environment_self_check(std::cout);
         return ok ? 0 : 1;
+    }
+    if (dump_events_path == "-" && (app.count("--dump-max-mb") > 0 || app.count("--dump-max-files") > 0)) {
+        std::cerr << "[STUTTOMETER] Notice: --dump-max-mb and --dump-max-files are ignored when streaming to stdout ('-').\n";
+    }
+    if (export_csv_path == "-") {
+        std::cerr << "[STUTTOMETER] Error: --export-csv does not support stdout ('-'); must specify a file path.\n";
+        return 1;
     }
 
     // CLI Range and Option Validation
@@ -224,6 +255,39 @@ int main(int argc, char** argv) {
 
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
+    struct CoutRedirectGuard {
+        std::streambuf* old_rdbuf{nullptr};
+        ~CoutRedirectGuard() {
+            if (old_rdbuf) {
+                std::cout.rdbuf(old_rdbuf);
+            }
+        }
+    } cout_guard;
+
+    if (dump_events_path == "-") {
+#if defined(_WIN32)
+        _setmode(_fileno(stdout), _O_BINARY);
+#endif
+        cout_guard.old_rdbuf = std::cout.rdbuf(std::cerr.rdbuf());
+    }
+
+    std::unique_ptr<stuttometer::NdjsonWriter> ndjson_writer;
+    if (!dump_events_path.empty()) {
+        if (dump_events_path == "-") {
+            ndjson_writer = stuttometer::NdjsonWriter::create_for_stream(stdout);
+        } else {
+            ndjson_writer = stuttometer::NdjsonWriter::create_for_file(
+                dump_events_path,
+                dump_max_mb * 1024 * 1024,
+                dump_max_files
+            );
+            if (!ndjson_writer) {
+                std::cerr << "[STUTTOMETER] Error: Failed to create NDJSON output file: " << dump_events_path << "\n";
+                return 1;
+            }
+        }
+    }
+
     const bool is_admin = stuttometer::is_running_as_admin();
     if (!is_admin) {
         std::cerr << "\n[STUTTOMETER] Error: Running in Standard (Non-Elevated) Mode.\n";
@@ -249,7 +313,7 @@ int main(int argc, char** argv) {
         std::cerr << "[STUTTOMETER] Warning: Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
     }
 
-    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.1.1 (Elevated Mode)...\n";
+    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.2.0 (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
     stuttometer::EtwSessionConfig etw_config;
@@ -295,6 +359,9 @@ int main(int argc, char** argv) {
 
     stuttometer::TriggerEngine trigger_engine(trig_config, qpc_freq);
     stuttometer::EtwSessionManager session_mgr(flight_recorder, trigger_engine, etw_config);
+    if (ndjson_writer) {
+        session_mgr.set_ndjson_writer(ndjson_writer.get());
+    }
 
     const auto start_result = session_mgr.start();
     if (start_result == stuttometer::SessionStartResult::FAILED) {
@@ -413,13 +480,15 @@ int main(int argc, char** argv) {
 
                 uint64_t unpaired_evicts = session_mgr.unpaired_evictions();
                 uint64_t ins_failures = session_mgr.insertion_failures();
-                auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
-                report.target_process = stuttometer::get_process_name_by_pid(trigger_info.target_pid);
-                report.window_pre_ms = window_pre_ms;
-                report.window_post_ms = window_post_ms;
-                report.present_threshold_ms = present_threshold_ms;
-                report.provider_tier = provider_tier;
-                report.redacted = redact;
+                stuttometer::CorrelateOptions correlate_opts{
+                    .window_pre_ms = window_pre_ms,
+                    .window_post_ms = window_post_ms,
+                    .present_threshold_ms = present_threshold_ms,
+                    .provider_tier = provider_tier,
+                    .redact = redact
+                };
+
+                auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
 
                 reporter.print_console_summary(report, std::cout, redact);
 
@@ -428,28 +497,22 @@ int main(int argc, char** argv) {
                         std::cerr << "[STUTTOMETER] Error: Failed to write report to '" << output_file << "'\n";
                     }
                 }
+                if (!export_csv_path.empty()) {
+                    if (!stuttometer::csv::export_to_file(report, std::filesystem::path(export_csv_path))) {
+                        std::cerr << "[STUTTOMETER] Error: Failed to export CSV to '" << export_csv_path << "'\n";
+                    }
+                }
                 if (!output_dir.empty()) {
                     const std::filesystem::path dir(output_dir);
-                    const std::filesystem::path path = dir / ("stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json");
-                    if (!reporter.save_to_file(report, path, redact)) {
-                        std::cerr << "[STUTTOMETER] Error: Failed to write report to '" << path.string() << "'\n";
+                    const std::string json_name = "stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json";
+                    if (reporter.save_to_file(report, dir / json_name, redact)) {
+                        stuttometer::rotate_directory_by_prefix(dir, "stutto_report_", ".json", 100);
                     } else {
-                        constexpr size_t MAX_SAVED_REPORTS = 100;
-                        std::error_code dir_ec;
-                        std::vector<std::filesystem::directory_entry> entries;
-                        for (const auto& entry : std::filesystem::directory_iterator(dir, dir_ec)) {
-                            if (entry.is_regular_file() && entry.path().extension() == ".json") {
-                                entries.push_back(entry);
-                            }
-                        }
-                        if (entries.size() > MAX_SAVED_REPORTS) {
-                            std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
-                                return a.last_write_time() < b.last_write_time();
-                            });
-                            for (size_t i = 0; i < entries.size() - MAX_SAVED_REPORTS; ++i) {
-                                std::filesystem::remove(entries[i].path(), dir_ec);
-                            }
-                        }
+                        std::cerr << "[STUTTOMETER] Error: Failed to write report to '" << (dir / json_name).string() << "'\n";
+                    }
+                    const std::string csv_name = "stutto_pacing_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".csv";
+                    if (stuttometer::csv::export_to_file(report, dir / csv_name)) {
+                        stuttometer::rotate_directory_by_prefix(dir, "stutto_pacing_", ".csv", 100);
                     }
                 }
 
@@ -472,6 +535,9 @@ int main(int argc, char** argv) {
 
     std::cout << "\n[STUTTOMETER] Stopping trace sessions and cleaning up...\n";
     session_mgr.stop();
+    if (ndjson_writer) {
+        ndjson_writer->stop();
+    }
     std::cout << "[STUTTOMETER] Done. Total reports generated: " << report_count << "\n";
 
     {

@@ -57,3 +57,9 @@ desktop.ini
 # Repomix & AI bundle outputs
 codebase*.txt
 repomix-output.*
+
+# Distribution and export artifacts
+dist/
+stutto_*.csv
+*.ndjson
+

@@ -6,6 +6,7 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <filesystem>
 
 namespace stuttometer {
 
@@ -55,5 +56,13 @@ std::string get_process_name_by_pid(uint32_t pid);
 
 // Process name to Process ID resolver
 uint32_t resolve_process_name_to_pid(const std::string& process_name);
+
+// Retains up to max_count most recent files matching filename_prefix and extension in dir
+void rotate_directory_by_prefix(
+    const std::filesystem::path& dir,
+    const std::string& filename_prefix,
+    const std::string& extension,
+    size_t max_count
+);
 
 } // namespace stuttometer

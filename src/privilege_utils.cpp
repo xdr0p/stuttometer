@@ -486,4 +486,40 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
     return resolved_pid;
 }
 
+void rotate_directory_by_prefix(
+    const std::filesystem::path& dir,
+    const std::string& filename_prefix,
+    const std::string& extension,
+    size_t max_count
+) {
+    std::error_code dir_ec;
+    struct EntryInfo {
+        std::filesystem::path path;
+        std::filesystem::file_time_type mtime;
+    };
+    std::vector<EntryInfo> entries;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, dir_ec)) {
+        if (dir_ec) break;
+        std::error_code ec;
+        if (entry.is_regular_file(ec) && entry.path().extension() == extension) {
+            const std::string fname = entry.path().filename().string();
+            if (fname.rfind(filename_prefix, 0) == 0) {
+                auto mtime = entry.last_write_time(ec);
+                if (!ec) {
+                    entries.push_back({entry.path(), mtime});
+                }
+            }
+        }
+    }
+    if (entries.size() > max_count) {
+        std::sort(entries.begin(), entries.end(), [](const EntryInfo& a, const EntryInfo& b) {
+            if (a.mtime != b.mtime) return a.mtime < b.mtime;
+            return a.path.filename() < b.path.filename();
+        });
+        for (size_t i = 0; i < entries.size() - max_count; ++i) {
+            std::filesystem::remove(entries[i].path, dir_ec);
+        }
+    }
+}
+
 } // namespace stuttometer

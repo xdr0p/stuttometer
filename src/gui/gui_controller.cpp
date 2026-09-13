@@ -1,4 +1,5 @@
 #include "gui_controller.hpp"
+#include "stuttometer/csv_exporter.hpp"
 #include <psapi.h>
 #include <algorithm>
 #include <set>
@@ -441,39 +442,29 @@ void GuiController::session_worker_loop(GuiConfig config) {
 
                 uint64_t unpaired_evicts = session_mgr->unpaired_evictions();
                 uint64_t ins_failures = session_mgr->insertion_failures();
-                auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
-                report.target_process = get_process_name_by_pid(trigger_info.target_pid);
-                report.window_pre_ms = config.window_pre_ms;
-                report.window_post_ms = config.window_post_ms;
-                report.present_threshold_ms = config.present_threshold_ms;
-                report.provider_tier = config.provider_tier;
-                report.redacted = config.redact;
 
-                // Auto-save JSON report to disk if configured (with 100-file rotation cap)
+                CorrelateOptions correlate_opts{
+                    .window_pre_ms = config.window_pre_ms,
+                    .window_post_ms = config.window_post_ms,
+                    .present_threshold_ms = config.present_threshold_ms,
+                    .provider_tier = config.provider_tier,
+                    .redact = config.redact
+                };
+
+                auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
+
+                // Auto-save JSON report and CSV to disk if configured (with 100-file rotation cap)
                 if (!config.output_dir.empty()) {
                     const std::filesystem::path dir(config.output_dir);
-                    const std::wstring filename = L"stutto_report_" + std::to_wstring(report_count + 1) + L"_" + std::to_wstring(current_qpc) + L".json";
-                    const std::filesystem::path file_path = dir / filename;
-                    if (!reporter.save_to_file(report, file_path, config.redact)) {
-                        std::cerr << "[STUTTOMETER] Warning: Failed to auto-save JSON report to '" << file_path.generic_string() << "'\n";
+                    const std::string json_name = "stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json";
+                    if (reporter.save_to_file(report, dir / json_name, config.redact)) {
+                        rotate_directory_by_prefix(dir, "stutto_report_", ".json", 100);
                     } else {
-                        // Keep directory capped to 100 latest reports
-                        constexpr size_t MAX_SAVED_REPORTS = 100;
-                        std::error_code dir_ec;
-                        std::vector<std::filesystem::directory_entry> entries;
-                        for (const auto& entry : std::filesystem::directory_iterator(dir, dir_ec)) {
-                            if (entry.is_regular_file() && entry.path().extension() == ".json") {
-                                entries.push_back(entry);
-                            }
-                        }
-                        if (entries.size() > MAX_SAVED_REPORTS) {
-                            std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
-                                return a.last_write_time() < b.last_write_time();
-                            });
-                            for (size_t i = 0; i < entries.size() - MAX_SAVED_REPORTS; ++i) {
-                                std::filesystem::remove(entries[i].path(), dir_ec);
-                            }
-                        }
+                        std::cerr << "[STUTTOMETER] Warning: Failed to auto-save JSON report to '" << (dir / json_name).generic_string() << "'\n";
+                    }
+                    const std::string csv_name = "stutto_pacing_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".csv";
+                    if (stuttometer::csv::export_to_file(report, dir / csv_name)) {
+                        rotate_directory_by_prefix(dir, "stutto_pacing_", ".csv", 100);
                     }
                 }
                 ++report_count;

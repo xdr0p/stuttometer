@@ -252,10 +252,12 @@ static std::vector<uint32_t> collect_report_ids(const DiagnosticReport& report) 
     std::vector<uint32_t> ids;
     if (report.trigger.target_tid != 0) ids.push_back(report.trigger.target_tid);
     if (report.trigger.target_pid != 0) ids.push_back(report.trigger.target_pid);
+    if (report.attribution_pid != 0) ids.push_back(report.attribution_pid);
     for (const auto& diag : report.diagnoses) {
         for (const auto& ev : diag.evidence) {
             if (ev.secondary_tid != 0) ids.push_back(ev.secondary_tid);
             if (ev.secondary_pid != 0) ids.push_back(ev.secondary_pid);
+            if (ev.pid != 0) ids.push_back(ev.pid);
         }
     }
     return ids;
@@ -264,8 +266,8 @@ static std::vector<uint32_t> collect_report_ids(const DiagnosticReport& report) 
 nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact) const {
     nlohmann::json root;
 
-    root["schema_version"] = report.schema_version;
-    root["tool_version"]   = report.tool_version;
+    root["schema_version"] = report.schema_version.empty() ? "1.1" : report.schema_version;
+    root["tool_version"]   = report.tool_version.empty() ? "0.2.0" : report.tool_version;
     root["timestamp_utc"]  = report.timestamp_utc;
 
     const std::vector<uint32_t> ids_to_redact = redact ? collect_report_ids(report) : std::vector<uint32_t>{};
@@ -336,6 +338,13 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
     }
     root["trigger"] = std::move(trig_obj);
 
+    // Root-level Attribution (v1.1)
+    root["attribution"] = {
+        {"tag", attribution_to_std_string(report.attribution)},
+        {"pid", redact ? 0 : report.attribution_pid},
+        {"process", redact ? "REDACTED" : report.attribution_process}
+    };
+
     // Diagnoses list
     nlohmann::json diag_array = nlohmann::json::array();
     for (const auto& diag : report.diagnoses) {
@@ -360,7 +369,8 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
                 {"routine_address", redact ? "0xREDACTED" : ev.routine_address},
                 {"duration_us", ev.duration_us},
                 {"cpu_core", ev.cpu_core},
-                {"offset_from_trigger_ms", ev.offset_from_trigger_ms}
+                {"offset_from_trigger_ms", ev.offset_from_trigger_ms},
+                {"pid", redact ? 0 : ev.pid}
             };
             if (!ev.extra_info.empty()) {
                 ev_obj["extra_info"] = redact ? redact_text_with_ids(ev.extra_info, ids_to_redact) : ev.extra_info;
@@ -371,6 +381,21 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
         diag_array.push_back(std::move(d_obj));
     }
     root["diagnoses"] = std::move(diag_array);
+
+    // Frame Timeline (v1.1)
+    nlohmann::json timeline_arr = nlohmann::json::array();
+    for (const auto& pt : report.frame_timeline) {
+        timeline_arr.push_back({
+            {"frame_index", pt.frame_index},
+            {"relative_index", pt.relative_index},
+            {"qpc_timestamp", pt.qpc_timestamp},
+            {"duration_ms", pt.duration_ms},
+            {"offset_from_trigger_ms", pt.offset_from_trigger_ms},
+            {"is_trigger_frame", pt.is_trigger_frame},
+            {"is_pacing_stall", pt.is_pacing_stall}
+        });
+    }
+    root["frame_timeline"] = std::move(timeline_arr);
 
     // Statistics and telemetry
     root["statistics"] = {
@@ -471,6 +496,14 @@ void JsonReporter::print_console_summary(const DiagnosticReport& report, std::os
     }
     out << " Captured Events: " << report.total_events << " events (Drops: " << report.dropped_events 
         << ", Upstream ETW Loss: " << report.etw_events_lost << ")\n";
+    out << " Attribution    : " << attribution_to_string(report.attribution);
+    if (redact || report.attribution_redacted) {
+        out << " (REDACTED)\n";
+    } else if (report.attribution_pid != 0) {
+        out << " (" << report.attribution_process << " PID " << report.attribution_pid << ")\n";
+    } else {
+        out << " (" << report.attribution_process << ")\n";
+    }
     out << "--------------------------------------------------------------------------------\n";
     out << " RANKED ROOT CAUSE HYPOTHESES:\n";
 

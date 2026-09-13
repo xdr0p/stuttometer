@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   stuttometer
-  VERSION 0.1.1
+  VERSION 0.2.0
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )
@@ -61,6 +61,8 @@ add_library(stuttometer_core STATIC
   src/correlator.cpp
   src/json_reporter.cpp
   src/privilege_utils.cpp
+  src/csv_exporter.cpp
+  src/ndjson_writer.cpp
 )
 
 target_include_directories(stuttometer_core
@@ -198,5 +200,41 @@ add_executable(test_frame_pacing
 target_link_libraries(test_frame_pacing PRIVATE stuttometer_core)
 add_test(NAME test_frame_pacing COMMAND test_frame_pacing)
 set_tests_properties(test_frame_pacing PROPERTIES TIMEOUT 30)
+
+add_executable(test_attribution
+  tests/test_attribution.cpp
+)
+target_link_libraries(test_attribution PRIVATE stuttometer_core)
+add_test(NAME test_attribution COMMAND test_attribution)
+set_tests_properties(test_attribution PROPERTIES TIMEOUT 30)
+
+add_executable(test_frame_timeline
+  tests/test_frame_timeline.cpp
+)
+target_link_libraries(test_frame_timeline PRIVATE stuttometer_core)
+add_test(NAME test_frame_timeline COMMAND test_frame_timeline)
+set_tests_properties(test_frame_timeline PROPERTIES TIMEOUT 30)
+
+add_executable(test_csv_exporter
+  tests/test_csv_exporter.cpp
+)
+target_link_libraries(test_csv_exporter PRIVATE stuttometer_core)
+add_test(NAME test_csv_exporter COMMAND test_csv_exporter)
+set_tests_properties(test_csv_exporter PROPERTIES TIMEOUT 30)
+
+add_executable(test_ndjson_writer
+  tests/test_ndjson_writer.cpp
+)
+target_link_libraries(test_ndjson_writer PRIVATE stuttometer_core)
+add_test(NAME test_ndjson_writer COMMAND test_ndjson_writer)
+set_tests_properties(test_ndjson_writer PROPERTIES TIMEOUT 30)
+
+add_executable(test_report_serialization_consistency
+  tests/test_report_serialization_consistency.cpp
+)
+target_link_libraries(test_report_serialization_consistency PRIVATE stuttometer_core)
+add_test(NAME test_report_serialization_consistency COMMAND test_report_serialization_consistency)
+set_tests_properties(test_report_serialization_consistency PROPERTIES TIMEOUT 30)
+
 
 

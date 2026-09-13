@@ -8,6 +8,7 @@ static void test_json_serialization_and_deep_redaction() {
     std::cout << "[TEST] Validating JSON Schema v1.0, Audio Counts & Deep PII Redaction...\n";
 
     stuttometer::DiagnosticReport report;
+    // Intentionally testing backward compatibility with schema 1.0; JsonReporter honors explicitly set schema_version
     report.schema_version = "1.0";
     report.tool_version = "0.1.0";
     report.timestamp_utc = "2026-08-11T02:50:00.000Z";

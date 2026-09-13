@@ -5,9 +5,18 @@
 #include "privilege_utils.hpp"
 #include <vector>
 #include <string>
+#include <string_view>
 #include <cstdint>
 
 namespace stuttometer {
+
+struct CorrelateOptions {
+    double window_pre_ms{250.0};
+    double window_post_ms{30.0};
+    double present_threshold_ms{25.0};
+    std::string provider_tier{"standard"};
+    bool redact{false};
+};
 
 struct CorrelatorThresholds {
     uint32_t dpc_threshold_us{1000};       // 1.0 ms
@@ -58,6 +67,7 @@ struct EvidenceItem {
     std::string extra_info;
     uint32_t secondary_tid{0};
     uint32_t secondary_pid{0};
+    uint32_t pid{0}; // Originating/culprit process ID
 };
 
 struct Diagnosis {
@@ -90,9 +100,47 @@ struct EventCategoryCounts {
     uint64_t mem_physical_alloc{0};
 };
 
+struct FrameTimelinePoint {
+    uint32_t frame_index{0};           // Sequential 0-based index [0, N-1] in retained window
+    int32_t relative_index{0};         // Authoritative index relative to anchor frame (0 = anchor/trigger frame)
+    uint64_t qpc_timestamp{0};         // Raw QPC timestamp of Present Stop
+    double duration_ms{0.0};           // Effective frame duration in ms
+    double offset_from_trigger_ms{0.0};// Signed offset from trigger QPC in ms
+    bool is_trigger_frame{false};      // True specifically for the frame that tripped the trigger
+    bool is_pacing_stall{false};       // True if duration_ms >= effective present threshold
+};
+
+enum class AttributionTag {
+    GAME_ENGINE,          // Stall inside target game process / render thread / GPU pipeline
+    DWM_COMPOSITION,      // DWM compositor dropped frame or flip stall
+    EXTERNAL_CONTENTION,  // System / driver contention (DPC, Antimalware, Page Fault, CSwitch)
+    UNKNOWN
+};
+
+constexpr std::string_view attribution_to_string(AttributionTag tag) noexcept {
+    switch (tag) {
+        case AttributionTag::GAME_ENGINE: return "GAME_ENGINE";
+        case AttributionTag::DWM_COMPOSITION: return "DWM_COMPOSITION";
+        case AttributionTag::EXTERNAL_CONTENTION: return "EXTERNAL_CONTENTION";
+        case AttributionTag::UNKNOWN: return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+
+inline std::string attribution_to_std_string(AttributionTag tag) {
+    return std::string(attribution_to_string(tag));
+}
+
+struct AttributionResult {
+    AttributionTag tag{AttributionTag::UNKNOWN};
+    uint32_t pid{0};
+    std::string process;
+    bool redacted{false};
+};
+
 struct DiagnosticReport {
-    std::string schema_version{"1.0"};
-    std::string tool_version{"0.1.1"};
+    std::string schema_version{"1.1"};
+    std::string tool_version{"0.2.0"};
     std::string timestamp_utc;
     TriggerInfo trigger;
     std::string target_process;
@@ -110,6 +158,14 @@ struct DiagnosticReport {
     std::vector<Diagnosis> diagnoses;
     EventCategoryCounts event_counts;
 
+    AttributionTag attribution{AttributionTag::UNKNOWN};
+    uint32_t attribution_pid{0};
+    std::string attribution_process;
+    bool attribution_redacted{false};
+
+    std::vector<FrameTimelinePoint> frame_timeline;
+    static constexpr size_t MAX_TIMELINE_POINTS = 1024;
+
     size_t total_events{0};
     uint64_t dropped_events{0};
     uint64_t producer_dropped_events{0};
@@ -119,6 +175,12 @@ struct DiagnosticReport {
     uint32_t etw_buffers_lost{0};
 };
 
+// Pure function for attribution calculation and deterministic testing
+AttributionResult compute_attribution(
+    const DiagnosticReport& report,
+    uint32_t cached_dwm_pid
+);
+
 class CorrelationEngine {
 public:
     explicit CorrelationEngine(
@@ -127,7 +189,20 @@ public:
     );
     ~CorrelationEngine() = default;
 
-    // Evaluates a flight recorder snapshot against the trigger event with provider context
+    // Modern signature with bundled CorrelateOptions
+    DiagnosticReport correlate(
+        const std::vector<EtwEventRecord>& snapshot,
+        const TriggerInfo& trigger,
+        uint64_t qpc_freq,
+        const CorrelateOptions& options,
+        const ProviderContext& provider_ctx = ProviderContext{},
+        uint64_t dropped_events = 0,
+        uint64_t unpaired_evictions = 0,
+        uint64_t insertion_failures = 0,
+        uint64_t producer_dropped_events = 0
+    ) const;
+
+    // Backward-compatible overload for existing tests
     DiagnosticReport correlate(
         const std::vector<EtwEventRecord>& snapshot,
         const TriggerInfo& trigger,
@@ -155,6 +230,8 @@ public:
 private:
     const DriverSymbolResolver& driver_resolver_;
     const CorrelatorThresholds thresholds_;
+    uint32_t cached_dwm_pid_{0};
 };
 
 } // namespace stuttometer
+

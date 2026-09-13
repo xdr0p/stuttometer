@@ -149,13 +149,39 @@ Targeting, Output & General:
   --target-pid INT                Target Process ID to monitor (default: 0 = monitor all)
   --target-process TEXT           Target process name substring (e.g. Game.exe)
   --output PATH                   Output file path for single JSON report
-  --output-dir PATH               Directory to save individual trigger reports
+  --output-dir PATH               Directory to save individual trigger reports (auto-saves paired JSON and CSV capped to 100 latest)
+  --export-csv PATH               Export frame pacing timeline to CSV (overwritten on each trigger; use --output-dir for per-trigger files)
+  --dump-events PATH              Stream real-time ETW events to NDJSON file (or - for stdout; can be combined with --output-dir)
+  --dump-max-mb INT               Maximum size per NDJSON file before rotation in MB (10-1024, default: 100; ignored when --dump-events is -)
+  --dump-max-files INT            Maximum number of rotated NDJSON files to retain (1-10, default: 3; ignored when --dump-events is -)
   --max-reports INT               Maximum number of reports before exiting (default: 0 = continuous)
   --tier TEXT                     Provider tier: minimal, standard, full (default: standard)
   --redact                        Redact process names, file paths, and user identifiers
   --verbose                       Print detailed event stream metrics to console
   --version                       Print version information and exit
   --self-check                    Run non-destructive environment diagnostics & ETW provider checks, then exit
+
+### Real-Time Event Streaming (NDJSON)
+
+Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
+- **Stdout Streaming (`--dump-events -`):** Emits newline-delimited JSON (NDJSON) to standard output. When active, all non-event diagnostic logging is redirected to `stderr`, and stdout is set to binary mode. Can be combined with `--output-dir <dir>` to capture per-trigger reports to disk while streaming raw events.
+- **Categorized Event Stream:** The stream captures all actionable stall categories (DXGI presents, audio glitches, DPC/ISR spikes, Disk I/O, context switches, DWM glitches, page faults, CPU throttling, antimalware scans, D3D12 PSO compilation, VRAM paging, and kernel memory allocations). High-frequency non-stall API trace events (such as per-draw D3D12 calls) are filtered to ensure high signal-to-noise ratio and zero consumer ring buffer saturation.
+- **NDJSON Schema (v1):**
+  ```json
+  {"v":1,"ts_qpc":123456789,"cat":"DXGI","id":43,"pid":4568,"tid":8912,"cpu":2,"dur_us":16670,"aux":0,"flags":0}
+  ```
+  `dur_us` is `0` for instant/start events; consumers distinguish start vs. stop by `cat` and event `id`.
+- **PowerShell / `jq` Piping Example:**
+  ```powershell
+  # Stream events and filter DXGI presents in real time
+  .\build\Release\stuttometer.exe --dump-events - --max-reports 1 | jq 'select(.cat == "DXGI")'
+  ```
+
+### Frame Pacing CSV Export & Auto-Save Retention
+
+- `--export-csv <path>` writes the retained frame pacing timeline in RFC 4180 CRLF format.
+- When `--output-dir <dir>` is specified, Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (JSON Schema v1.1) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix.
+
 ```
 
 ---

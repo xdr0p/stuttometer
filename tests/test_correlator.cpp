@@ -1160,6 +1160,84 @@ static void test_physical_memory_latency_correlation() {
               << " (" << (report.diagnoses[0].confidence * 100.0) << "% confidence) PASSED.\n";
 }
 
+static void test_correlator_attribution_pipeline_wiring() {
+    std::cout << "[TEST] Validating Attribution & Timeline Pipeline Wiring with Modern CorrelateOptions...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger;
+    trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+    trigger.duration_ms = 45.0;
+    trigger.target_pid = 4000;
+    trigger.target_tid = 8000;
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // Normal frame before stutter
+    stuttometer::EtwEventRecord frame_normal{};
+    frame_normal.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+    frame_normal.event_id = 43;
+    frame_normal.pid = 4000;
+    frame_normal.tid = 8000;
+    frame_normal.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+    frame_normal.duration_us = 16000; // 16.0ms
+    snapshot.push_back(frame_normal);
+
+    // Trigger frame
+    stuttometer::EtwEventRecord frame_trigger{};
+    frame_trigger.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+    frame_trigger.event_id = 43;
+    frame_trigger.pid = 4000;
+    frame_trigger.tid = 8000;
+    frame_trigger.qpc_timestamp = trigger.trigger_timestamp_qpc;
+    frame_trigger.duration_us = 45000; // 45.0ms
+    snapshot.push_back(frame_trigger);
+
+    // Severe DPC spike (3500us > 1000us threshold)
+    stuttometer::EtwEventRecord dpc{};
+    dpc.category = static_cast<uint16_t>(stuttometer::EventCategory::DPC);
+    dpc.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+    dpc.duration_us = 3500;
+    dpc.cpu_index = 2;
+    dpc.payload.routine_addr = 0xFFFFF80012340000ULL;
+    snapshot.push_back(dpc);
+
+    stuttometer::ProviderContext p_ctx;
+    p_ctx.kernel_dpc_active = true;
+
+    stuttometer::CorrelateOptions opts{
+        .window_pre_ms = 250.0,
+        .window_post_ms = 30.0,
+        .present_threshold_ms = 16.67,
+        .provider_tier = "standard",
+        .redact = false
+    };
+
+    auto report = correlator.correlate(snapshot, trigger, qpc_freq, opts, p_ctx);
+
+    STUTTO_ASSERT(!report.diagnoses.empty());
+    STUTTO_ASSERT(report.diagnoses[0].hypothesis == "dpc_isr_spike");
+    STUTTO_ASSERT(report.attribution == stuttometer::AttributionTag::EXTERNAL_CONTENTION);
+    STUTTO_ASSERT(report.attribution_pid == 4);
+    STUTTO_ASSERT(!report.attribution_process.empty());
+    STUTTO_ASSERT(!report.attribution_redacted);
+
+    STUTTO_ASSERT(report.frame_timeline.size() == 2);
+    STUTTO_ASSERT(!report.frame_timeline[0].is_trigger_frame);
+    STUTTO_ASSERT(!report.frame_timeline[0].is_pacing_stall);
+    STUTTO_ASSERT(report.frame_timeline[1].is_trigger_frame);
+    STUTTO_ASSERT(report.frame_timeline[1].is_pacing_stall);
+
+    std::cout << "  -> Attribution: " << stuttometer::attribution_to_string(report.attribution)
+              << " (" << report.attribution_process << " PID " << report.attribution_pid << ") PASSED.\n";
+    std::cout << "  -> Frame timeline points retained: " << report.frame_timeline.size() << " PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -1190,6 +1268,7 @@ int main() {
         test_smi_gap_standard_tier_without_cswitch();
         test_audio_glitch_smi_gap_correlation();
         test_smi_gap_with_benign_dpcs();
+        test_correlator_attribution_pipeline_wiring();
         std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

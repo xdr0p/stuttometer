@@ -443,13 +443,13 @@ static inline double fps_to_present_threshold_ms(double fps) {
     return std::clamp(1000.0 / fps, 2.0, 200.0);
 }
 
-// Helper: Convert UTF-8 std::string to std::wstring
-static std::wstring utf8_to_wstring(const std::string& str) {
+// Helper: Convert UTF-8 std::string_view to std::wstring
+static std::wstring utf8_to_wstring(std::string_view str) {
     if (str.empty()) return std::wstring();
-    int num_chars = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.length()), NULL, 0);
+    int num_chars = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.length()), NULL, 0);
     if (num_chars <= 0) return std::wstring();
     std::wstring result(num_chars, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.length()), result.data(), num_chars);
+    MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.length()), result.data(), num_chars);
     return result;
 }
 
@@ -2806,8 +2806,19 @@ static void update_inspector(int selected_index) {
     } else {
         oss << L"  TARGET PROCESS:      " << utf8_to_wstring(r.target_process) << L" (PID: " << r.trigger.target_pid << L", TID: " << r.trigger.target_tid << L")\r\n";
     }
-    oss << L"  TRIGGER CAUSE:       " << utf8_to_wstring(std::string(trigger_source_to_string(r.trigger.source)))
-        << L" (" << utf8_to_wstring(std::string(trigger_reason_to_string(r.trigger.reason))) << L")\r\n";
+    oss << L"  ATTRIBUTION:         " << utf8_to_wstring(attribution_to_string(r.attribution));
+    if (r.attribution_redacted) {
+        oss << L" (REDACTED)\r\n";
+    } else if (r.attribution_pid != 0) {
+        oss << L" (" << utf8_to_wstring(r.attribution_process) << L" PID " << r.attribution_pid << L")\r\n";
+    } else {
+        oss << L" (" << utf8_to_wstring(r.attribution_process) << L")\r\n";
+    }
+    if (!r.frame_timeline.empty()) {
+        oss << L"  RETAINED FRAMES:     " << r.frame_timeline.size() << L"\r\n";
+    }
+    oss << L"  TRIGGER CAUSE:       " << utf8_to_wstring(trigger_source_to_string(r.trigger.source))
+        << L" (" << utf8_to_wstring(trigger_reason_to_string(r.trigger.reason)) << L")\r\n";
     if (r.trigger.baseline_avg_ms > 0.0) {
         oss << L"  BASELINE DELIVERY:   " << std::fixed << std::setprecision(1) << r.trigger.baseline_fps << L" FPS (" 
             << r.trigger.baseline_avg_ms << L" ms/frame, " << r.trigger.spike_ratio << L"x spike)\r\n";

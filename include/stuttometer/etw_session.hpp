@@ -258,6 +258,8 @@ static inline uint64_t make_pso_key(uint32_t tid, uint64_t pso_ptr) noexcept {
     return (k != 0) ? k : 0xDEADBEEFCAFE0001ULL;
 }
 
+class NdjsonWriter;
+
 class EtwSessionManager {
 public:
     EtwSessionManager(
@@ -266,6 +268,16 @@ public:
         const EtwSessionConfig& config = EtwSessionConfig{}
     );
     ~EtwSessionManager();
+
+    // Must be called prior to start(). Pointer must remain valid for the session lifetime.
+    void set_ndjson_writer(NdjsonWriter* writer) noexcept {
+        ndjson_writer_.store(writer, std::memory_order_release);
+    }
+
+    // Test hook for testing on_event_record in unit tests without starting live ETW sessions
+    void set_running_for_test(bool r) noexcept {
+        running_.store(r, std::memory_order_release);
+    }
 
     // Starts the ETW trace sessions and consumer threads
     SessionStartResult start();
@@ -330,6 +342,34 @@ public:
     static void WINAPI on_event_record(PEVENT_RECORD p_event);
 
 private:
+    struct EventContext {
+        uint64_t timestamp{0};
+        uint32_t pid{0};
+        uint32_t tid{0};
+        uint8_t cpu{0};
+        uint16_t event_id{0};
+        uint8_t opcode{0};
+    };
+
+    void handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_audio_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_dxgkrnl_vsync_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_dxgkrnl_vidmm_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_dxgkrnl_paging_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_power_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_antimalware_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_d3d12_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_kernel_memory_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_process_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_nt_dpc_isr_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_nt_cswitch_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+
+    std::atomic<NdjsonWriter*> ndjson_writer_{nullptr};
+
     void active_flush_worker_loop();
     void user_trace_consumer_loop();
     void kernel_trace_consumer_loop();

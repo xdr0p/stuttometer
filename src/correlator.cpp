@@ -6,6 +6,8 @@
 #include <cmath>
 #include <ctime>
 #include <array>
+#include <iostream>
+#include <atomic>
 
 namespace stuttometer {
 
@@ -28,12 +30,138 @@ static std::string get_current_utc_timestamp() {
     return ss.str();
 }
 
+AttributionResult compute_attribution(const DiagnosticReport& report, uint32_t cached_dwm_pid) {
+    try {
+        if (report.diagnoses.empty() || report.diagnoses[0].confidence < 0.30) {
+            return AttributionResult{
+                .tag = AttributionTag::UNKNOWN,
+                .pid = 0,
+                .process = "Unknown",
+                .redacted = false
+            };
+        }
+
+        const auto& top = report.diagnoses[0];
+        const auto* ev0 = top.evidence.empty() ? nullptr : &top.evidence[0];
+        uint32_t ev_pid = ev0 ? ev0->pid : 0;
+        std::string ev_driver = ev0 ? ev0->driver_module : "";
+
+        AttributionTag tag = AttributionTag::UNKNOWN;
+        uint32_t pid = 0;
+        std::string process;
+
+        const std::string& h = top.hypothesis;
+        if (h == "dpc_isr_spike") {
+            tag = AttributionTag::EXTERNAL_CONTENTION;
+            pid = 4;
+            process = (ev_driver.empty() || ev_driver == "unknown_kernel_address")
+                ? "System (unresolved driver)" : (ev_driver + " (System)");
+        } else if (h == "disk_io_stall") {
+            tag = AttributionTag::EXTERNAL_CONTENTION;
+            pid = ev_pid ? ev_pid : 4;
+            process = ev_pid ? get_process_name_by_pid(ev_pid) : "System Disk I/O";
+            if (process.empty()) process = "System Disk I/O";
+        } else if (h == "context_switch_interference") {
+            tag = AttributionTag::EXTERNAL_CONTENTION;
+            pid = (ev0 && ev0->secondary_pid) ? ev0->secondary_pid : ev_pid;
+            process = pid ? get_process_name_by_pid(pid) : "Unknown (preempting thread PID unresolved)";
+            if (process.empty()) process = "Unknown (preempting thread PID unresolved)";
+        } else if (h == "gpu_pipeline_stall") {
+            tag = AttributionTag::GAME_ENGINE;
+            pid = report.trigger.target_pid;
+            process = report.target_process.empty() ? "Target Process" : report.target_process;
+        } else if (h == "dwm_compositor_stall") {
+            tag = AttributionTag::DWM_COMPOSITION;
+            pid = (cached_dwm_pid != 0) ? cached_dwm_pid : 4;
+            process = (cached_dwm_pid != 0) ? "dwm.exe" : "dwm.exe (unresolved, System)";
+        } else if (h == "page_fault_stall") {
+            if (ev_pid == report.trigger.target_pid || ev_pid == 0) {
+                tag = AttributionTag::GAME_ENGINE;
+                pid = report.trigger.target_pid;
+                process = report.target_process.empty() ? "Target Process" : report.target_process;
+            } else {
+                tag = AttributionTag::EXTERNAL_CONTENTION;
+                pid = ev_pid;
+                process = get_process_name_by_pid(ev_pid);
+                if (process.empty()) process = "Unknown Page Fault";
+            }
+        } else if (h == "thermal_throttle") {
+            tag = AttributionTag::EXTERNAL_CONTENTION;
+            pid = 0;
+            process = "CPU Thermal Throttling (Hardware)";
+        } else if (h == "antimalware_interference") {
+            tag = AttributionTag::EXTERNAL_CONTENTION;
+            pid = ev_pid ? ev_pid : resolve_process_name_to_pid("MsMpEng.exe");
+            process = "MsMpEng.exe";
+        } else if (h == "d3d12_shader_pso_compilation_stall") {
+            tag = AttributionTag::GAME_ENGINE;
+            pid = report.trigger.target_pid;
+            process = report.target_process.empty() ? "Target Process" : report.target_process;
+        } else if (h == "vram_exhaustion_paging_stall" || h == "virtual_memory_allocation_stall") {
+            if (ev_pid == report.trigger.target_pid || ev_pid == 0) {
+                tag = AttributionTag::GAME_ENGINE;
+                pid = report.trigger.target_pid;
+                process = report.target_process.empty() ? "Target Process" : report.target_process;
+            } else {
+                tag = AttributionTag::EXTERNAL_CONTENTION;
+                pid = ev_pid;
+                process = get_process_name_by_pid(ev_pid);
+                if (process.empty()) process = "External Allocator";
+            }
+        } else if (h == "low_memory_working_set_trim_stall" || h == "physical_memory_allocation_latency") {
+            tag = AttributionTag::EXTERNAL_CONTENTION;
+            pid = 4;
+            process = "NT Kernel (System Memory Manager)";
+        } else if (h == "frame_pacing_judder") {
+            tag = AttributionTag::GAME_ENGINE;
+            pid = report.trigger.target_pid;
+            process = report.target_process.empty() ? "Target Process" : report.target_process;
+        } else if (h == "unprofiled_hardware_or_smi_stall") {
+            tag = AttributionTag::EXTERNAL_CONTENTION;
+            pid = 0;
+            process = "Hardware / BIOS SMI Execution";
+        } else {
+            tag = AttributionTag::UNKNOWN;
+            pid = 0;
+            process = "Unknown";
+        }
+
+        if (report.redacted) {
+            return AttributionResult{
+                .tag = tag,
+                .pid = 0,
+                .process = "REDACTED",
+                .redacted = true
+            };
+        }
+        return AttributionResult{
+            .tag = tag,
+            .pid = pid,
+            .process = process,
+            .redacted = false
+        };
+    } catch (const std::exception& ex) {
+        static std::atomic<bool> logged{false};
+        bool expected = false;
+        if (logged.compare_exchange_strong(expected, true)) {
+            std::cerr << "[CORRELATOR] Warning: Attribution calculation failed: " << ex.what() << "\n";
+        }
+        return AttributionResult{
+            .tag = AttributionTag::UNKNOWN,
+            .pid = 0,
+            .process = "Unknown",
+            .redacted = false
+        };
+    }
+}
+
 CorrelationEngine::CorrelationEngine(
     const DriverSymbolResolver& driver_resolver,
     const CorrelatorThresholds& thresholds
 )
     : driver_resolver_(driver_resolver)
     , thresholds_(thresholds)
+    , cached_dwm_pid_(resolve_process_name_to_pid("dwm.exe"))
 {
 }
 
@@ -47,9 +175,36 @@ DiagnosticReport CorrelationEngine::correlate(
     uint64_t insertion_failures,
     uint64_t producer_dropped_events
 ) const {
+    CorrelateOptions default_opts{};
+    return correlate(snapshot, trigger, qpc_freq, default_opts, provider_ctx,
+                     dropped_events, unpaired_evictions, insertion_failures, producer_dropped_events);
+}
+
+DiagnosticReport CorrelationEngine::correlate(
+    const std::vector<EtwEventRecord>& snapshot,
+    const TriggerInfo& trigger,
+    uint64_t qpc_freq,
+    const CorrelateOptions& options,
+    const ProviderContext& provider_ctx,
+    uint64_t dropped_events,
+    uint64_t unpaired_evictions,
+    uint64_t insertion_failures,
+    uint64_t producer_dropped_events
+) const {
     DiagnosticReport report;
     report.timestamp_utc = get_current_utc_timestamp();
     report.trigger = trigger;
+    report.window_pre_ms = options.window_pre_ms;
+    report.window_post_ms = options.window_post_ms;
+    report.present_threshold_ms = options.present_threshold_ms;
+    report.provider_tier = options.provider_tier;
+    report.redacted = options.redact;
+    if (trigger.target_pid != 0) {
+        report.target_process = options.redact ? "Process_REDACTED" : get_process_name_by_pid(trigger.target_pid);
+        if (report.target_process.empty()) {
+            report.target_process = "Target Process (PID " + std::to_string(trigger.target_pid) + ")";
+        }
+    }
     report.total_events = snapshot.size();
     report.dropped_events = dropped_events;
     report.producer_dropped_events = producer_dropped_events;
@@ -253,6 +408,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.duration_us = cand.record.duration_us;
             ev.cpu_core = cand.record.cpu_index;
             ev.offset_from_trigger_ms = cand.offset_ms;
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
 
@@ -295,6 +451,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.cpu_core = cand.record.cpu_index;
             ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = std::to_string(cand.record.auxiliary_data) + " bytes";
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
 
@@ -360,6 +517,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.offset_from_trigger_ms = cand.offset_ms;
             ev.secondary_tid = cand.record.payload.cswitch.prev_tid;
             ev.secondary_pid = cand.record.payload.cswitch.prev_pid;
+            ev.pid = cand.record.pid;
             if (cand.is_resumption) {
                 std::stringstream ev_ss;
                 ev_ss << "Resumed TID " << cand.record.tid << " after " << std::fixed << std::setprecision(1) 
@@ -454,6 +612,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.cpu_core = cand.record.cpu_index;
             ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = "GlitchType: " + std::to_string(cand.record.auxiliary_data);
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
 
@@ -498,6 +657,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.cpu_core = cand.record.cpu_index;
             ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = std::to_string(cand.record.auxiliary_data) + " bytes (hard fault)";
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -558,6 +718,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.cpu_core = cand.record.cpu_index;
             ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = "Real-time scan (" + std::to_string(cand.record.duration_us / 1000) + "ms)";
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -601,6 +762,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = ((cand.record.flags & EventFlags::D3D12_COMPUTE_PSO) ? "Compute/DXR State Object (" : "Graphics PSO (") +
                             std::to_string(cand.record.duration_us / 1000) + "ms)";
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -652,6 +814,7 @@ DiagnosticReport CorrelationEngine::correlate(
                 ev_ss << "PCIe Paging Transfer: " << std::fixed << std::setprecision(1) << mb << " MB";
             }
             ev.extra_info = ev_ss.str();
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -694,6 +857,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.offset_from_trigger_ms = cand.offset_ms;
             const double mb = cand.record.auxiliary_data / (1024.0 * 1024.0);
             ev.extra_info = "Committed " + std::to_string(static_cast<uint64_t>(mb)) + " MB (Base " + format_hex_address(cand.record.payload.routine_addr) + ")";
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -745,6 +909,7 @@ DiagnosticReport CorrelationEngine::correlate(
                 ev_ss << " (" << (cand.record.duration_us / 1000.0) << "ms)";
             }
             ev.extra_info = ev_ss.str();
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -787,6 +952,7 @@ DiagnosticReport CorrelationEngine::correlate(
             ev.offset_from_trigger_ms = cand.offset_ms;
             const double mb = cand.record.auxiliary_data / (1024.0 * 1024.0);
             ev.extra_info = "Physical alloc: " + std::to_string(cand.record.duration_us / 1000) + "ms (" + std::to_string(static_cast<uint64_t>(mb)) + " MB)";
+            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -855,6 +1021,111 @@ DiagnosticReport CorrelationEngine::correlate(
     }
 
     report.diagnoses = std::move(hypotheses);
+
+    // 18. Frame Timeline Population
+    const bool is_frame_trigger = (trigger.source == TriggerSource::DXGI_PRESENT_STUTTER ||
+                                   trigger.source == TriggerSource::FRAME_PACING_JUDDER ||
+                                   trigger.source == TriggerSource::KERNEL_FRAME_STALL);
+    if (is_frame_trigger && trigger.target_pid != 0) {
+        std::vector<EtwEventRecord> present_stops;
+        present_stops.reserve(1024);
+        for (const auto& rec : snapshot) {
+            if (static_cast<EventCategory>(rec.category) == EventCategory::DXGI &&
+                rec.pid == trigger.target_pid &&
+                rec.duration_us > 0) {
+                present_stops.push_back(rec);
+            }
+        }
+
+        if (!present_stops.empty()) {
+            std::sort(present_stops.begin(), present_stops.end(), [](const EtwEventRecord& a, const EtwEventRecord& b) {
+                return a.qpc_timestamp < b.qpc_timestamp;
+            });
+
+            // Find anchor frame: closest to trigger_timestamp_qpc within 1 ms tolerance, or closest preceding
+            const uint64_t tolerance_ticks = (qpc_freq > 0) ? (qpc_freq / 1000) : 10000;
+            size_t anchor_idx = 0;
+            bool found_anchor = false;
+            uint64_t min_diff = UINT64_MAX;
+
+            for (size_t i = 0; i < present_stops.size(); ++i) {
+                uint64_t diff = (present_stops[i].qpc_timestamp >= trigger.trigger_timestamp_qpc)
+                    ? (present_stops[i].qpc_timestamp - trigger.trigger_timestamp_qpc)
+                    : (trigger.trigger_timestamp_qpc - present_stops[i].qpc_timestamp);
+                if (diff < tolerance_ticks && diff < min_diff) {
+                    min_diff = diff;
+                    anchor_idx = i;
+                    found_anchor = true;
+                }
+            }
+
+            if (!found_anchor) {
+                // Fallback: pick closest preceding record
+                size_t best_prec = 0;
+                bool found_prec = false;
+                for (size_t i = 0; i < present_stops.size(); ++i) {
+                    if (present_stops[i].qpc_timestamp <= trigger.trigger_timestamp_qpc) {
+                        best_prec = i;
+                        found_prec = true;
+                    }
+                }
+                anchor_idx = found_prec ? best_prec : 0;
+            }
+
+            // Balanced 512/512 capping around anchor frame with asymmetric expansion
+            const size_t total_avail = present_stops.size();
+            size_t start_idx = 0;
+            size_t end_idx = total_avail;
+
+            if (total_avail > DiagnosticReport::MAX_TIMELINE_POINTS) {
+                const size_t avail_pre = anchor_idx;
+                const size_t avail_post = total_avail - anchor_idx;
+
+                size_t take_pre = 0;
+                size_t take_post = 0;
+
+                if (avail_pre < 512) {
+                    take_pre = avail_pre;
+                    take_post = std::min(avail_post, DiagnosticReport::MAX_TIMELINE_POINTS - avail_pre);
+                } else if (avail_post < 512) {
+                    take_post = avail_post;
+                    take_pre = std::min(avail_pre, DiagnosticReport::MAX_TIMELINE_POINTS - avail_post);
+                } else {
+                    take_pre = 512;
+                    take_post = 512;
+                }
+
+                start_idx = anchor_idx - take_pre;
+                end_idx = anchor_idx + take_post;
+            }
+
+            report.frame_timeline.reserve(end_idx - start_idx);
+            const double effective_thresh_ms = report.present_threshold_ms + std::max(0.5, report.present_threshold_ms * 0.05);
+
+            for (size_t i = start_idx; i < end_idx; ++i) {
+                const auto& rec = present_stops[i];
+                FrameTimelinePoint pt;
+                pt.frame_index = static_cast<uint32_t>(i - start_idx);
+                pt.relative_index = static_cast<int32_t>(i) - static_cast<int32_t>(anchor_idx);
+                pt.qpc_timestamp = rec.qpc_timestamp;
+                pt.duration_ms = rec.duration_us / 1000.0;
+                pt.offset_from_trigger_ms = (rec.qpc_timestamp >= trigger.trigger_timestamp_qpc)
+                    ? qpc_delta_to_ms(rec.qpc_timestamp - trigger.trigger_timestamp_qpc, qpc_freq)
+                    : -qpc_delta_to_ms(trigger.trigger_timestamp_qpc - rec.qpc_timestamp, qpc_freq);
+                pt.is_trigger_frame = (i == anchor_idx);
+                pt.is_pacing_stall = (pt.duration_ms >= effective_thresh_ms);
+                report.frame_timeline.push_back(pt);
+            }
+        }
+    }
+
+    // 19. Compute Attribution
+    AttributionResult attr = compute_attribution(report, cached_dwm_pid_);
+    report.attribution = attr.tag;
+    report.attribution_pid = attr.pid;
+    report.attribution_process = std::move(attr.process);
+    report.attribution_redacted = attr.redacted;
+
     return report;
 }
 

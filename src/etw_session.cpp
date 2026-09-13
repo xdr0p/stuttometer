@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include "stuttometer/etw_session.hpp"
+#include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include <tdh.h>
 
@@ -539,6 +540,742 @@ void EtwSessionManager::kernel_trace_consumer_loop() {
     }
 }
 
+void EtwSessionManager::handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::DXGI);
+
+    uint64_t swapchain_ptr = 0;
+    if (p_event->UserDataLength >= 8 && p_event->UserData) {
+        std::memcpy(&swapchain_ptr, p_event->UserData, sizeof(uint64_t));
+    }
+    rec.auxiliary_data = swapchain_ptr;
+    uint64_t present_key = make_present_key(ctx.tid, swapchain_ptr);
+
+    if (ctx.event_id == 42 || ctx.event_id == 55) { // Present Start / PresentMultiplaneOverlay Start
+        in_flight_present_.insert(present_key, { ctx.timestamp, ctx.pid, ctx.tid });
+    } else if (ctx.event_id == 43 || ctx.event_id == 56) { // Present Stop / PresentMultiplaneOverlay Stop
+        PresentInFlight present_data{};
+        bool has_in_flight = in_flight_present_.find_and_erase(present_key, present_data);
+        uint64_t start_qpc = (has_in_flight && present_data.pid == ctx.pid) ? present_data.start_qpc : 0;
+
+        LastPresentEntry last_entry{};
+        bool has_prev = last_present_table_.lookup(present_key, last_entry);
+        uint64_t prev_qpc = has_prev ? last_entry.last_present_qpc : 0;
+
+        PresentDeltaResult delta_res = calculate_effective_present_duration(
+            ctx.timestamp, prev_qpc, start_qpc, qpc_freq_, 10000000ULL
+        );
+
+        last_present_table_.insert(present_key, { ctx.timestamp, ctx.pid, ctx.tid });
+
+        uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, 10000000ULL));
+        rec.duration_us = clamped_dur_us;
+
+        flight_recorder_.push(rec);
+
+        if (!delta_res.is_baseline_reset && delta_res.effective_dur_us > 0) {
+            double dur_ms = delta_res.effective_dur_us / 1000.0;
+            trigger_engine_.on_dxgi_present(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, present_key, ctx.cpu);
+        }
+    }
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_audio_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    if (ctx.event_id == 11) { // AudioGlitch Event ID 11
+        rec.category = static_cast<uint16_t>(EventCategory::AUDIO);
+        rec.flags |= EventFlags::AUDIO_BUFFER_UNDERRUN;
+        uint32_t glitch_count = 1;
+        int32_t error_code = 0;
+        if (p_event->UserDataLength >= sizeof(uint32_t) && p_event->UserData) {
+            std::memcpy(&glitch_count, p_event->UserData, sizeof(uint32_t));
+            glitch_count = std::clamp(glitch_count, 1U, 1'000'000U);
+        }
+        if (p_event->UserDataLength >= (sizeof(uint32_t) + sizeof(int32_t)) && p_event->UserData) {
+            std::memcpy(&error_code, static_cast<const uint8_t*>(p_event->UserData) + sizeof(uint32_t), sizeof(int32_t));
+        }
+        rec.payload.audio.glitch_count = glitch_count;
+        rec.payload.audio.error_code = error_code;
+        rec.auxiliary_data = glitch_count;
+
+        flight_recorder_.push(rec);
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+
+        trigger_engine_.on_audio_glitch(ctx.pid, ctx.tid, glitch_count, ctx.timestamp, ctx.cpu);
+    }
+}
+
+void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_MMIOFLIP);
+
+    uint64_t flip_fence_id = 0;
+    uint32_t vidpn_source_id = 0;
+    uint64_t swapchain_ptr = 0;
+    if (p_event->UserDataLength >= 12 && p_event->UserData) {
+        const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+        std::memcpy(&flip_fence_id, raw + 0, sizeof(uint64_t));
+        std::memcpy(&vidpn_source_id, raw + 8, sizeof(uint32_t));
+        if (p_event->UserDataLength >= 24) {
+            std::memcpy(&swapchain_ptr, raw + 16, sizeof(uint64_t));
+        }
+    }
+
+    rec.auxiliary_data = swapchain_ptr;
+    rec.payload.dxgi.present_flags = vidpn_source_id;
+    rec.payload.dxgi.frame_index = static_cast<uint32_t>(flip_fence_id & 0xFFFFFFFF);
+
+    const uint64_t flip_key = make_flip_key(vidpn_source_id, swapchain_ptr);
+    LastFlipEntry last_entry{};
+    bool has_prev = last_flip_table_.lookup(flip_key, last_entry);
+    uint64_t prev_qpc = has_prev ? last_entry.last_flip_qpc : 0;
+
+    double delivery_ms = 0.0;
+    bool is_baseline = true;
+
+    if (has_prev && prev_qpc > 0 && ctx.timestamp > prev_qpc) {
+        uint64_t delta_qpc = ctx.timestamp - prev_qpc;
+        double delta_us = qpc_delta_to_us(delta_qpc, qpc_freq_);
+        if (delta_us <= 30000000.0) { // 30s ceiling for loading / Alt-Tab
+            delivery_ms = delta_us / 1000.0;
+            is_baseline = false;
+            rec.duration_us = static_cast<uint32_t>(std::min(delta_us, 10000000.0));
+        }
+    }
+
+    last_flip_table_.insert(flip_key, { ctx.timestamp, static_cast<uint32_t>(swapchain_ptr & 0xFFFFFFFF), ctx.pid, ctx.tid });
+
+    flight_recorder_.push(rec);
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+
+    if (!is_baseline && delivery_ms > 0.0) {
+        trigger_engine_.on_kernel_frame_stall(ctx.pid, ctx.tid, delivery_ms, ctx.timestamp, flip_key, ctx.cpu);
+    }
+}
+
+void EtwSessionManager::handle_dxgkrnl_vsync_event(PEVENT_RECORD /*p_event*/, EtwEventRecord& rec, const EventContext& /*ctx*/) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VSYNCDPC);
+    flight_recorder_.push(rec);
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_dxgkrnl_vidmm_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VRAM_PAGING);
+    const uint16_t task = p_event->EventHeader.EventDescriptor.Task;
+    if (ctx.event_id == 370 || task == 222) {
+        if (p_event->UserDataLength >= 28 && p_event->UserData) {
+            uint64_t commitment = 0;
+            uint64_t old_commitment = 0;
+            uint32_t process_id = 0;
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            std::memcpy(&commitment, raw + 0, sizeof(uint64_t));
+            std::memcpy(&old_commitment, raw + 8, sizeof(uint64_t));
+            std::memcpy(&process_id, raw + 24, sizeof(uint32_t));
+
+            if (commitment > 0) {
+                rec.pid = (process_id != 0) ? process_id : ctx.pid;
+                rec.auxiliary_data = commitment;
+                rec.flags = EventFlags::VRAM_DEMOTED_COMMITMENT;
+                flight_recorder_.push(rec);
+            }
+        }
+    } else if (ctx.event_id == 367 || task == 219) {
+        if (p_event->UserDataLength >= 31 && p_event->UserData) {
+            uint64_t new_usage = 0;
+            uint32_t process_id = 0;
+            uint8_t memory_segment_group = 0;
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            std::memcpy(&new_usage, raw + 0, sizeof(uint64_t));
+            std::memcpy(&process_id, raw + 24, sizeof(uint32_t));
+            std::memcpy(&memory_segment_group, raw + 30, sizeof(uint8_t));
+
+            if (memory_segment_group == 1 && new_usage > 0) {
+                rec.pid = (process_id != 0) ? process_id : ctx.pid;
+                rec.auxiliary_data = new_usage;
+                rec.flags = EventFlags::VRAM_USAGE_OVER_BUDGET;
+                flight_recorder_.push(rec);
+            }
+        }
+    }
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_dxgkrnl_paging_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& /*ctx*/) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VRAM_PAGING);
+    if (p_event->UserDataLength >= 64 && p_event->UserData) {
+        uint64_t number_of_pages = 0;
+        const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+        std::memcpy(&number_of_pages, raw + 48, sizeof(uint64_t));
+
+        if (number_of_pages > 0) {
+            rec.auxiliary_data = number_of_pages * 4096ULL;
+            rec.flags = EventFlags::VRAM_PAGING_TRANSFER;
+            flight_recorder_.push(rec);
+        }
+    }
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::DWM_GLITCH);
+
+    const uint64_t dedup_window_qpc = ms_to_qpc_delta(50.0, qpc_freq_);
+    for (size_t i = 0; i < 16; ++i) {
+        uint64_t recent_ts = recent_dwm_glitches_qpc_[i].load(std::memory_order_acquire);
+        if (recent_ts > 0) {
+            const uint64_t delta_qpc = (ctx.timestamp >= recent_ts) ? (ctx.timestamp - recent_ts) : (recent_ts - ctx.timestamp);
+            if (delta_qpc < dedup_window_qpc) {
+                NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+                if (writer) writer->push(rec);
+                return;
+            }
+        }
+    }
+
+    uint32_t slot = (recent_dwm_glitch_idx_.fetch_add(1, std::memory_order_relaxed)) & 15;
+    recent_dwm_glitches_qpc_[slot].store(ctx.timestamp, std::memory_order_release);
+
+    const double vblank_ms = (trigger_engine_.vblank_interval_ms() > 0.0) 
+        ? trigger_engine_.vblank_interval_ms() 
+        : 16.67;
+    uint32_t glitch_type = 0;
+    uint32_t missed_vblanks = 0;
+    if (p_event->UserDataLength >= 8 && p_event->UserData) {
+        const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+        std::memcpy(&glitch_type, raw + 0, sizeof(uint32_t));
+        std::memcpy(&missed_vblanks, raw + 4, sizeof(uint32_t));
+    }
+    rec.auxiliary_data = glitch_type;
+    const double dur_ms = (missed_vblanks >= 1) ? (missed_vblanks * vblank_ms) : vblank_ms;
+    rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1000.0, 10000000.0));
+    flight_recorder_.push(rec);
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+
+    trigger_engine_.on_dwm_glitch(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, ctx.cpu);
+}
+
+void EtwSessionManager::handle_power_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    if (ctx.event_id == 37) {
+        rec.category = static_cast<uint16_t>(EventCategory::THERMAL_THROTTLE);
+
+        if (p_event->UserDataLength >= 24 && p_event->UserData) {
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            uint32_t core_number = 0;
+            uint32_t cap_duration_sec = 0;
+            std::memcpy(&core_number, raw + 4, sizeof(uint32_t));
+            std::memcpy(&cap_duration_sec, raw + 8, sizeof(uint32_t));
+            if (core_number <= 1024 && cap_duration_sec <= 86400) {
+                rec.cpu_index = static_cast<uint8_t>(std::min(core_number, 255U));
+                rec.auxiliary_data = cap_duration_sec;
+                rec.duration_us = 0;
+                flight_recorder_.push(rec);
+            }
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+}
+
+void EtwSessionManager::handle_antimalware_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::ANTIMALWARE_SCAN);
+
+    uint64_t scan_key = 0;
+    const auto& act = p_event->EventHeader.ActivityId;
+    if (!IsEqualGUID(act, GUID_NULL)) {
+        scan_key = activity_id_to_key(act);
+    }
+    if (scan_key == 0) {
+        scan_key = (static_cast<uint64_t>(ctx.pid) << 32) | (ctx.tid != 0 ? ctx.tid : 1);
+    }
+
+    if (ctx.opcode == 1) { // win:Start
+        in_flight_scans_.insert(scan_key, { ctx.timestamp, ctx.pid, ctx.tid });
+    } else if (ctx.opcode == 2) { // win:Stop
+        AntimalwareScanInFlight scan_data{};
+        if (in_flight_scans_.find_and_erase(scan_key, scan_data)) {
+            if (ctx.timestamp >= scan_data.start_qpc) {
+                const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - scan_data.start_qpc, qpc_freq_));
+                if (delta_us <= 10000000ULL) {
+                    rec.duration_us = static_cast<uint32_t>(delta_us);
+                }
+            }
+        }
+        if (rec.duration_us > 0) {
+            flight_recorder_.push(rec);
+        }
+    }
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_d3d12_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    const auto& desc = p_event->EventHeader.EventDescriptor;
+    const uint16_t task = desc.Task;
+    const uint8_t op = desc.Opcode;
+
+    // Note: Non-PSO D3D12 events (draw calls, resource bindings, etc.) are intentionally filtered to preserve high signal-to-noise ratio in the categorized NDJSON stream.
+    const bool is_pso_task = (task == 29 || task == 66 || task == 67 || ctx.event_id == 63 || ctx.event_id == 64 || ctx.event_id == 155 || ctx.event_id == 156 || ctx.event_id == 157 || ctx.event_id == 158);
+
+    if (is_pso_task) {
+        rec.category = static_cast<uint16_t>(EventCategory::D3D12_PSO_CREATE);
+
+        uint64_t pso_ptr = 0;
+        if (p_event->UserDataLength >= sizeof(uint64_t) && p_event->UserData) {
+            if (p_event->UserDataLength >= 16) {
+                std::memcpy(&pso_ptr, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
+            } else {
+                std::memcpy(&pso_ptr, p_event->UserData, sizeof(uint64_t));
+            }
+        }
+
+        uint64_t pso_key = 0;
+        const auto& act = p_event->EventHeader.ActivityId;
+        if (!IsEqualGUID(act, GUID_NULL)) {
+            pso_key = activity_id_to_key(act);
+        }
+        if (pso_key == 0 || pso_key == 1ULL) {
+            pso_key = make_pso_key(ctx.tid, pso_ptr);
+        }
+
+        uint16_t flags = EventFlags::NONE;
+        if (task == 29 || ctx.event_id == 63 || ctx.event_id == 64) {
+            flags |= EventFlags::D3D12_GRAPHICS_PSO;
+        } else if (task == 67 || ctx.event_id == 157 || ctx.event_id == 158) {
+            flags |= EventFlags::D3D12_COMPUTE_PSO;
+        }
+
+        if (op == 1 || ctx.event_id == 63 || ctx.event_id == 155 || ctx.event_id == 157) { // win:Start
+            in_flight_pso_table_.insert(pso_key, { ctx.timestamp, ctx.pid, ctx.tid, pso_ptr, flags });
+            rec.flags = flags;
+            rec.auxiliary_data = pso_ptr;
+        } else if (op == 2 || ctx.event_id == 64 || ctx.event_id == 156 || ctx.event_id == 158) { // win:Stop
+            PsoInFlight pso_data{};
+            if (in_flight_pso_table_.find_and_erase(pso_key, pso_data)) {
+                if (ctx.timestamp >= pso_data.start_qpc) {
+                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - pso_data.start_qpc, qpc_freq_));
+                    if (delta_us <= 10000000ULL) {
+                        rec.duration_us = static_cast<uint32_t>(delta_us);
+                    }
+                }
+                if (flags == EventFlags::NONE) {
+                    flags = pso_data.flags;
+                }
+                if (pso_ptr == 0) {
+                    pso_ptr = pso_data.pso_ptr;
+                }
+            }
+            rec.flags = flags;
+            rec.auxiliary_data = pso_ptr;
+            if (rec.duration_us > 0) {
+                flight_recorder_.push(rec);
+            }
+        } else {
+            rec.flags = flags;
+            rec.auxiliary_data = pso_ptr;
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+}
+
+void EtwSessionManager::handle_kernel_memory_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    if (ctx.event_id == 4) { // WorkingSetOutSwap Start
+        rec.category = static_cast<uint16_t>(EventCategory::MEM_WORKING_SET_TRIM);
+
+        if (p_event->UserDataLength >= 4 && p_event->UserData) {
+            uint32_t target_proc = 0;
+            std::memcpy(&target_proc, p_event->UserData, sizeof(uint32_t));
+            if (target_proc != 0 && target_proc != 4) {
+                WorkingSetTrimInFlight trim_entry{};
+                trim_entry.start_qpc = ctx.timestamp;
+                trim_entry.pid = target_proc;
+                const uint64_t trim_key = (static_cast<uint64_t>(target_proc) << 32) | (ctx.tid != 0 ? ctx.tid : 1);
+                in_flight_ws_trims_.insert(trim_key, trim_entry);
+            }
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    } else if (ctx.event_id == 5) { // WorkingSetOutSwap Stop
+        rec.category = static_cast<uint16_t>(EventCategory::MEM_WORKING_SET_TRIM);
+
+        if (p_event->UserDataLength >= 16 && p_event->UserData) {
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            uint32_t target_proc = 0;
+            uint64_t pages_processed = 0;
+            std::memcpy(&target_proc, raw + 0, sizeof(uint32_t));
+            std::memcpy(&pages_processed, raw + 8, sizeof(uint64_t));
+
+            rec.pid = target_proc;
+            rec.auxiliary_data = pages_processed * 4096ULL;
+            rec.flags = EventFlags::MEM_WS_TRIM_OUTSWAP;
+
+            WorkingSetTrimInFlight start_entry{};
+            const uint64_t trim_key = (static_cast<uint64_t>(target_proc) << 32) | (ctx.tid != 0 ? ctx.tid : 1);
+            if (target_proc != 0 && target_proc != 4 && in_flight_ws_trims_.find_and_erase(trim_key, start_entry)) {
+                if (ctx.timestamp >= start_entry.start_qpc) {
+                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - start_entry.start_qpc, qpc_freq_));
+                    if (delta_us <= 10000000ULL) {
+                        rec.duration_us = static_cast<uint32_t>(delta_us);
+                    }
+                }
+            }
+            flight_recorder_.push(rec);
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    } else if (ctx.event_id == 10 || ctx.event_id == 11) { // MdlAllocation (10) or ContAllocation (11)
+        rec.category = static_cast<uint16_t>(EventCategory::MEM_PHYSICAL_ALLOC);
+
+        if (p_event->UserDataLength >= 16 && p_event->UserData) {
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            uint64_t dur_us = 0;
+            uint64_t total_bytes = 0;
+            std::memcpy(&dur_us, raw + 0, sizeof(uint64_t));
+            std::memcpy(&total_bytes, raw + 8, sizeof(uint64_t));
+
+            if (dur_us <= 10000000ULL) {
+                rec.duration_us = static_cast<uint32_t>(dur_us);
+            }
+            rec.auxiliary_data = total_bytes;
+            rec.flags = EventFlags::MEM_PHYSICAL_CONTIGUOUS;
+            flight_recorder_.push(rec);
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+}
+
+void EtwSessionManager::handle_process_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::UNKNOWN);
+
+    if (ctx.event_id == 1 && p_event->UserDataLength >= 4 && p_event->UserData) {
+        uint32_t target_pid = 0;
+        std::memcpy(&target_pid, p_event->UserData, sizeof(uint32_t));
+        if (target_pid != 0) {
+            rec.pid = target_pid;
+            std::string proc_name;
+            if (p_event->UserDataLength > 24) {
+                const auto* raw_bytes = static_cast<const uint8_t*>(p_event->UserData) + 24;
+                const auto* p_ws = reinterpret_cast<const wchar_t*>(raw_bytes);
+                const size_t max_wchars = (p_event->UserDataLength - 24) / sizeof(wchar_t);
+                size_t wlen = 0;
+                while (wlen < max_wchars && p_ws[wlen] != L'\0') {
+                    ++wlen;
+                }
+                if (wlen > 0) {
+                    std::string full_path = utf16_to_utf8(std::wstring_view(p_ws, wlen));
+                    const size_t slash = full_path.find_last_of("\\/");
+                    proc_name = (slash != std::string::npos) ? full_path.substr(slash + 1) : full_path;
+                }
+            }
+            if (proc_name.empty()) {
+                proc_name = get_process_name_by_pid(target_pid);
+            }
+            if (!proc_name.empty()) {
+                trigger_engine_.on_process_launched(target_pid, proc_name);
+            }
+        }
+    } else if (ctx.event_id == 2 && p_event->UserDataLength >= 4 && p_event->UserData) {
+        uint32_t target_pid = 0;
+        std::memcpy(&target_pid, p_event->UserData, sizeof(uint32_t));
+        if (target_pid != 0) {
+            rec.pid = target_pid;
+            trigger_engine_.on_process_terminated(target_pid);
+        }
+    }
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_nt_dpc_isr_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    // DPC Completion
+    if (ctx.opcode == KERNEL_OPCODE_DPC_CLASSIC || ctx.event_id == KERNEL_OPCODE_DPC_CLASSIC || 
+        ctx.opcode == KERNEL_OPCODE_DPC || ctx.event_id == KERNEL_OPCODE_DPC || 
+        ctx.opcode == KERNEL_OPCODE_TIMER || ctx.event_id == KERNEL_OPCODE_TIMER || 
+        (p_event->EventHeader.EventDescriptor.Task == 1 && ctx.opcode == 2)) {
+        rec.category = static_cast<uint16_t>(EventCategory::DPC);
+
+        if (p_event->UserDataLength >= 12 && p_event->UserData) {
+            uint64_t initial_time = 0;
+            uint64_t routine = 0;
+            if (p_event->UserDataLength == 12) {
+                uint32_t initial_time_32 = 0;
+                std::memcpy(&initial_time_32, p_event->UserData, sizeof(uint32_t));
+                initial_time = initial_time_32;
+                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 4, sizeof(uint64_t));
+            } else if (p_event->UserDataLength >= 16) {
+                std::memcpy(&initial_time, p_event->UserData, sizeof(uint64_t));
+                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
+            }
+            if (initial_time > 0 || routine > 0) {
+                rec.payload.routine_addr = routine;
+                rec.auxiliary_data = routine;
+                if (ctx.timestamp >= initial_time) {
+                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - initial_time, qpc_freq_));
+                    if (delta_us <= 10000000ULL) {
+                        rec.duration_us = static_cast<uint32_t>(delta_us);
+                    }
+                }
+                flight_recorder_.push(rec);
+            }
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+    // ISR Completion
+    else if (ctx.opcode == KERNEL_OPCODE_ISR_CLASSIC || ctx.event_id == KERNEL_OPCODE_ISR_CLASSIC || (p_event->EventHeader.EventDescriptor.Task == 2 && ctx.opcode == 2)) {
+        rec.category = static_cast<uint16_t>(EventCategory::ISR);
+
+        if (p_event->UserDataLength >= 12 && p_event->UserData) {
+            uint64_t initial_time = 0;
+            uint64_t routine = 0;
+            if (p_event->UserDataLength == 12) {
+                uint32_t initial_time_32 = 0;
+                std::memcpy(&initial_time_32, p_event->UserData, sizeof(uint32_t));
+                initial_time = initial_time_32;
+                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 4, sizeof(uint64_t));
+            } else if (p_event->UserDataLength >= 16) {
+                std::memcpy(&initial_time, p_event->UserData, sizeof(uint64_t));
+                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
+            }
+            if (initial_time > 0 || routine > 0) {
+                rec.payload.routine_addr = routine;
+                rec.auxiliary_data = routine;
+                if (ctx.timestamp >= initial_time) {
+                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - initial_time, qpc_freq_));
+                    if (delta_us <= 10000000ULL) {
+                        rec.duration_us = static_cast<uint32_t>(delta_us);
+                    }
+                }
+                flight_recorder_.push(rec);
+            }
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+    // Kernel Profile / Sampled Profile (Opcode 46 / PerfInfo Sample)
+    else if (ctx.opcode == 46 || (p_event->EventHeader.EventDescriptor.Task == 7 && ctx.opcode == 2)) {
+        rec.category = static_cast<uint16_t>(EventCategory::PROFILE);
+        if (p_event->UserDataLength >= sizeof(uint64_t) && p_event->UserData) {
+            uint64_t ip = 0;
+            std::memcpy(&ip, p_event->UserData, sizeof(uint64_t));
+            rec.payload.routine_addr = ip;
+            rec.auxiliary_data = ip;
+        }
+        flight_recorder_.push(rec);
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+}
+
+void EtwSessionManager::handle_nt_cswitch_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::CSWITCH);
+
+    if (p_event->UserDataLength >= 15 && p_event->UserData) {
+        const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+        uint32_t new_tid = 0;
+        uint32_t old_tid = 0;
+        uint8_t old_state = 0;
+
+        std::memcpy(&new_tid, raw + 0, sizeof(uint32_t));
+        std::memcpy(&old_tid, raw + 4, sizeof(uint32_t));
+        std::memcpy(&old_state, raw + 14, sizeof(uint8_t));
+
+        tid_to_pid_.insert(new_tid, { ctx.pid, ctx.timestamp });
+
+        uint32_t old_pid = 0;
+        TidPidEntry entry{};
+        if (tid_to_pid_.lookup(old_tid, entry)) {
+            old_pid = entry.pid;
+        }
+
+        if (old_tid != 0) {
+            in_flight_threads_.insert(old_tid, { ctx.timestamp, old_pid, old_state });
+        }
+
+        ThreadSwitchOut so{};
+        if (in_flight_threads_.find_and_erase(new_tid, so)) {
+            if (so.pid == 0 || so.pid == ctx.pid) {
+                if (ctx.timestamp >= so.qpc) {
+                    const uint64_t dur_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - so.qpc, qpc_freq_));
+                    rec.duration_us = (dur_us <= 10000000ULL) ? static_cast<uint32_t>(dur_us) : 10000000U;
+                }
+                if (so.wait_state == 5 || so.wait_state == 4) {
+                    rec.flags |= EventFlags::CSWITCH_VOLUNTARY;
+                }
+            }
+        }
+
+        if (old_state == 5 || old_state == 4) {
+            rec.flags |= EventFlags::CSWITCH_OUT_VOLUNTARY;
+        }
+
+        rec.tid = new_tid;
+        rec.payload.cswitch.prev_tid = old_tid;
+        rec.payload.cswitch.prev_pid = old_pid;
+
+        flight_recorder_.push(rec);
+    }
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    rec.category = static_cast<uint16_t>(EventCategory::DISK);
+
+    if (ctx.opcode == KERNEL_OPCODE_DISK_READ_INIT || ctx.opcode == KERNEL_OPCODE_DISK_WRITE_INIT) {
+        if (p_event->UserDataLength >= 12 && p_event->UserData) {
+            uint64_t irp = 0;
+            uint32_t issuing_tid = ctx.tid;
+            std::memcpy(&irp, p_event->UserData, sizeof(uint64_t));
+            std::memcpy(&issuing_tid, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint32_t));
+            if (issuing_tid == 0) issuing_tid = ctx.tid;
+            in_flight_disk_.insert(irp, { ctx.timestamp, ctx.pid, issuing_tid, (ctx.opcode == KERNEL_OPCODE_DISK_WRITE_INIT) });
+            rec.payload.file_key = irp;
+            rec.auxiliary_data = irp;
+            if (ctx.opcode == KERNEL_OPCODE_DISK_WRITE_INIT) {
+                rec.flags |= EventFlags::DISK_IS_WRITE;
+            }
+        }
+    } else if (ctx.opcode == KERNEL_OPCODE_DISK_READ || ctx.opcode == KERNEL_OPCODE_DISK_WRITE) {
+        if (ctx.opcode == KERNEL_OPCODE_DISK_WRITE) {
+            rec.flags |= EventFlags::DISK_IS_WRITE;
+        }
+        if (p_event->UserDataLength >= 40 && p_event->UserData) {
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            uint32_t size_bytes = 0;
+            uint64_t irp = 0;
+
+            std::memcpy(&size_bytes, raw + 8, sizeof(uint32_t));
+            std::memcpy(&irp, raw + 32, sizeof(uint64_t));
+
+            rec.payload.file_key = irp;
+            rec.auxiliary_data = size_bytes;
+
+            DiskInFlight disk_data{};
+            if (in_flight_disk_.find_and_erase(irp, disk_data)) {
+                if (disk_data.pid != 0) {
+                    rec.pid = disk_data.pid;
+                    rec.tid = disk_data.tid;
+                    if (ctx.timestamp >= disk_data.start_qpc) {
+                        const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - disk_data.start_qpc, qpc_freq_));
+                        if (delta_us <= 3000000ULL) {
+                            rec.duration_us = static_cast<uint32_t>(delta_us);
+                        }
+                    }
+                } else {
+                    rec.duration_us = 0;
+                }
+                if (disk_data.is_write) {
+                    rec.flags |= EventFlags::DISK_IS_WRITE;
+                }
+            } else {
+                rec.duration_us = 0;
+            }
+            if (rec.duration_us > 0 || rec.pid != 0) {
+                flight_recorder_.push(rec);
+            }
+        }
+    }
+
+    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+    if (writer) writer->push(rec);
+}
+
+void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    // Hard Page Fault (Opcode 32 / HardFault)
+    if (ctx.opcode == KERNEL_OPCODE_HARDFAULT) {
+        rec.category = static_cast<uint16_t>(EventCategory::PAGE_FAULT);
+
+        if (p_event->UserDataLength >= 40 && p_event->UserData) {
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            int64_t initial_time = 0;
+            uint64_t file_object = 0;
+            uint32_t byte_count = 0;
+            std::memcpy(&initial_time, raw + 0, sizeof(int64_t));
+            std::memcpy(&file_object, raw + 24, sizeof(uint64_t));
+            std::memcpy(&byte_count, raw + 36, sizeof(uint32_t));
+            rec.payload.file_key = file_object;
+            rec.auxiliary_data = byte_count;
+
+            uint64_t initial_time_ft = static_cast<uint64_t>(initial_time);
+            constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL; // Jan 1, 2000 00:00:00 UTC
+            uint64_t sync_utc = sync_time_utc_.load(std::memory_order_relaxed);
+            uint64_t sync_qpc = sync_time_qpc_.load(std::memory_order_relaxed);
+
+            if (initial_time_ft >= MIN_VALID_FILETIME && sync_utc > 0 && sync_qpc > 0 && ctx.timestamp >= sync_qpc) {
+                const uint64_t delta_qpc = ctx.timestamp - sync_qpc;
+                const uint64_t q = delta_qpc / qpc_freq_;
+                const uint64_t r = delta_qpc % qpc_freq_;
+                const uint64_t delta_100ns = (q * 10000000ULL) + ((r * 10000000ULL) / qpc_freq_);
+                const uint64_t end_ft = sync_utc + delta_100ns;
+                if (end_ft >= initial_time_ft) {
+                    uint64_t dur_100ns = end_ft - initial_time_ft;
+                    uint64_t dur_us = dur_100ns / 10;
+                    if (dur_us <= 10000000ULL) {
+                        rec.duration_us = static_cast<uint32_t>(dur_us);
+                    }
+                }
+            } else {
+                rec.duration_us = 0;
+            }
+            flight_recorder_.push(rec);
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+    // VirtualAlloc (Opcode 98 under PAGE_FAULT_GUID)
+    else if (ctx.opcode == KERNEL_OPCODE_VIRTUAL_ALLOC) {
+        rec.category = static_cast<uint16_t>(EventCategory::MEM_VIRTUAL_ALLOC);
+
+        if (p_event->UserDataLength >= 24 && p_event->UserData) {
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            uint64_t base_addr = 0;
+            uint64_t region_size = 0;
+            uint32_t alloc_pid = 0;
+            uint32_t alloc_flags = 0;
+            std::memcpy(&base_addr, raw + 0, sizeof(uint64_t));
+            std::memcpy(&region_size, raw + 8, sizeof(uint64_t));
+            std::memcpy(&alloc_pid, raw + 16, sizeof(uint32_t));
+            std::memcpy(&alloc_flags, raw + 20, sizeof(uint32_t));
+
+            rec.pid = alloc_pid;
+            rec.payload.routine_addr = base_addr;
+            rec.auxiliary_data = region_size;
+            rec.flags = (alloc_flags & MEM_COMMIT) ? EventFlags::MEM_ALLOC_COMMIT : EventFlags::NONE;
+
+            if (region_size >= (4 * 1024 * 1024ULL) && (alloc_flags & (MEM_COMMIT | MEM_RESET | MEM_LARGE_PAGES)) != 0) {
+                flight_recorder_.push(rec);
+            }
+        }
+
+        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
+        if (writer) writer->push(rec);
+    }
+}
+
 void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
     if (!p_event) return;
     auto* mgr = reinterpret_cast<EtwSessionManager*>(p_event->UserContext);
@@ -557,6 +1294,8 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
            !mgr->last_processed_qpc_.compare_exchange_weak(
                cur_qpc, timestamp, std::memory_order_release, std::memory_order_relaxed)) {}
 
+    EventContext ctx{ timestamp, pid, tid, cpu, event_id, opcode };
+
     EtwEventRecord rec{};
     rec.qpc_timestamp = timestamp;
     rec.pid = pid;
@@ -564,690 +1303,60 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
     rec.cpu_index = cpu;
     rec.event_id = event_id;
 
-    // 1. DXGI Provider Events
-    if (IsEqualGUID(p_event->EventHeader.ProviderId, DXGI_PROVIDER_GUID)) {
-        rec.category = static_cast<uint16_t>(EventCategory::DXGI);
-        
-        uint64_t swapchain_ptr = 0;
-        if (p_event->UserDataLength >= 8 && p_event->UserData) {
-            std::memcpy(&swapchain_ptr, p_event->UserData, sizeof(uint64_t));
+    const GUID& prov_guid = p_event->EventHeader.ProviderId;
+    if (IsEqualGUID(prov_guid, DXGI_PROVIDER_GUID)) {
+        mgr->handle_dxgi_event(p_event, rec, ctx);
+    } else if (IsEqualGUID(prov_guid, AUDIO_PROVIDER_GUID)) {
+        mgr->handle_audio_event(p_event, rec, ctx);
+    } else if (IsEqualGUID(prov_guid, DXGKRNL_PROVIDER_GUID)) {
+        const uint16_t task = p_event->EventHeader.EventDescriptor.Task;
+        if ((task == 5 && (opcode == 11 || opcode == 0)) || (task == 24 && opcode == 1) || (task == 25 && opcode == 1)) {
+            mgr->handle_dxgkrnl_flip_event(p_event, rec, ctx);
+        } else if (task == 4 && (opcode == 17 || opcode == 1)) {
+            mgr->handle_dxgkrnl_vsync_event(p_event, rec, ctx);
+        } else if (event_id == 370 || task == 222 || event_id == 367 || task == 219) {
+            mgr->handle_dxgkrnl_vidmm_event(p_event, rec, ctx);
+        } else if (event_id == 510 || task == 33) {
+            mgr->handle_dxgkrnl_paging_event(p_event, rec, ctx);
         }
-        uint64_t present_key = make_present_key(tid, swapchain_ptr);
-
-        if (event_id == 42 || event_id == 55) { // Present Start / PresentMultiplaneOverlay Start
-            mgr->in_flight_present_.insert(present_key, { timestamp, pid, tid });
-            // Do not push Present Start to ring buffer: only completed Present Stop events are needed
-        } else if (event_id == 43 || event_id == 56) { // Present Stop / PresentMultiplaneOverlay Stop
-            PresentInFlight present_data{};
-            bool has_in_flight = mgr->in_flight_present_.find_and_erase(present_key, present_data);
-            uint64_t start_qpc = (has_in_flight && present_data.pid == pid) ? present_data.start_qpc : 0;
-
-            LastPresentEntry last_entry{};
-            bool has_prev = mgr->last_present_table_.lookup(present_key, last_entry);
-            uint64_t prev_qpc = has_prev ? last_entry.last_present_qpc : 0;
-
-            PresentDeltaResult delta_res = calculate_effective_present_duration(
-                timestamp, prev_qpc, start_qpc, mgr->qpc_freq_, 10000000ULL
-            );
-
-            // Update baseline for next frame on this swapchain
-            mgr->last_present_table_.insert(present_key, { timestamp, pid, tid });
-
-            uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, 10000000ULL));
-            rec.duration_us = clamped_dur_us;
-
-            // Push to flight recorder BEFORE triggering engine so zero-post-window snapshot includes it
-            mgr->flight_recorder_.push(rec);
-
-            if (!delta_res.is_baseline_reset && delta_res.effective_dur_us > 0) {
-                double dur_ms = delta_res.effective_dur_us / 1000.0;
-                mgr->trigger_engine_.on_dxgi_present(pid, tid, dur_ms, timestamp, present_key, cpu);
-            }
+    } else if (IsEqualGUID(prov_guid, DWM_CORE_PROVIDER_GUID)) {
+        if (p_event->EventHeader.EventDescriptor.Task == 132 || event_id == 15 || event_id == 16) {
+            mgr->handle_dwm_event(p_event, rec, ctx);
         }
-    }
-    // 2. Audio Provider Events (GlitchInfo ID 11 only)
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, AUDIO_PROVIDER_GUID)) {
-        if (event_id == 11) { // AudioGlitch Event ID 11
-            rec.category = static_cast<uint16_t>(EventCategory::AUDIO);
-            rec.flags |= EventFlags::AUDIO_BUFFER_UNDERRUN;
-            uint32_t glitch_count = 1;
-            int32_t error_code = 0;
-            if (p_event->UserDataLength >= sizeof(uint32_t) && p_event->UserData) {
-                std::memcpy(&glitch_count, p_event->UserData, sizeof(uint32_t));
-                glitch_count = std::clamp(glitch_count, 1U, 1'000'000U);
-            }
-            if (p_event->UserDataLength >= (sizeof(uint32_t) + sizeof(int32_t)) && p_event->UserData) {
-                std::memcpy(&error_code, static_cast<const uint8_t*>(p_event->UserData) + sizeof(uint32_t), sizeof(int32_t));
-            }
-            rec.payload.audio.glitch_count = glitch_count;
-            rec.payload.audio.error_code = error_code;
-
-            // Push to flight recorder BEFORE triggering
-            mgr->flight_recorder_.push(rec);
-            mgr->trigger_engine_.on_audio_glitch(pid, tid, glitch_count, timestamp, cpu);
-        }
-        // Non-glitch informational audio events are ignored to prevent buffer pollution
-    }
-    // 3. DxgKrnl Provider Events (Kernel-Level Frame Delivery & Flip Tracking)
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, DXGKRNL_PROVIDER_GUID)) {
-        const auto& desc = p_event->EventHeader.EventDescriptor;
-        const uint16_t task = desc.Task;
-        const uint8_t op = desc.Opcode;
-
-        // MMIOFlip (Task 5, Opcode 11/0), FlipEvent (Task 24, Opcode 1), MMIOFlipMPO (Task 25, Opcode 1)
-        if ((task == 5 && (op == 11 || op == 0)) || (task == 24 && op == 1) || (task == 25 && op == 1)) {
-            rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_MMIOFLIP);
-            
-            uint64_t flip_fence_id = 0;
-            uint32_t vidpn_source_id = 0;
-            uint64_t swapchain_ptr = 0;
-            if (p_event->UserDataLength >= 12 && p_event->UserData) {
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                std::memcpy(&flip_fence_id, raw + 0, sizeof(uint64_t));
-                std::memcpy(&vidpn_source_id, raw + 8, sizeof(uint32_t));
-                if (p_event->UserDataLength >= 24) {
-                    std::memcpy(&swapchain_ptr, raw + 16, sizeof(uint64_t));
-                }
-            }
-
-            rec.auxiliary_data = swapchain_ptr;
-            rec.payload.dxgi.present_flags = vidpn_source_id;
-            rec.payload.dxgi.frame_index = static_cast<uint32_t>(flip_fence_id & 0xFFFFFFFF);
-
-            const uint64_t flip_key = make_flip_key(vidpn_source_id, swapchain_ptr);
-            LastFlipEntry last_entry{};
-            bool has_prev = mgr->last_flip_table_.lookup(flip_key, last_entry);
-            uint64_t prev_qpc = has_prev ? last_entry.last_flip_qpc : 0;
-
-            double delivery_ms = 0.0;
-            bool is_baseline = true;
-
-            if (has_prev && prev_qpc > 0 && timestamp > prev_qpc) {
-                uint64_t delta_qpc = timestamp - prev_qpc;
-                double delta_us = qpc_delta_to_us(delta_qpc, mgr->qpc_freq_);
-                if (delta_us <= 30000000.0) { // 30s ceiling for loading / Alt-Tab
-                    delivery_ms = delta_us / 1000.0;
-                    is_baseline = false;
-                    rec.duration_us = static_cast<uint32_t>(std::min(delta_us, 10000000.0));
-                }
-            }
-
-            // Update baseline for next flip on this VidPn / Swapchain
-            mgr->last_flip_table_.insert(flip_key, { timestamp, static_cast<uint32_t>(swapchain_ptr & 0xFFFFFFFF), pid, tid });
-
-            // Push to flight recorder BEFORE triggering
-            mgr->flight_recorder_.push(rec);
-
-            if (!is_baseline && delivery_ms > 0.0) {
-                mgr->trigger_engine_.on_kernel_frame_stall(pid, tid, delivery_ms, timestamp, flip_key, cpu);
-            }
-        }
-        else if (task == 4 && (op == 17 || op == 1)) { // VSyncDPC
-            rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VSYNCDPC);
-            mgr->flight_recorder_.push(rec);
-        }
-        // VidMm Demoted Commitment Change (Event ID 370, Task 222): VRAM spillover into system memory
-        else if (event_id == 370 || task == 222) {
-            if (p_event->UserDataLength >= 28 && p_event->UserData) {
-                uint64_t commitment = 0;
-                uint64_t old_commitment = 0;
-                uint32_t process_id = 0;
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                std::memcpy(&commitment, raw + 0, sizeof(uint64_t));
-                std::memcpy(&old_commitment, raw + 8, sizeof(uint64_t));
-                std::memcpy(&process_id, raw + 24, sizeof(uint32_t));
-
-                if (commitment > 0) {
-                    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VRAM_PAGING);
-                    rec.pid = (process_id != 0) ? process_id : pid;
-                    rec.auxiliary_data = commitment;
-                    rec.flags = EventFlags::VRAM_DEMOTED_COMMITMENT;
-                    mgr->flight_recorder_.push(rec);
-                }
-            }
-        }
-        // VidMm Process Usage Change (Event ID 367, Task 219): Non-local system RAM aperture overflow
-        else if (event_id == 367 || task == 219) {
-            if (p_event->UserDataLength >= 31 && p_event->UserData) {
-                uint64_t new_usage = 0;
-                uint32_t process_id = 0;
-                uint8_t memory_segment_group = 0;
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                std::memcpy(&new_usage, raw + 0, sizeof(uint64_t));
-                std::memcpy(&process_id, raw + 24, sizeof(uint32_t));
-                std::memcpy(&memory_segment_group, raw + 30, sizeof(uint8_t));
-
-                if (memory_segment_group == 1 && new_usage > 0) {
-                    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VRAM_PAGING);
-                    rec.pid = (process_id != 0) ? process_id : pid;
-                    rec.auxiliary_data = new_usage;
-                    rec.flags = EventFlags::VRAM_USAGE_OVER_BUDGET;
-                    mgr->flight_recorder_.push(rec);
-                }
-            }
-        }
-        // PagingOpTransfer (Event ID 510, Task 33): PCIe paging transfers
-        else if (event_id == 510 || task == 33) {
-            if (p_event->UserDataLength >= 64 && p_event->UserData) {
-                uint64_t number_of_pages = 0;
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                std::memcpy(&number_of_pages, raw + 48, sizeof(uint64_t));
-
-                if (number_of_pages > 0) {
-                    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VRAM_PAGING);
-                    rec.auxiliary_data = number_of_pages * 4096ULL;
-                    rec.flags = EventFlags::VRAM_PAGING_TRANSFER;
-                    mgr->flight_recorder_.push(rec);
-                }
-            }
-        }
-    }
-    // 4. DWM-Core Provider Events (Glitch / Schedule)
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, DWM_CORE_PROVIDER_GUID) &&
-             (p_event->EventHeader.EventDescriptor.Task == 132 || event_id == 15 || event_id == 16)) {
-        // DWM-Core fires duplicate event IDs (15/16/Task 132) for the same composition frame glitch.
-        // Debounce duplicates within a 50ms window (~3 frames @ 60Hz) using a ring of recent glitch timestamps.
-        const uint64_t dedup_window_qpc = ms_to_qpc_delta(50.0, mgr->qpc_freq_);
-        
-        // Check all recent glitch timestamps to handle out-of-order delivery across CPU cores
-        for (size_t i = 0; i < 16; ++i) {
-            uint64_t recent_ts = mgr->recent_dwm_glitches_qpc_[i].load(std::memory_order_acquire);
-            if (recent_ts > 0) {
-                const uint64_t delta_qpc = (timestamp >= recent_ts) ? (timestamp - recent_ts) : (recent_ts - timestamp);
-                if (delta_qpc < dedup_window_qpc) {
-                    return; // Suppress duplicate DWM glitch within 50ms window regardless of multi-core event order
-                }
-            }
-        }
-
-        // Record this new glitch into the ring buffer
-        uint32_t slot = (mgr->recent_dwm_glitch_idx_.fetch_add(1, std::memory_order_relaxed)) & 15;
-        mgr->recent_dwm_glitches_qpc_[slot].store(timestamp, std::memory_order_release);
-
-        rec.category = static_cast<uint16_t>(EventCategory::DWM_GLITCH);
-        const double vblank_ms = (mgr->trigger_engine_.vblank_interval_ms() > 0.0) 
-            ? mgr->trigger_engine_.vblank_interval_ms() 
-            : 16.67;
-        uint32_t glitch_type = 0;
-        uint32_t missed_vblanks = 0;
-        if (p_event->UserDataLength >= 8 && p_event->UserData) {
-            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-            std::memcpy(&glitch_type, raw + 0, sizeof(uint32_t));
-            std::memcpy(&missed_vblanks, raw + 4, sizeof(uint32_t));
-        }
-        rec.auxiliary_data = glitch_type;
-        const double dur_ms = (missed_vblanks >= 1) ? (missed_vblanks * vblank_ms) : vblank_ms;
-        rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1000.0, 10000000.0));
-        mgr->flight_recorder_.push(rec);
-        mgr->trigger_engine_.on_dwm_glitch(pid, tid, dur_ms, timestamp, cpu);
-    }
-    // 5. Antimalware Engine Events (Real-Time Scan Start/Stop)
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, ANTIMALWARE_ENGINE_GUID)) {
-        // Construct 64-bit key from 128-bit ActivityId GUID to uniquely track scans across thread pools
-        uint64_t scan_key = 0;
-        const auto& act = p_event->EventHeader.ActivityId;
-        if (!IsEqualGUID(act, GUID_NULL)) {
-            scan_key = activity_id_to_key(act);
-        }
-        if (scan_key == 0) {
-            scan_key = (static_cast<uint64_t>(pid) << 32) | (tid != 0 ? tid : 1);
-        }
-
-        if (opcode == 1) { // win:Start - Real-time scan initiated
-            mgr->in_flight_scans_.insert(scan_key, { timestamp, pid, tid });
-        } else if (opcode == 2) { // win:Stop - Real-time scan completed
-            AntimalwareScanInFlight scan_data{};
-            if (mgr->in_flight_scans_.find_and_erase(scan_key, scan_data)) {
-                if (timestamp >= scan_data.start_qpc) {
-                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(timestamp - scan_data.start_qpc, mgr->qpc_freq_));
-                    if (delta_us <= 10000000ULL) { // 10s ceiling
-                        rec.duration_us = static_cast<uint32_t>(delta_us);
-                    }
-                }
-            }
-            rec.category = static_cast<uint16_t>(EventCategory::ANTIMALWARE_SCAN);
-            if (rec.duration_us > 0) {
-                mgr->flight_recorder_.push(rec);
-            }
-        }
-    }
-    // 6. Kernel-Processor-Power Events (Thermal Throttle)
-    // NOTE: Event ID 37 is manifest-based. Payload offsets (Group@0, Number@4, CapDurationInSeconds@8)
-    // match the documented schema but may shift across Windows feature updates. The UserDataLength >= 24
-    // check and value-range sanity checks defend against layout changes.
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, KERNEL_PROCESSOR_POWER_GUID)) {
-        if (event_id == 37 && p_event->UserDataLength >= 24 && p_event->UserData) {
-            rec.category = static_cast<uint16_t>(EventCategory::THERMAL_THROTTLE);
-            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-            uint32_t core_number = 0;
-            uint32_t cap_duration_sec = 0;
-            std::memcpy(&core_number, raw + 4, sizeof(uint32_t));  // Number field at offset 4
-            std::memcpy(&cap_duration_sec, raw + 8, sizeof(uint32_t)); // CapDurationInSeconds at offset 8
-            // Sanity checks: reject garbage values from potential layout changes
-            if (core_number <= 1024 && cap_duration_sec <= 86400) {
-                rec.cpu_index = static_cast<uint8_t>(std::min(core_number, 255U));
-                rec.auxiliary_data = cap_duration_sec;
-                rec.duration_us = 0; // Ambient state, not a discrete execution -- duration lives in auxiliary_data
-                mgr->flight_recorder_.push(rec);
-            }
-        }
-    }
-    // 7. Direct3D 12 Pipeline State Object (PSO) & Shader Compilation Events
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, DIRECT3D12_PROVIDER_GUID)) {
-        const auto& desc = p_event->EventHeader.EventDescriptor;
-        const uint16_t task = desc.Task;
-        const uint8_t op = desc.Opcode;
-
-        // Tasks: 29 (GraphicsPipelineState), 66 (CreatePipelineStateObject), 67 (CreateStateObject)
-        const bool is_pso_task = (task == 29 || task == 66 || task == 67 || event_id == 63 || event_id == 64 || event_id == 155 || event_id == 156 || event_id == 157 || event_id == 158);
-
-        if (is_pso_task) {
-            uint64_t pso_ptr = 0;
-            if (p_event->UserDataLength >= sizeof(uint64_t) && p_event->UserData) {
-                // If template has (pID3D12Device, pID3D12GraphicsPipelineState), 2nd pointer is at offset 8 if >= 16 bytes
-                if (p_event->UserDataLength >= 16) {
-                    std::memcpy(&pso_ptr, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
-                } else {
-                    std::memcpy(&pso_ptr, p_event->UserData, sizeof(uint64_t));
-                }
-            }
-
-            uint64_t pso_key = 0;
-            const auto& act = p_event->EventHeader.ActivityId;
-            if (!IsEqualGUID(act, GUID_NULL)) {
-                pso_key = activity_id_to_key(act);
-            }
-            if (pso_key == 0 || pso_key == 1ULL) {
-                pso_key = make_pso_key(tid, pso_ptr);
-            }
-
-            uint16_t flags = EventFlags::NONE;
-            if (task == 29 || event_id == 63 || event_id == 64) {
-                flags |= EventFlags::D3D12_GRAPHICS_PSO;
-            } else if (task == 67 || event_id == 157 || event_id == 158) {
-                flags |= EventFlags::D3D12_COMPUTE_PSO;
-            }
-
-            if (op == 1 || event_id == 63 || event_id == 155 || event_id == 157) { // win:Start
-                mgr->in_flight_pso_table_.insert(pso_key, { timestamp, pid, tid, pso_ptr, flags });
-            } else if (op == 2 || event_id == 64 || event_id == 156 || event_id == 158) { // win:Stop
-                PsoInFlight pso_data{};
-                if (mgr->in_flight_pso_table_.find_and_erase(pso_key, pso_data)) {
-                    if (timestamp >= pso_data.start_qpc) {
-                        const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(timestamp - pso_data.start_qpc, mgr->qpc_freq_));
-                        if (delta_us <= 10000000ULL) { // 10s ceiling
-                            rec.duration_us = static_cast<uint32_t>(delta_us);
-                        }
-                    }
-                    if (flags == EventFlags::NONE) {
-                        flags = pso_data.flags;
-                    }
-                    if (pso_ptr == 0) {
-                        pso_ptr = pso_data.pso_ptr;
-                    }
-                }
-                rec.category = static_cast<uint16_t>(EventCategory::D3D12_PSO_CREATE);
-                rec.flags = flags;
-                rec.auxiliary_data = pso_ptr;
-                if (rec.duration_us > 0) {
-                    mgr->flight_recorder_.push(rec);
-                }
-            }
-        }
-    }
-    // 8. Microsoft-Windows-Kernel-Memory Events (WorkingSetOutSwap, MdlAllocation, ContAllocation)
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, KERNEL_MEMORY_PROVIDER_GUID)) {
-        if (event_id == 4) { // WorkingSetOutSwap Start
-            if (p_event->UserDataLength >= 4 && p_event->UserData) {
-                uint32_t target_proc = 0;
-                std::memcpy(&target_proc, p_event->UserData, sizeof(uint32_t));
-                if (target_proc != 0 && target_proc != 4) {
-                    WorkingSetTrimInFlight trim_entry{};
-                    trim_entry.start_qpc = timestamp;
-                    trim_entry.pid = target_proc;
-                    const uint64_t trim_key = (static_cast<uint64_t>(target_proc) << 32) | (tid != 0 ? tid : 1);
-                    mgr->in_flight_ws_trims_.insert(trim_key, trim_entry);
-                }
-            }
-        } else if (event_id == 5) { // WorkingSetOutSwap Stop
-            if (p_event->UserDataLength >= 16 && p_event->UserData) {
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                uint32_t target_proc = 0;
-                uint64_t pages_processed = 0;
-                std::memcpy(&target_proc, raw + 0, sizeof(uint32_t));
-                std::memcpy(&pages_processed, raw + 8, sizeof(uint64_t));
-
-                rec.category = static_cast<uint16_t>(EventCategory::MEM_WORKING_SET_TRIM);
-                rec.pid = target_proc;
-                rec.auxiliary_data = pages_processed * 4096ULL;
-                rec.flags = EventFlags::MEM_WS_TRIM_OUTSWAP;
-
-                WorkingSetTrimInFlight start_entry{};
-                const uint64_t trim_key = (static_cast<uint64_t>(target_proc) << 32) | (tid != 0 ? tid : 1);
-                if (target_proc != 0 && target_proc != 4 && mgr->in_flight_ws_trims_.find_and_erase(trim_key, start_entry)) {
-                    if (timestamp >= start_entry.start_qpc) {
-                        const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(timestamp - start_entry.start_qpc, mgr->qpc_freq_));
-                        if (delta_us <= 10000000ULL) { // 10s ceiling
-                            rec.duration_us = static_cast<uint32_t>(delta_us);
-                        }
-                    }
-                }
-                mgr->flight_recorder_.push(rec);
-            }
-        } else if (event_id == 10 || event_id == 11) { // MdlAllocation (10) or ContAllocation (11)
-            if (p_event->UserDataLength >= 16 && p_event->UserData) {
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                uint64_t dur_us = 0;
-                uint64_t total_bytes = 0;
-                std::memcpy(&dur_us, raw + 0, sizeof(uint64_t));
-                std::memcpy(&total_bytes, raw + 8, sizeof(uint64_t));
-
-                rec.category = static_cast<uint16_t>(EventCategory::MEM_PHYSICAL_ALLOC);
-                if (dur_us <= 10000000ULL) {
-                    rec.duration_us = static_cast<uint32_t>(dur_us);
-                }
-                rec.auxiliary_data = total_bytes;
-                rec.flags = EventFlags::MEM_PHYSICAL_CONTIGUOUS;
-                mgr->flight_recorder_.push(rec);
-            }
-        }
-    }
-    // 8b. Microsoft-Windows-Kernel-Process Events (Process Start / Stop)
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, KERNEL_PROCESS_PROVIDER_GUID)) {
-        if (event_id == 1 && p_event->UserDataLength >= 4 && p_event->UserData) {
-            uint32_t target_pid = 0;
-            std::memcpy(&target_pid, p_event->UserData, sizeof(uint32_t));
-            if (target_pid != 0) {
-                std::string proc_name;
-                // Payload on Win10/11: fixed header (24 bytes) followed by null-terminated Unicode ImageName
-                if (p_event->UserDataLength > 24) {
-                    const auto* raw_bytes = static_cast<const uint8_t*>(p_event->UserData) + 24;
-                    const auto* p_ws = reinterpret_cast<const wchar_t*>(raw_bytes);
-                    const size_t max_wchars = (p_event->UserDataLength - 24) / sizeof(wchar_t);
-                    size_t wlen = 0;
-                    while (wlen < max_wchars && p_ws[wlen] != L'\0') {
-                        ++wlen;
-                    }
-                    if (wlen > 0) {
-                        std::string full_path = utf16_to_utf8(std::wstring_view(p_ws, wlen));
-                        const size_t slash = full_path.find_last_of("\\/");
-                        proc_name = (slash != std::string::npos) ? full_path.substr(slash + 1) : full_path;
-                    }
-                }
-                if (proc_name.empty()) {
-                    proc_name = get_process_name_by_pid(target_pid);
-                }
-                if (!proc_name.empty()) {
-                    mgr->trigger_engine_.on_process_launched(target_pid, proc_name);
-                }
-            }
-        } else if (event_id == 2 && p_event->UserDataLength >= 4 && p_event->UserData) {
-            uint32_t target_pid = 0;
-            std::memcpy(&target_pid, p_event->UserData, sizeof(uint32_t));
-            if (target_pid != 0) {
-                mgr->trigger_engine_.on_process_terminated(target_pid);
-            }
-        }
-    }
-    // 9. NT Kernel Logger Events
-    else if (IsEqualGUID(p_event->EventHeader.ProviderId, SYSTEM_TRACE_CONTROL_GUID) ||
-             IsEqualGUID(p_event->EventHeader.ProviderId, PERFINFO_GUID) ||
-             IsEqualGUID(p_event->EventHeader.ProviderId, THREAD_GUID) ||
-             IsEqualGUID(p_event->EventHeader.ProviderId, DISK_IO_GUID) ||
-             IsEqualGUID(p_event->EventHeader.ProviderId, PAGE_FAULT_GUID)) {
-        const auto& prov_guid = p_event->EventHeader.ProviderId;
+    } else if (IsEqualGUID(prov_guid, ANTIMALWARE_ENGINE_GUID)) {
+        mgr->handle_antimalware_event(p_event, rec, ctx);
+    } else if (IsEqualGUID(prov_guid, KERNEL_PROCESSOR_POWER_GUID)) {
+        mgr->handle_power_event(p_event, rec, ctx);
+    } else if (IsEqualGUID(prov_guid, DIRECT3D12_PROVIDER_GUID)) {
+        mgr->handle_d3d12_event(p_event, rec, ctx);
+    } else if (IsEqualGUID(prov_guid, KERNEL_MEMORY_PROVIDER_GUID)) {
+        mgr->handle_kernel_memory_event(p_event, rec, ctx);
+    } else if (IsEqualGUID(prov_guid, KERNEL_PROCESS_PROVIDER_GUID)) {
+        mgr->handle_process_event(p_event, rec, ctx);
+    } else if (IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID) ||
+               IsEqualGUID(prov_guid, PERFINFO_GUID) ||
+               IsEqualGUID(prov_guid, THREAD_GUID) ||
+               IsEqualGUID(prov_guid, DISK_IO_GUID) ||
+               IsEqualGUID(prov_guid, PAGE_FAULT_GUID)) {
         const bool is_perfinfo  = IsEqualGUID(prov_guid, PERFINFO_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
         const bool is_thread    = IsEqualGUID(prov_guid, THREAD_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
         const bool is_disk      = IsEqualGUID(prov_guid, DISK_IO_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
         const bool is_pagefault = IsEqualGUID(prov_guid, PAGE_FAULT_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
 
-        // DPC Completion (Opcode 66, 68, or 69 in Classic MOF / Event ID 66, 68, 69 in Manifest / Task 1 Opcode 2)
         if (is_perfinfo && (opcode == KERNEL_OPCODE_DPC_CLASSIC || event_id == KERNEL_OPCODE_DPC_CLASSIC || 
                             opcode == KERNEL_OPCODE_DPC || event_id == KERNEL_OPCODE_DPC || 
                             opcode == KERNEL_OPCODE_TIMER || event_id == KERNEL_OPCODE_TIMER || 
-                            (p_event->EventHeader.EventDescriptor.Task == 1 && opcode == 2))) {
-            rec.category = static_cast<uint16_t>(EventCategory::DPC);
-            if (p_event->UserDataLength >= 12 && p_event->UserData) {
-                uint64_t initial_time = 0;
-                uint64_t routine = 0;
-                if (p_event->UserDataLength == 12) {
-                    uint32_t initial_time_32 = 0;
-                    std::memcpy(&initial_time_32, p_event->UserData, sizeof(uint32_t));
-                    initial_time = initial_time_32;
-                    std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 4, sizeof(uint64_t));
-                } else if (p_event->UserDataLength >= 16) {
-                    std::memcpy(&initial_time, p_event->UserData, sizeof(uint64_t));
-                    std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
-                }
-                if (initial_time > 0 || routine > 0) {
-                    rec.payload.routine_addr = routine;
-                    if (timestamp >= initial_time) {
-                        const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(timestamp - initial_time, mgr->qpc_freq_));
-                        if (delta_us <= 10000000ULL) { // Sanity check: 10s ceiling
-                            rec.duration_us = static_cast<uint32_t>(delta_us);
-                        }
-                    }
-                    mgr->flight_recorder_.push(rec);
-                }
-            }
-        }
-        // ISR Completion (Opcode 67 in Classic MOF / Event ID 67 in Manifest / Task 2 Opcode 2)
-        else if (is_perfinfo && (opcode == KERNEL_OPCODE_ISR_CLASSIC || event_id == KERNEL_OPCODE_ISR_CLASSIC || (p_event->EventHeader.EventDescriptor.Task == 2 && opcode == 2))) {
-            rec.category = static_cast<uint16_t>(EventCategory::ISR);
-            if (p_event->UserDataLength >= 12 && p_event->UserData) {
-                uint64_t initial_time = 0;
-                uint64_t routine = 0;
-                if (p_event->UserDataLength == 12) {
-                    uint32_t initial_time_32 = 0;
-                    std::memcpy(&initial_time_32, p_event->UserData, sizeof(uint32_t));
-                    initial_time = initial_time_32;
-                    std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 4, sizeof(uint64_t));
-                } else if (p_event->UserDataLength >= 16) {
-                    std::memcpy(&initial_time, p_event->UserData, sizeof(uint64_t));
-                    std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
-                }
-                if (initial_time > 0 || routine > 0) {
-                    rec.payload.routine_addr = routine;
-                    if (timestamp >= initial_time) {
-                        const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(timestamp - initial_time, mgr->qpc_freq_));
-                        if (delta_us <= 10000000ULL) { // Sanity check: 10s ceiling
-                            rec.duration_us = static_cast<uint32_t>(delta_us);
-                        }
-                    }
-                    mgr->flight_recorder_.push(rec);
-                }
-            }
-        }
-        // Context Switch (Event ID 36 / Opcode 36) - 24-byte _CSwitch / PerfInfo_V2_TypeGroup1
-        else if (is_thread && (event_id == KERNEL_OPCODE_CSWITCH || opcode == KERNEL_OPCODE_CSWITCH)) {
-            rec.category = static_cast<uint16_t>(EventCategory::CSWITCH);
-            if (p_event->UserDataLength >= 15 && p_event->UserData) {
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                uint32_t new_tid = 0;
-                uint32_t old_tid = 0;
-                uint8_t old_state = 0;
-
-                std::memcpy(&new_tid, raw + 0, sizeof(uint32_t));
-                std::memcpy(&old_tid, raw + 4, sizeof(uint32_t));
-                std::memcpy(&old_state, raw + 14, sizeof(uint8_t));     // OldThreadState (MOF offset 14)
-
-                // Cache incoming thread's verified PID
-                mgr->tid_to_pid_.insert(new_tid, { pid, timestamp });
-
-                // Look up outgoing thread's PID from cache (0 if unobserved)
-                uint32_t old_pid = 0;
-                TidPidEntry entry{};
-                if (mgr->tid_to_pid_.lookup(old_tid, entry)) {
-                    old_pid = entry.pid;
-                }
-
-                // Record switch-out info for old_tid (its own wait state & verified PID at departure)
-                // Filter idle thread (old_tid == 0) to avoid false-positive insertion failures
-                if (old_tid != 0) {
-                    mgr->in_flight_threads_.insert(old_tid, { timestamp, old_pid, old_state });
-                }
-
-                // Look up descheduled duration & target thread's own switch-out reason for resuming new_tid
-                ThreadSwitchOut so{};
-                if (mgr->in_flight_threads_.find_and_erase(new_tid, so)) {
-                    // Only trust switch-out if PID matches (or was unobserved 0) to guard against thread ID recycling across processes
-                    if (so.pid == 0 || so.pid == pid) {
-                        if (timestamp >= so.qpc) {
-                            const uint64_t dur_us = static_cast<uint64_t>(qpc_delta_to_us(timestamp - so.qpc, mgr->qpc_freq_));
-                            rec.duration_us = (dur_us <= 10000000ULL) ? static_cast<uint32_t>(dur_us) : 10000000U;
-                        }
-                        if (so.wait_state == 5 || so.wait_state == 4) { // Waiting (5) or Terminated (4)
-                            rec.flags |= EventFlags::CSWITCH_VOLUNTARY;
-                        }
-                    }
-                }
-
-                // Mark whether outgoing thread departed voluntarily
-                if (old_state == 5 || old_state == 4) { // Waiting (5) or Terminated (4)
-                    rec.flags |= EventFlags::CSWITCH_OUT_VOLUNTARY;
-                }
-
-                rec.tid = new_tid;
-                rec.payload.cswitch.prev_tid = old_tid;
-                rec.payload.cswitch.prev_pid = old_pid;
-
-                mgr->flight_recorder_.push(rec);
-            }
-        }
-        // Disk I/O (ReadInit=12, WriteInit=13, Read=10, Write=11)
-        else if (is_disk && (opcode >= KERNEL_OPCODE_DISK_READ && opcode <= KERNEL_OPCODE_DISK_WRITE_INIT)) {
-            rec.category = static_cast<uint16_t>(EventCategory::DISK);
-
-            if (opcode == KERNEL_OPCODE_DISK_READ_INIT || opcode == KERNEL_OPCODE_DISK_WRITE_INIT) {
-                // Disk I/O Init (DiskIo_TypeGroup2): Irp at offset 0 (8B on x64), IssuingThreadId at offset 8 (4B)
-                if (p_event->UserDataLength >= 12 && p_event->UserData) {
-                    uint64_t irp = 0;
-                    uint32_t issuing_tid = tid;
-                    std::memcpy(&irp, p_event->UserData, sizeof(uint64_t));
-                    std::memcpy(&issuing_tid, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint32_t));
-                    if (issuing_tid == 0) issuing_tid = tid;
-                    mgr->in_flight_disk_.insert(irp, { timestamp, pid, issuing_tid, (opcode == KERNEL_OPCODE_DISK_WRITE_INIT) });
-                }
-            } else if (opcode == KERNEL_OPCODE_DISK_READ || opcode == KERNEL_OPCODE_DISK_WRITE) {
-                // Disk I/O Complete (DiskIo_TypeGroup1 on x64):
-                // Offset 0: DiskNumber (4B), Offset 4: IrpFlags (4B), Offset 8: TransferSize (4B), Offset 12: Reserved (4B)
-                // Offset 16: ByteOffset (8B), Offset 24: FileObject (8B), Offset 32: Irp (8B), Offset 40: HighResResponseTime (8B)
-                if (opcode == KERNEL_OPCODE_DISK_WRITE) {
-                    rec.flags |= EventFlags::DISK_IS_WRITE;
-                }
-                if (p_event->UserDataLength >= 40 && p_event->UserData) {
-                    const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                    uint32_t size_bytes = 0;
-                    uint64_t irp = 0;
-
-                    std::memcpy(&size_bytes, raw + 8, sizeof(uint32_t));
-                    std::memcpy(&irp, raw + 32, sizeof(uint64_t));
-
-                    rec.payload.file_key = irp;
-                    rec.auxiliary_data = size_bytes;
-
-                    DiskInFlight disk_data{};
-                    if (mgr->in_flight_disk_.find_and_erase(irp, disk_data)) {
-                        if (disk_data.pid != 0) {
-                            rec.pid = disk_data.pid;
-                            rec.tid = disk_data.tid;
-                            if (timestamp >= disk_data.start_qpc) {
-                                const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(timestamp - disk_data.start_qpc, mgr->qpc_freq_));
-                                if (delta_us <= 3000000ULL) { // 3.0s ceiling
-                                    rec.duration_us = static_cast<uint32_t>(delta_us);
-                                }
-                            }
-                        } else {
-                            rec.duration_us = 0;
-                        }
-                        if (disk_data.is_write) {
-                            rec.flags |= EventFlags::DISK_IS_WRITE;
-                        }
-                    } else {
-                        // When Init event was missed/evicted, delta duration is unknown
-                        rec.duration_us = 0;
-                    }
-                    // Only push disk records with valid duration/process attribution to preserve ring buffer capacity
-                    if (rec.duration_us > 0 || rec.pid != 0) {
-                        mgr->flight_recorder_.push(rec);
-                    }
-                }
-            }
-        }
-        // Kernel Profile / Sampled Profile (Opcode 46 / PerfInfo Sample)
-        else if (is_perfinfo && (opcode == 46 || (p_event->EventHeader.EventDescriptor.Task == 7 && opcode == 2))) {
-            rec.category = static_cast<uint16_t>(EventCategory::PROFILE);
-            if (p_event->UserDataLength >= sizeof(uint64_t) && p_event->UserData) {
-                uint64_t ip = 0;
-                std::memcpy(&ip, p_event->UserData, sizeof(uint64_t));
-                rec.payload.routine_addr = ip;
-            }
-            mgr->flight_recorder_.push(rec);
-        }
-        // Hard Page Fault (Opcode 32 / HardFault)
-        else if (is_pagefault && opcode == KERNEL_OPCODE_HARDFAULT) {
-            rec.category = static_cast<uint16_t>(EventCategory::PAGE_FAULT);
-            // x64 payload: InitialTime(8B) + ReadOffset(8B) + VirtualAddress(8B) + FileObject(8B) + TThreadId(4B) + ByteCount(4B) = 40B
-            if (p_event->UserDataLength >= 40 && p_event->UserData) {
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                int64_t initial_time = 0;
-                uint64_t file_object = 0;
-                uint32_t byte_count = 0;
-                std::memcpy(&initial_time, raw + 0, sizeof(int64_t));
-                std::memcpy(&file_object, raw + 24, sizeof(uint64_t));
-                std::memcpy(&byte_count, raw + 36, sizeof(uint32_t));
-                rec.payload.file_key = file_object;
-                rec.auxiliary_data = byte_count;
-
-                uint64_t initial_time_ft = static_cast<uint64_t>(initial_time);
-                constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL; // Jan 1, 2000 00:00:00 UTC
-                uint64_t sync_utc = mgr->sync_time_utc_.load(std::memory_order_relaxed);
-                uint64_t sync_qpc = mgr->sync_time_qpc_.load(std::memory_order_relaxed);
-
-                if (initial_time_ft >= MIN_VALID_FILETIME && sync_utc > 0 && sync_qpc > 0 && timestamp >= sync_qpc) {
-                    // InitialTime is in FILETIME (100ns units). Convert current event QPC timestamp -> FILETIME (100ns)
-                    // Use split quotient-remainder multiplication to prevent 64-bit overflow on high-frequency QPC over long sessions
-                    const uint64_t delta_qpc = timestamp - sync_qpc;
-                    const uint64_t q = delta_qpc / mgr->qpc_freq_;
-                    const uint64_t r = delta_qpc % mgr->qpc_freq_;
-                    const uint64_t delta_100ns = (q * 10000000ULL) + ((r * 10000000ULL) / mgr->qpc_freq_);
-                    const uint64_t end_ft = sync_utc + delta_100ns;
-                    if (end_ft >= initial_time_ft) {
-                        uint64_t dur_100ns = end_ft - initial_time_ft;
-                        uint64_t dur_us = dur_100ns / 10; // 100ns -> microseconds
-                        if (dur_us <= 10000000ULL) { // 10s ceiling
-                            rec.duration_us = static_cast<uint32_t>(dur_us);
-                        }
-                    }
-                } else {
-                    rec.duration_us = 0;
-                }
-                mgr->flight_recorder_.push(rec);
-            }
-        }
-        // VirtualAlloc (Opcode 98 under PAGE_FAULT_GUID)
-        else if (is_pagefault && opcode == KERNEL_OPCODE_VIRTUAL_ALLOC) {
-            if (p_event->UserDataLength >= 24 && p_event->UserData) {
-                const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-                uint64_t base_addr = 0;
-                uint64_t region_size = 0;
-                uint32_t alloc_pid = 0;
-                uint32_t alloc_flags = 0;
-                std::memcpy(&base_addr, raw + 0, sizeof(uint64_t));
-                std::memcpy(&region_size, raw + 8, sizeof(uint64_t));
-                std::memcpy(&alloc_pid, raw + 16, sizeof(uint32_t));
-                std::memcpy(&alloc_flags, raw + 20, sizeof(uint32_t));
-
-                // Capture filter: only push allocations >= 4MB touching physical memory (MEM_COMMIT, MEM_RESET, MEM_LARGE_PAGES)
-                if (region_size >= (4 * 1024 * 1024ULL) && (alloc_flags & (MEM_COMMIT | MEM_RESET | MEM_LARGE_PAGES)) != 0) {
-                    rec.category = static_cast<uint16_t>(EventCategory::MEM_VIRTUAL_ALLOC);
-                    rec.pid = alloc_pid; // Attribution to real process
-                    rec.payload.routine_addr = base_addr;
-                    rec.auxiliary_data = region_size;
-                    rec.flags = (alloc_flags & MEM_COMMIT) ? EventFlags::MEM_ALLOC_COMMIT : EventFlags::NONE;
-                    mgr->flight_recorder_.push(rec);
-                }
-            }
+                            (p_event->EventHeader.EventDescriptor.Task == 1 && opcode == 2) ||
+                            opcode == KERNEL_OPCODE_ISR_CLASSIC || event_id == KERNEL_OPCODE_ISR_CLASSIC || 
+                            (p_event->EventHeader.EventDescriptor.Task == 2 && opcode == 2) ||
+                            opcode == 46 || (p_event->EventHeader.EventDescriptor.Task == 7 && opcode == 2))) {
+            mgr->handle_nt_dpc_isr_event(p_event, rec, ctx);
+        } else if (is_thread && (event_id == KERNEL_OPCODE_CSWITCH || opcode == KERNEL_OPCODE_CSWITCH)) {
+            mgr->handle_nt_cswitch_event(p_event, rec, ctx);
+        } else if (is_disk && (opcode >= KERNEL_OPCODE_DISK_READ && opcode <= KERNEL_OPCODE_DISK_WRITE_INIT)) {
+            mgr->handle_nt_disk_event(p_event, rec, ctx);
+        } else if (is_pagefault && (opcode == KERNEL_OPCODE_HARDFAULT || opcode == KERNEL_OPCODE_VIRTUAL_ALLOC)) {
+            mgr->handle_nt_fault_event(p_event, rec, ctx);
         }
     }
 }
