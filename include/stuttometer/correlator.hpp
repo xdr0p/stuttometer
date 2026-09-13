@@ -92,7 +92,7 @@ struct EventCategoryCounts {
 
 struct DiagnosticReport {
     std::string schema_version{"1.0"};
-    std::string tool_version{"0.1.0"};
+    std::string tool_version{"0.1.1"};
     std::string timestamp_utc;
     TriggerInfo trigger;
     std::string target_process;

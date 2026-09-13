@@ -4,8 +4,8 @@
 IDI_APP_ICON ICON "app_icon.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     0,1,0,0
-PRODUCTVERSION  0,1,0,0
+FILEVERSION     0,1,1,0
+PRODUCTVERSION  0,1,1,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -18,12 +18,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Stuttometer Project"
             VALUE "FileDescription",  "Stuttometer Real-Time ETW Diagnostic Utility GUI"
-            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "FileVersion",      "0.1.1.0"
             VALUE "InternalName",     "stuttometer_gui"
             VALUE "LegalCopyright",   "Open Source"
             VALUE "OriginalFilename", "stuttometer_gui.exe"
             VALUE "ProductName",      "Stuttometer"
-            VALUE "ProductVersion",   "0.1.0.0"
+            VALUE "ProductVersion",   "0.1.1.0"
         END
     END
     BLOCK "VarFileInfo"

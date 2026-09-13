@@ -422,6 +422,152 @@ static void test_cadence_helper_no_double_increment() {
     std::cout << "  -> Cadence helper single-increment & judder trigger PASSED.\n";
 }
 
+static void test_static_only_immediate_trigger_preserved() {
+    std::cout << "[TEST] Verifying STATIC_ONLY immediate threshold trigger & clean frame incorporation...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 10000000ULL;
+    // Frame 0: duration 30.0ms >= effective static threshold 25.0ms
+    qpc += stuttometer::ms_to_qpc_delta(30.0, qpc_freq);
+    auto res = stuttometer::evaluate_frame_pacing(
+        stats, 30.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::STATIC_ONLY,
+        2.0, 4.0, true, 0.35, 25.0
+    );
+    STUTTO_ASSERT(res.is_stutter);
+    STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
+    STUTTO_ASSERT(stats.sample_count == 0); // Not pushed into baseline
+
+    // Clean frame: 16.6ms < 25.0ms
+    qpc += stuttometer::ms_to_qpc_delta(16.6, qpc_freq);
+    auto res_clean = stuttometer::evaluate_frame_pacing(
+        stats, 16.6, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::STATIC_ONLY,
+        2.0, 4.0, true, 0.35, 25.0
+    );
+    STUTTO_ASSERT(!res_clean.is_stutter);
+    STUTTO_ASSERT(res_clean.reason == stuttometer::TriggerReason::NONE);
+    STUTTO_ASSERT(stats.sample_count == 1);
+    std::cout << "  -> STATIC_ONLY immediate trigger from frame 0 verified.\n";
+}
+
+static void test_hybrid_warmup_reject_then_recover() {
+    std::cout << "[TEST] Verifying HYBRID warmup reject-then-recover behavior...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 10000000ULL;
+    // Push 3 stalls of 500ms (>= 200ms)
+    for (int i = 0; i < 3; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(500.0, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 500.0, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0
+        );
+        STUTTO_ASSERT(!res.is_stutter); // Rejected without trigger during initial 4 frames
+        STUTTO_ASSERT(stats.sample_count == 0);
+        STUTTO_ASSERT(stats.last_delta_us == 0);
+        STUTTO_ASSERT(stats.alternating_cadence_count == 0);
+    }
+
+    // Push 4 clean frames of 16.6ms
+    for (int i = 0; i < 4; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.6, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 16.6, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 4);
+
+    // Push frame 5 at 30.0ms (>= 25.0ms)
+    qpc += stuttometer::ms_to_qpc_delta(30.0, qpc_freq);
+    auto res_spike = stuttometer::evaluate_frame_pacing(
+        stats, 30.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0
+    );
+    STUTTO_ASSERT(res_spike.is_stutter);
+    STUTTO_ASSERT(res_spike.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
+    STUTTO_ASSERT(stats.sample_count == 4); // Not pushed into baseline
+    std::cout << "  -> HYBRID warmup reject-then-recover verified.\n";
+}
+
+static void test_hybrid_steady_slow_game_baseline_establishment() {
+    std::cout << "[TEST] Verifying HYBRID steady slow game baseline establishment (30 FPS, 40ms floor)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 10000000ULL;
+    // Steady 30 FPS = 33.3ms. Static floor = 40.0ms.
+    for (int i = 0; i < 10; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.3, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 33.3, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 40.0
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 10);
+    double mean_ms = stuttometer::calculate_mean_ms(stats);
+    STUTTO_ASSERT(std::abs(mean_ms - 33.3) < 0.1);
+    std::cout << "  -> HYBRID 30 FPS baseline established without false triggers (mean: " << mean_ms << " ms).\n";
+}
+
+static void test_hybrid_warmup_static_suppression_below_200ms() {
+    std::cout << "[TEST] Verifying HYBRID warmup suppresses static trigger during initial 4 frames for dur < 200ms...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 10000000ULL;
+    // Frame 0: duration 50.0ms (>= effective static threshold 25.0ms, but < 200.0ms)
+    // Under HYBRID mode, static triggers must be suppressed during frames 0..3 to establish baseline
+    qpc += stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
+    auto res0 = stuttometer::evaluate_frame_pacing(
+        stats, 50.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0
+    );
+    STUTTO_ASSERT(!res0.is_stutter);
+    STUTTO_ASSERT(res0.reason == stuttometer::TriggerReason::NONE);
+    STUTTO_ASSERT(stats.sample_count == 1);
+    STUTTO_ASSERT(stats.durations_us[0] == 50000);
+
+    // Frames 1..3: three more 50.0ms frames
+    for (int i = 1; i < 4; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 50.0, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 4);
+
+    // Frame 4 (sample_count == 4): now sample_count >= 4, so static triggers are active!
+    // A frame with 30.0ms against 25.0ms threshold must trigger STATIC_THRESHOLD
+    qpc += stuttometer::ms_to_qpc_delta(30.0, qpc_freq);
+    auto res4 = stuttometer::evaluate_frame_pacing(
+        stats, 30.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0
+    );
+    STUTTO_ASSERT(res4.is_stutter);
+    STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
+    STUTTO_ASSERT(stats.sample_count == 4); // Stutter frame rejected from baseline
+    std::cout << "  -> HYBRID warmup static suppression for frames 0..3 verified.\n";
+}
+
 int main() {
     std::cout << "================================================================\n";
     std::cout << " STUTTOMETER FRAME PACING & STATISTICAL TRIGGER TEST SUITE\n";
@@ -438,8 +584,12 @@ int main() {
         test_cadence_reset_after_stutter_frame();
         test_sustained_stutter_storm_baseline_preservation();
         test_cadence_helper_no_double_increment();
+        test_static_only_immediate_trigger_preserved();
+        test_hybrid_warmup_reject_then_recover();
+        test_hybrid_steady_slow_game_baseline_establishment();
+        test_hybrid_warmup_static_suppression_below_200ms();
 
-        std::cout << "\n>>> ALL 10 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
+        std::cout << "\n>>> ALL 14 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n[TEST FAILED] Exception: " << e.what() << "\n";

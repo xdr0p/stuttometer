@@ -32,6 +32,7 @@ static void test_kernel_frame_stall_trigger_and_upgrade() {
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
     stuttometer::TriggerConfig cfg;
     cfg.present_threshold_ms = 5.0; // 200 FPS -> effective threshold = 5.0 + 0.5 = 5.5ms
+    cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
     cfg.window_pre_ms = 250.0;
     cfg.window_post_ms = 30.0;
 
@@ -195,6 +196,7 @@ static void test_gpu_pre_window_scaling() {
     {
         stuttometer::TriggerConfig cfg;
         cfg.present_threshold_ms = 16.67;
+        cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
         cfg.window_pre_ms = 1000.0;
         cfg.window_post_ms = 0.0;
         stuttometer::TriggerEngine engine(cfg, qpc_freq);
@@ -214,6 +216,7 @@ static void test_gpu_pre_window_scaling() {
     {
         stuttometer::TriggerConfig cfg;
         cfg.present_threshold_ms = 16.67;
+        cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
         cfg.window_pre_ms = 50.0;
         cfg.window_post_ms = 0.0;
         stuttometer::TriggerEngine engine(cfg, qpc_freq);
@@ -233,6 +236,7 @@ static void test_gpu_pre_window_scaling() {
     {
         stuttometer::TriggerConfig cfg;
         cfg.present_threshold_ms = 16.67;
+        cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
         cfg.window_pre_ms = 250.0;
         cfg.window_post_ms = 0.0;
         stuttometer::TriggerEngine engine(cfg, qpc_freq);
@@ -300,6 +304,7 @@ static void test_trigger_engine_single_emission_guarantee() {
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
     stuttometer::TriggerConfig cfg;
     cfg.present_threshold_ms = 10.0;
+    cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
     cfg.window_pre_ms = 250.0;
     cfg.window_post_ms = 30.0;
     cfg.cooldown_ms = 500.0;

@@ -155,6 +155,7 @@ Targeting, Output & General:
   --redact                        Redact process names, file paths, and user identifiers
   --verbose                       Print detailed event stream metrics to console
   --version                       Print version information and exit
+  --self-check                    Run non-destructive environment diagnostics & ETW provider checks, then exit
 ```
 
 ---

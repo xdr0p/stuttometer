@@ -9,8 +9,9 @@
       "repomix.config.json",
       "codebase*.txt",
       "build/**",
+      "dist/**",
       "out/**",
-      "*.etl"
+      ".wrangler/**"
     ]
   }
 }

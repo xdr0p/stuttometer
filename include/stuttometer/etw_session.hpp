@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <ostream>
 #include <windows.h>
 #include <cguid.h>
 #include <evntrace.h>
@@ -33,7 +34,7 @@ inline constexpr GUID DXGKRNL_PROVIDER_GUID = {
 };
 
 inline constexpr GUID DWM_CORE_PROVIDER_GUID = {
-    0x9E9BBA3C, 0x2E38, 0x42CB, { 0xA2, 0x68, 0x96, 0xF9, 0xBB, 0x8D, 0xDB, 0x8C }
+    0x9E9BBA3C, 0x2E38, 0x40CB, { 0x99, 0xF4, 0x9E, 0x82, 0x81, 0x42, 0x51, 0x64 }
 };
 
 inline constexpr GUID SYSTEM_TRACE_CONTROL_GUID = {
@@ -372,5 +373,9 @@ private:
     FixedInFlightTable<LastPresentEntry, 2048> last_present_table_;
     FixedInFlightTable<LastFlipEntry, 2048> last_flip_table_;
 };
+
+// Runs non-destructive environment and ETW provider diagnostics to the specified output stream.
+// Returns true if all critical requirements pass (exit code 0), or false if any critical component fails (exit code 1).
+bool run_environment_self_check(std::ostream& out);
 
 } // namespace stuttometer

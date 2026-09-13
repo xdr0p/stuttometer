@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 #include <filesystem>
+#include <sstream>
 
 using namespace stuttometer;
 
@@ -655,6 +656,18 @@ static void test_trigger_engine_cas_process_attachment() {
     std::cout << "  -> TriggerEngine CAS process attachment & concurrency tests PASSED.\n";
 }
 
+static void test_environment_self_check_in_memory() {
+    std::cout << "[TEST] Validating run_environment_self_check with in-memory stream...\n";
+    std::ostringstream ss;
+    bool result = run_environment_self_check(ss);
+    std::string out_str = ss.str();
+    STUTTO_ASSERT(out_str.find("STUTTOMETER ENVIRONMENT & ETW PROVIDER SELF-CHECK") != std::string::npos);
+    STUTTO_ASSERT(out_str.find("QPC Clock Resolution:") != std::string::npos);
+    STUTTO_ASSERT(out_str.find("ETW Provider (Required):") != std::string::npos);
+    STUTTO_ASSERT(result == true);
+    std::cout << "  -> run_environment_self_check in-memory test PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer ETW Session Manager Tests ===\n";
     try {
@@ -676,6 +689,7 @@ int main() {
         test_out_of_order_dwm_debounce_logic();
         test_cswitch_tid_recycling_pid_check();
         test_provider_permutation_config();
+        test_environment_self_check_in_memory();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

@@ -202,9 +202,9 @@ inline FramePacingResult evaluate_frame_pacing(
     res.baseline_fps = (mean_ms > 0.0) ? (1000.0 / mean_ms) : 0.0;
     res.spike_ratio = (mean_ms > 0.0) ? (dur_ms / mean_ms) : 1.0;
 
-    // Warmup period: require >= 8 frames before dynamic relative triggers activate
     if (stats.sample_count < 8) {
-        if (mode == FrameTriggerMode::HYBRID || mode == FrameTriggerMode::STATIC_ONLY) {
+        if (mode == FrameTriggerMode::STATIC_ONLY) {
+            // STATIC_ONLY: Evaluates static threshold immediately from frame 0
             if (dur_ms >= effective_static_threshold_ms) {
                 res.is_stutter = true;
                 res.reason = TriggerReason::STATIC_THRESHOLD;
@@ -212,18 +212,44 @@ inline FramePacingResult evaluate_frame_pacing(
                 stats.alternating_cadence_count = 0;
                 return res;
             }
+            const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
+            push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
+            return res;
+        } else if (mode == FrameTriggerMode::HYBRID) {
+            // HYBRID Warmup:
+            if (stats.sample_count < 4) {
+                // Suppress static trigger during initial 4 frames to let baseline stabilize.
+                // 200ms rationale: ~6 frames at 30 FPS; conservative lower bound on obvious level-load/alt-tab stalls.
+                if (dur_ms >= 200.0) {
+                    stats.last_delta_us = 0;
+                    stats.alternating_cadence_count = 0;
+                    return res; // Reject catastrophic stall without baseline pollution
+                }
+            } else {
+                // sample_count in [4, 7]: baseline has >= 4 valid samples; static triggers active.
+                if (dur_ms >= effective_static_threshold_ms) {
+                    res.is_stutter = true;
+                    res.reason = TriggerReason::STATIC_THRESHOLD;
+                    stats.last_delta_us = 0;
+                    stats.alternating_cadence_count = 0;
+                    return res;
+                }
+            }
+            // Tighter 100ms clamp during warmup prevents early baseline skew with small sample counts
+            const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
+            push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
+            return res;
         } else if (mode == FrameTriggerMode::DYNAMIC_ONLY) {
-            // DYNAMIC_ONLY warmup protection: do not pollute baseline with severe startup outliers/hitches
+            // DYNAMIC_ONLY: Suppress static trigger; reject frames >= threshold during warmup
             if (dur_ms >= effective_static_threshold_ms) {
                 stats.last_delta_us = 0;
                 stats.alternating_cadence_count = 0;
-                return res; // Reject from baseline without static trigger
+                return res;
             }
+            const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
+            push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
+            return res;
         }
-        // Incorporate frame during warmup with sanity clamping against startup baseline pollution
-        const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-        push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
-        return res;
     }
 
     // 1. Dynamic Relative Spike Check

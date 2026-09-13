@@ -5,6 +5,7 @@
 #include <cstring>
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
+#include <tdh.h>
 
 namespace stuttometer {
 
@@ -1249,6 +1250,137 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
             }
         }
     }
+}
+
+bool run_environment_self_check(std::ostream& out) {
+    bool has_critical_failure = false;
+
+    out << "================================================================\n";
+    out << " STUTTOMETER ENVIRONMENT & ETW PROVIDER SELF-CHECK\n";
+    out << "================================================================\n";
+
+    // 1. Administrator Privileges
+    const bool is_admin = is_running_as_admin();
+    if (is_admin) {
+        out << "[PASS] Administrator Privileges: Elevated (Full kernel ETW capabilities)\n";
+    } else {
+        out << "[WARN] Administrator Privileges: Standard user (Kernel ETW requires elevation)\n";
+    }
+
+    // 2. QPC Clock Resolution
+    LARGE_INTEGER freq{};
+    if (QueryPerformanceFrequency(&freq) && freq.QuadPart > 0) {
+        const double freq_mhz = static_cast<double>(freq.QuadPart) / 1000000.0;
+        const double tick_ns = 1000000000.0 / static_cast<double>(freq.QuadPart);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[PASS] QPC Clock Resolution: %.2f MHz (%.1f ns tick granularity)", freq_mhz, tick_ns);
+        out << buf << "\n";
+    } else {
+        out << "[FAIL] QPC Clock Resolution: Failed to query frequency\n";
+        has_critical_failure = true;
+    }
+
+    // 3. NT Kernel Logger Status
+    if (is_admin) {
+        const size_t prop_size = sizeof(EVENT_TRACE_PROPERTIES) + 1024;
+        std::vector<uint8_t> query_buf(prop_size, 0);
+        auto p_query_props = reinterpret_cast<PEVENT_TRACE_PROPERTIES>(query_buf.data());
+        p_query_props->Wnode.BufferSize = static_cast<ULONG>(prop_size);
+        p_query_props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+
+        ULONG query_status = ControlTraceW(0, KERNEL_LOGGER_NAMEW, p_query_props, EVENT_TRACE_CONTROL_QUERY);
+        if (query_status == ERROR_WMI_INSTANCE_NOT_FOUND) {
+            out << "[PASS] NT Kernel Logger: Available\n";
+        } else if (query_status == ERROR_SUCCESS) {
+            out << "[WARN] NT Kernel Logger: Currently in use by another session (WPA/xperf/PresentMon)\n";
+        } else {
+            out << "[WARN] NT Kernel Logger: Status query returned code " << query_status << "\n";
+        }
+    } else {
+        out << "[INFO] NT Kernel Logger: Requires Administrator privileges to query status\n";
+    }
+
+    // 4. ETW Manifest Providers (TDH)
+    ULONG buffer_size = 0;
+    ULONG status = TdhEnumerateProviders(nullptr, &buffer_size);
+    std::vector<uint8_t> buffer;
+    while (status == ERROR_INSUFFICIENT_BUFFER) {
+        buffer.resize(buffer_size);
+        auto* p_info = reinterpret_cast<PPROVIDER_ENUMERATION_INFO>(buffer.data());
+        status = TdhEnumerateProviders(p_info, &buffer_size);
+    }
+
+    if (status != ERROR_SUCCESS) {
+        out << "[WARN] ETW Provider Enumeration: TDH query failed (Error " << status << ")\n";
+    } else if (!buffer.empty()) {
+        auto* p_info = reinterpret_cast<PPROVIDER_ENUMERATION_INFO>(buffer.data());
+
+        enum class ProviderSeverity {
+            TIER_REQUIRED,
+            TIER_STANDARD,
+            TIER_OPTIONAL
+        };
+
+        struct ProviderCheck {
+            const GUID* guid;
+            const char* name;
+            ProviderSeverity severity;
+        };
+
+        const ProviderCheck checks[] = {
+            { &DXGI_PROVIDER_GUID, "Microsoft-Windows-DXGI", ProviderSeverity::TIER_REQUIRED },
+            { &DXGKRNL_PROVIDER_GUID, "Microsoft-Windows-DxgKrnl", ProviderSeverity::TIER_REQUIRED },
+            { &DWM_CORE_PROVIDER_GUID, "Microsoft-Windows-Dwm-Core", ProviderSeverity::TIER_REQUIRED },
+            { &AUDIO_PROVIDER_GUID, "Microsoft-Windows-Audio", ProviderSeverity::TIER_STANDARD },
+            { &DIRECT3D12_PROVIDER_GUID, "Microsoft-Windows-Direct3D12", ProviderSeverity::TIER_STANDARD },
+            { &KERNEL_MEMORY_PROVIDER_GUID, "Microsoft-Windows-Kernel-Memory", ProviderSeverity::TIER_STANDARD },
+            { &KERNEL_PROCESS_PROVIDER_GUID, "Microsoft-Windows-Kernel-Process", ProviderSeverity::TIER_STANDARD },
+            { &KERNEL_PROCESSOR_POWER_GUID, "Microsoft-Windows-Kernel-Processor-Power", ProviderSeverity::TIER_STANDARD },
+            { &ANTIMALWARE_ENGINE_GUID, "Microsoft-Antimalware-Engine", ProviderSeverity::TIER_OPTIONAL },
+        };
+
+        constexpr size_t num_checks = sizeof(checks) / sizeof(checks[0]);
+        bool found[num_checks] = { false };
+
+        for (ULONG i = 0; i < p_info->NumberOfProviders; ++i) {
+            const GUID& pguid = p_info->TraceProviderInfoArray[i].ProviderGuid;
+            for (size_t c = 0; c < num_checks; ++c) {
+                if (!found[c] && IsEqualGUID(pguid, *checks[c].guid)) {
+                    found[c] = true;
+                }
+            }
+        }
+
+        for (size_t c = 0; c < num_checks; ++c) {
+            const auto& item = checks[c];
+            if (found[c]) {
+                const char* tier_label = (item.severity == ProviderSeverity::TIER_REQUIRED) ? "Required" :
+                                         (item.severity == ProviderSeverity::TIER_STANDARD) ? "Standard" : "Optional";
+                out << "[PASS] ETW Provider (" << tier_label << "): " << item.name << "\n";
+            } else {
+                if (item.severity == ProviderSeverity::TIER_REQUIRED) {
+                    out << "[FAIL] ETW Provider (Required): " << item.name << " is NOT registered\n";
+                    has_critical_failure = true;
+                } else if (item.severity == ProviderSeverity::TIER_STANDARD) {
+                    out << "[WARN] ETW Provider (Standard): " << item.name << " is NOT registered\n";
+                } else {
+                    out << "[INFO] ETW Provider (Optional): " << item.name << " is NOT registered\n";
+                }
+            }
+        }
+    } else {
+        out << "[INFO] ETW Provider Enumeration: No registered ETW providers found on system\n";
+    }
+
+    out << "================================================================\n";
+    if (has_critical_failure) {
+        out << " Self-check completed with CRITICAL FAILURES.\n";
+    } else {
+        out << " Self-check completed successfully. All critical requirements met.\n";
+    }
+    out << "================================================================\n";
+
+    return !has_critical_failure;
 }
 
 } // namespace stuttometer

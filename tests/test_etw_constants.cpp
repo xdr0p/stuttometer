@@ -75,6 +75,19 @@ static void test_provider_guids_and_events() {
     STUTTO_ASSERT(stuttometer::DIRECT3D12_PROVIDER_GUID.Data2 == 0x3A9B);
     STUTTO_ASSERT(stuttometer::DIRECT3D12_PROVIDER_GUID.Data3 == 0x4F56);
 
+    // DWM Core Provider {9E9BBA3C-2E38-40CB-99F4-9E8281425164}
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data1 == 0x9E9BBA3C);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data2 == 0x2E38);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data3 == 0x40CB);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[0] == 0x99);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[1] == 0xF4);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[2] == 0x9E);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[3] == 0x82);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[4] == 0x81);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[5] == 0x42);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[6] == 0x51);
+    STUTTO_ASSERT(stuttometer::DWM_CORE_PROVIDER_GUID.Data4[7] == 0x64);
+
     // Kernel Memory Provider {D1D93EF7-E1F2-4F45-9943-03D245FE6C00}
     STUTTO_ASSERT(stuttometer::KERNEL_MEMORY_PROVIDER_GUID.Data1 == 0xD1D93EF7);
     STUTTO_ASSERT(stuttometer::KERNEL_MEMORY_PROVIDER_GUID.Data2 == 0xE1F2);

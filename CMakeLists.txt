@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   stuttometer
-  VERSION 0.1.0
+  VERSION 0.1.1
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )
@@ -74,6 +74,8 @@ target_link_libraries(stuttometer_core
     nlohmann_json::nlohmann_json
     advapi32
     psapi
+  PRIVATE
+    tdh
 )
 
 target_compile_features(stuttometer_core PUBLIC cxx_std_20)

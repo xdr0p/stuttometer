@@ -111,6 +111,7 @@ static void test_trigger_engine_concurrency_and_claimed_state() {
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
     stuttometer::TriggerConfig config;
     config.present_threshold_ms = 20.0;
+    config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
     config.window_post_ms = 0.0; // Freeze immediately
 
     stuttometer::TriggerEngine engine(config, qpc_freq);
@@ -152,6 +153,7 @@ static void test_trigger_engine_watchdog_zero_post_window() {
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
     stuttometer::TriggerConfig config;
     config.present_threshold_ms = 20.0;
+    config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
     config.window_post_ms = 0.0;
     config.cooldown_ms = 100.0;
 

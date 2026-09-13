@@ -100,12 +100,19 @@ int main(int argc, char** argv) {
     app.add_flag("--redact", redact, "Redact process names, file paths, and user identifiers");
     app.add_flag("--verbose", verbose, "Print detailed event stream metrics to console");
     app.add_flag("--version", print_version, "Print version information and exit");
+    bool run_self_check = false;
+    app.add_flag("--self-check", run_self_check, "Run non-destructive environment diagnostics & ETW provider checks, then exit");
 
     CLI11_PARSE(app, argc, argv);
 
     if (print_version) {
-        std::cout << "Stuttometer v0.1.0\n";
+        std::cout << "Stuttometer v0.1.1\n";
         return 0;
+    }
+
+    if (run_self_check) {
+        bool ok = stuttometer::run_environment_self_check(std::cout);
+        return ok ? 0 : 1;
     }
 
     // CLI Range and Option Validation
@@ -220,9 +227,9 @@ int main(int argc, char** argv) {
     const bool is_admin = stuttometer::is_running_as_admin();
     if (!is_admin) {
         std::cerr << "\n[STUTTOMETER] Error: Running in Standard (Non-Elevated) Mode.\n";
-        std::cerr << "Kernel ETW providers (DPC, ISR, Disk I/O, Context Switches) require Administrator privileges.\n";
-        std::cerr << "To test the diagnostic engine without elevation, run:\n";
-        std::cerr << "  .\\stuttometer.exe --mock-test\n\n";
+        std::cerr << "Kernel ETW providers (DPC, ISR, Disk I/O, Context Switches) require Administrator privileges.\n\n";
+        std::cerr << "To verify your system ETW providers and environment before elevating, run:\n";
+        std::cerr << "  .\\stuttometer.exe --self-check\n\n";
         std::cerr << "To run live capture, please launch PowerShell as Administrator and run:\n";
         std::cerr << "  .\\stuttometer.exe [OPTIONS]\n\n";
         return 1;
@@ -242,7 +249,7 @@ int main(int argc, char** argv) {
         std::cerr << "[STUTTOMETER] Warning: Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
     }
 
-    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.1.0 (Elevated Mode)...\n";
+    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.1.1 (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
     stuttometer::EtwSessionConfig etw_config;
