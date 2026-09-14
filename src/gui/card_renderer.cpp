@@ -221,7 +221,7 @@ static void draw_card(
 
     // Summary Text (Row 2 of Blame Banner)
     std::string summary = report.diagnoses.empty() ? "No conclusive diagnosis available for this event." : report.diagnoses[0].summary;
-    if (report.redacted) {
+    if (report.redacted || report.attribution_redacted) {
         auto ids = collect_report_ids(report);
         summary = redact_text_with_ids(summary, ids);
     }
@@ -529,7 +529,8 @@ bool CardRenderer::initialize() noexcept {
 
 void CardRenderer::shutdown() noexcept {
     try {
-        std::lock_guard<std::mutex> lock(g_init_mutex);
+        std::lock_guard<std::mutex> render_lock(g_render_mutex);
+        std::lock_guard<std::mutex> init_lock(g_init_mutex);
         if (g_is_initialized) {
             Gdiplus::GdiplusShutdown(g_gdiplus_token);
             g_is_initialized = false;
@@ -583,14 +584,15 @@ std::vector<uint8_t> CardRenderer::render_card_to_png_bytes(
                 CLSID pngClsid;
                 if (GetEncoderClsid(L"image/png", &pngClsid) != -1) {
                     if (bitmap.Save(pStream, &pngClsid, nullptr) == Gdiplus::Ok) {
-                        HGLOBAL hGlob = nullptr;
-                        if (GetHGlobalFromStream(pStream, &hGlob) == S_OK && hGlob) {
-                            SIZE_T size = GlobalSize(hGlob);
-                            void* pData = GlobalLock(hGlob);
-                            if (pData) {
-                                result.resize(size);
-                                std::memcpy(result.data(), pData, size);
-                                GlobalUnlock(hGlob);
+                        STATSTG stat{};
+                        if (SUCCEEDED(pStream->Stat(&stat, STATFLAG_NONAME)) && stat.cbSize.QuadPart > 0) {
+                            LARGE_INTEGER zero{};
+                            zero.QuadPart = 0;
+                            pStream->Seek(zero, STREAM_SEEK_SET, nullptr);
+                            result.resize(static_cast<size_t>(stat.cbSize.QuadPart));
+                            ULONG read = 0;
+                            if (SUCCEEDED(pStream->Read(result.data(), static_cast<ULONG>(result.size()), &read))) {
+                                result.resize(read);
                             }
                         }
                     }

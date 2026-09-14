@@ -226,7 +226,7 @@ void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPos
         if (!report.diagnoses.empty()) {
             current_data_.confidence = report.diagnoses[0].confidence;
             std::string sum = report.diagnoses[0].summary;
-            if (report.redacted) {
+            if (report.redacted || report.attribution_redacted) {
                 auto ids = collect_report_ids(report);
                 sum = redact_text_with_ids(sum, ids);
             }
@@ -260,6 +260,7 @@ void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPos
             state_ = State::DISPLAYING;
             state_start_tp_ = now;
             display_deadline_ = now + std::chrono::milliseconds(display_duration_ms_);
+            timer_id_ = SetTimer(hwnd_, TIMER_ID, 16, nullptr);
             InvalidateRect(hwnd_, nullptr, TRUE);
         }
     } catch (...) {

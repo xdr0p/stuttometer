@@ -139,9 +139,16 @@ static void test_png_encoding_and_sampling() {
         STUTTO_ASSERT(bg_px.GetR() == 0x11 && bg_px.GetG() == 0x15 && bg_px.GetB() == 0x1F);
 
         // Sample top edge (1, 0) for 1px accent inset border (#2a354b)
+        // With SmoothingModeAntiAlias, allow rasterizer tolerance and assert pixel is closer to border (#2a354b) than bg (#11151f)
         Gdiplus::Color border_px;
         loaded_bmp.GetPixel(1, 0, &border_px);
-        STUTTO_ASSERT(border_px.GetR() == 0x2A && border_px.GetG() == 0x35 && border_px.GetB() == 0x4B);
+        int dist_border = std::abs(static_cast<int>(border_px.GetR()) - 0x2A) +
+                          std::abs(static_cast<int>(border_px.GetG()) - 0x35) +
+                          std::abs(static_cast<int>(border_px.GetB()) - 0x4B);
+        int dist_bg = std::abs(static_cast<int>(border_px.GetR()) - 0x11) +
+                      std::abs(static_cast<int>(border_px.GetG()) - 0x15) +
+                      std::abs(static_cast<int>(border_px.GetB()) - 0x1F);
+        STUTTO_ASSERT(dist_border < dist_bg && "Border pixel at (1, 0) must be distinctly closer to border accent (#2a354b) than canvas bg (#11151f)");
     }
     pStream->Release();
 

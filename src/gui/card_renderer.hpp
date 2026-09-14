@@ -20,7 +20,6 @@ struct CardRenderOptions {
     int base_width{1200};
     int base_height{675};
     double dpi_scale{1.0};
-    bool dark_theme{true};
 };
 
 class CardRenderer {

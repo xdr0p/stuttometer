@@ -658,7 +658,7 @@ static void load_user_settings() {
         }
         if (j.contains("osd_duration_ms") && j["osd_duration_ms"].is_number_unsigned()) {
             uint32_t v = j["osd_duration_ms"].get<uint32_t>();
-            if (v >= 500 && v <= 30000) g_settings_config.osd_duration_ms = v;
+            if (v >= 500 && v <= 10000) g_settings_config.osd_duration_ms = v;
         }
         if (j.contains("osd_position") && j["osd_position"].is_string()) {
             std::string pos = j["osd_position"].get<std::string>();
@@ -3066,7 +3066,6 @@ static void copy_selected_report_card(HWND hwnd) {
 
     const auto& item = g_stutters[g_selected_stutter_index];
     CardRenderOptions opts;
-    opts.dark_theme = true;
 
     if (CardRenderer::copy_card_to_clipboard(hwnd, *item.report, opts)) {
         MessageBoxW(hwnd, L"Visual Stutter Card copied to clipboard!\r\nYou can now paste directly into Discord, Slack, or image editors (Ctrl+V).", L"Card Copied", MB_OK | MB_ICONINFORMATION);
@@ -3094,7 +3093,6 @@ static void export_selected_report_card(HWND hwnd) {
 
     if (GetSaveFileNameW(&ofn)) {
         CardRenderOptions opts;
-        opts.dark_theme = true;
         if (CardRenderer::save_card_to_png(*item.report, std::filesystem::path(filename_buf), opts)) {
             MessageBoxW(hwnd, L"Visual Stutter Card exported successfully!", L"Export Complete", MB_OK | MB_ICONINFORMATION);
         } else {
@@ -3672,7 +3670,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SetWindowSubclass(g_h_btn_export, DarkButtonSubclassProc, IDC_BTN_EXPORT_JSON, 0);
 
             HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
-            g_osd_toast.create(hInst);
+            if (!g_osd_toast.create(hInst)) {
+                OutputDebugStringA("[STUTTOMETER] Warning: Failed to create OsdToast window.\n");
+            }
 
             // Stutter Events ListView (LVS_EX_DOUBLEBUFFER: High throughput, flicker-free)
             g_h_list_stutters = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_LIST_STUTTERS, NULL, NULL);
