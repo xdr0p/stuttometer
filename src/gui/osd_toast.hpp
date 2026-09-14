@@ -48,6 +48,8 @@ private:
     void update_position(OsdPosition position, uint32_t target_pid) noexcept;
 
     void recreate_fonts(UINT dpi) noexcept;
+    void init_gdi_resources() noexcept;
+    void destroy_gdi_resources() noexcept;
 
     HWND hwnd_{nullptr};
     HINSTANCE hinst_{nullptr};
@@ -65,6 +67,13 @@ private:
     HFONT font_title_{nullptr};
     HFONT font_main_{nullptr};
     HFONT font_sub_{nullptr};
+
+    HBRUSH br_bg_{nullptr};
+    HPEN pen_border_{nullptr};
+    HBRUSH br_accent_game_{nullptr};
+    HBRUSH br_accent_dwm_{nullptr};
+    HBRUSH br_accent_ext_{nullptr};
+    HBRUSH br_accent_unk_{nullptr};
 
     static constexpr UINT_PTR TIMER_ID = 1001;
     static constexpr uint32_t FADE_IN_MS = 150;

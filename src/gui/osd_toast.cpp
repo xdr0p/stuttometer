@@ -20,6 +20,8 @@ struct ProcessWindowSearch {
     HWND hwnd{nullptr};
 };
 
+// Locates the process's primary viewport window by filtering out message-only,
+// zero-sized, invisible tray helper, or tooltip windows via a >100x100px rect heuristic.
 static BOOL CALLBACK EnumProcessWindowsProc(HWND hwnd, LPARAM lParam) {
     auto* pSearch = reinterpret_cast<ProcessWindowSearch*>(lParam);
     DWORD process_id = 0;
@@ -130,6 +132,30 @@ void OsdToast::recreate_fonts(UINT dpi) noexcept {
     }
 }
 
+void OsdToast::init_gdi_resources() noexcept {
+    try {
+        if (!br_bg_) br_bg_ = CreateSolidBrush(RGB(17, 21, 31));
+        if (!pen_border_) pen_border_ = CreatePen(PS_SOLID, 1, RGB(42, 53, 75));
+        if (!br_accent_game_) br_accent_game_ = CreateSolidBrush(RGB(245, 158, 11));
+        if (!br_accent_dwm_) br_accent_dwm_ = CreateSolidBrush(RGB(168, 85, 247));
+        if (!br_accent_ext_) br_accent_ext_ = CreateSolidBrush(RGB(239, 68, 68));
+        if (!br_accent_unk_) br_accent_unk_ = CreateSolidBrush(RGB(100, 116, 139));
+    } catch (...) {
+    }
+}
+
+void OsdToast::destroy_gdi_resources() noexcept {
+    try {
+        if (br_bg_) { DeleteObject(br_bg_); br_bg_ = nullptr; }
+        if (pen_border_) { DeleteObject(pen_border_); pen_border_ = nullptr; }
+        if (br_accent_game_) { DeleteObject(br_accent_game_); br_accent_game_ = nullptr; }
+        if (br_accent_dwm_) { DeleteObject(br_accent_dwm_); br_accent_dwm_ = nullptr; }
+        if (br_accent_ext_) { DeleteObject(br_accent_ext_); br_accent_ext_ = nullptr; }
+        if (br_accent_unk_) { DeleteObject(br_accent_unk_); br_accent_unk_ = nullptr; }
+    } catch (...) {
+    }
+}
+
 bool OsdToast::create(HINSTANCE hInst) noexcept {
     try {
         if (hwnd_) {
@@ -170,6 +196,7 @@ bool OsdToast::create(HINSTANCE hInst) noexcept {
 
         UINT dpi = GetDpiForWindow(hwnd_);
         recreate_fonts(dpi);
+        init_gdi_resources();
 
         return true;
     } catch (...) {
@@ -191,6 +218,7 @@ void OsdToast::destroy() noexcept {
         if (font_title_) { DeleteObject(font_title_); font_title_ = nullptr; }
         if (font_main_)  { DeleteObject(font_main_);  font_main_  = nullptr; }
         if (font_sub_)   { DeleteObject(font_sub_);   font_sub_   = nullptr; }
+        destroy_gdi_resources();
 
         state_ = State::HIDDEN;
         current_alpha_ = 0;
@@ -401,30 +429,34 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
         HBITMAP mem_bmp = CreateCompatibleBitmap(hdc, width, height);
         HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem_dc, mem_bmp));
 
-        // Colors
-        COLORREF col_bg = RGB(17, 21, 31);          // #11151f
-        COLORREF col_border = RGB(42, 53, 75);      // #2a354b
+        init_gdi_resources();
+
         COLORREF col_text_pri = RGB(241, 245, 249); // Soft white
         COLORREF col_text_sec = RGB(148, 163, 184); // Slate
         COLORREF col_accent;
+        HBRUSH br_accent = br_accent_unk_;
         std::wstring attr_tag;
 
         switch (current_data_.attribution) {
             case AttributionTag::GAME_ENGINE:
                 col_accent = RGB(245, 158, 11);     // Amber
+                br_accent = br_accent_game_;
                 attr_tag = L"GAME ENGINE";
                 break;
             case AttributionTag::DWM_COMPOSITION:
                 col_accent = RGB(168, 85, 247);     // Purple
+                br_accent = br_accent_dwm_;
                 attr_tag = L"DWM COMPOSITION";
                 break;
             case AttributionTag::EXTERNAL_CONTENTION:
                 col_accent = RGB(239, 68, 68);      // Crimson
+                br_accent = br_accent_ext_;
                 attr_tag = L"EXTERNAL CONTENTION";
                 break;
             case AttributionTag::UNKNOWN:
             default:
                 col_accent = RGB(100, 116, 139);    // Slate
+                br_accent = br_accent_unk_;
                 attr_tag = L"UNKNOWN";
                 break;
         }
@@ -441,24 +473,18 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
         int r3_bot = MulDiv(74, dpi, 96);
         int callout_w = MulDiv(156, dpi, 96);
 
-        // Fill background
-        HBRUSH br_bg = CreateSolidBrush(col_bg);
-        FillRect(mem_dc, &rc, br_bg);
-        DeleteObject(br_bg);
+        // Fill background (cached brush)
+        FillRect(mem_dc, &rc, br_bg_);
 
-        // 1px Border
-        HPEN pen_border = CreatePen(PS_SOLID, 1, col_border);
-        HPEN old_pen = static_cast<HPEN>(SelectObject(mem_dc, pen_border));
+        // 1px Border (cached pen)
+        HPEN old_pen = static_cast<HPEN>(SelectObject(mem_dc, pen_border_));
         HBRUSH old_br = static_cast<HBRUSH>(SelectObject(mem_dc, GetStockObject(NULL_BRUSH)));
         Rectangle(mem_dc, 0, 0, width, height);
         SelectObject(mem_dc, old_pen);
-        DeleteObject(pen_border);
 
-        // Left accent stripe
-        HBRUSH br_accent = CreateSolidBrush(col_accent);
+        // Left accent stripe (cached brush)
         RECT rc_stripe = { 0, 0, stripe_w, height };
         FillRect(mem_dc, &rc_stripe, br_accent);
-        DeleteObject(br_accent);
 
         SetBkMode(mem_dc, TRANSPARENT);
 

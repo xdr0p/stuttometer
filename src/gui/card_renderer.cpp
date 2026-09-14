@@ -586,6 +586,8 @@ std::vector<uint8_t> CardRenderer::render_card_to_png_bytes(
                     if (bitmap.Save(pStream, &pngClsid, nullptr) == Gdiplus::Ok) {
                         STATSTG stat{};
                         if (SUCCEEDED(pStream->Stat(&stat, STATFLAG_NONAME)) && stat.cbSize.QuadPart > 0) {
+                            // Guard against ULONG truncation on the Read() cast below.
+                            if (stat.cbSize.QuadPart > MAXDWORD) { pStream->Release(); return {}; }
                             LARGE_INTEGER zero{};
                             zero.QuadPart = 0;
                             pStream->Seek(zero, STREAM_SEEK_SET, nullptr);
