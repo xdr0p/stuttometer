@@ -162,6 +162,7 @@ Targeting, Output & General:
   --verbose                       Print detailed event stream metrics to console
   --version                       Print version information and exit
   --self-check                    Run non-destructive environment diagnostics & ETW provider checks, then exit
+```
 
 ### Real-Time Event Streaming (NDJSON)
 
@@ -184,8 +185,6 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 
 - `--export-csv <path>` writes the retained frame pacing timeline in RFC 4180 CRLF format.
 - When `--output-dir <dir>` is specified, Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (JSON Schema v1.1) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix.
-
-```
 
 ---
 
