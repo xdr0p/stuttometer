@@ -331,6 +331,100 @@ static void test_case_insensitive_tid_and_pid_redaction() {
     std::cout << "  -> Case-insensitive TID/PID redaction PASSED.\n";
 }
 
+static void test_comprehensive_pii_path_redaction() {
+    std::cout << "[TEST] Validating comprehensive PII path redaction suite...\n";
+
+    stuttometer::JsonReporter reporter;
+
+    auto test_redaction = [&](std::string_view input, std::string_view expected) {
+        stuttometer::DiagnosticReport report;
+        report.trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        report.target_process = "Game.exe";
+        stuttometer::Diagnosis diag;
+        diag.summary = std::string(input);
+        report.diagnoses.push_back(diag);
+
+        auto j_redacted = reporter.to_json(report, true);
+        const std::string red_summary = j_redacted["diagnoses"][0]["summary"];
+        if (red_summary != expected) {
+            std::cerr << "Redaction mismatch!\nInput:    " << input 
+                      << "\nExpected: " << expected 
+                      << "\nActual:   " << red_summary << "\n";
+        }
+        STUTTO_ASSERT(red_summary == expected);
+    };
+
+    // 1. Path at end of string without space or punctuation
+    test_redaction("Stall in C:\\Game\\game.exe", "Stall in [PATH_REDACTED]");
+
+    // 2. Directory-only path with space
+    test_redaction("Stall in C:\\Program Files", "Stall in [PATH_REDACTED]");
+    test_redaction("Stall in C:\\Users\\Admin User", "Stall in [PATH_REDACTED]");
+
+    // 3. Path with consecutive spaces
+    test_redaction("File: C:\\Program  Files\\game.exe", "File: [PATH_REDACTED]");
+
+    // 4. Path with spaces in directory and filename
+    test_redaction("Loading C:\\Program Files\\My Game\\bin\\game app.exe", "Loading [PATH_REDACTED]");
+
+    // 5. Long path exceeding 128 characters / MAX_PATH (asserts zero tail leakage on long paths)
+    test_redaction(
+        "Asset C:\\Users\\Administrator\\Documents\\My Game Project\\Assets\\Textures\\Environments\\Level3\\Final\\Optimized\\level3_env_final_v2_diffuse.png",
+        "Asset [PATH_REDACTED]"
+    );
+
+    // 6. Path followed by semicolon and text
+    test_redaction("Loaded C:\\Users\\Admin User\\save.dat; status OK", "Loaded [PATH_REDACTED]; status OK");
+    test_redaction("Loaded C:\\Users\\Admin User\\save.dat; TID 8888", "Loaded [PATH_REDACTED]; TID REDACTED");
+
+    // 7. Path followed by unquoted prose without delimiter (conservative over-redaction)
+    test_redaction("Interference from C:\\Users\\Admin\\file.dat on TID 8888", "Interference from [PATH_REDACTED]");
+
+    // 8. Path containing keywords in directory/filename
+    test_redaction("Data at C:\\Program Files\\My Game\\data for windows.bin", "Data at [PATH_REDACTED]");
+    test_redaction("Saved at C:\\Users\\Admin\\Saved Games\\Save and Load\\slot1.dat", "Saved at [PATH_REDACTED]");
+
+    // 9. Path containing balanced parentheses
+    test_redaction("Binary at C:\\Program Files (x86)\\Game\\file.exe", "Binary at [PATH_REDACTED]");
+
+    // 10. Path inside parenthetical
+    test_redaction("Stall (path D:\\Games\\Steam\\steam.exe)", "Stall (path [PATH_REDACTED])");
+
+    // 11. Quoted path
+    test_redaction("Accessing \"C:\\Program Files\\Game\\level1.pak\"", "Accessing \"[PATH_REDACTED]\"");
+
+    // 12. Backtick path
+    test_redaction("Accessing `C:\\Game\\data.pak`", "Accessing `[PATH_REDACTED]`");
+
+    // 13. Single-quoted path
+    test_redaction("Accessing 'C:\\Game\\data.pak'", "Accessing '[PATH_REDACTED]'");
+
+    // 14. Unterminated quoted path (fallback to unquoted rules without leakage)
+    test_redaction("Error opening \"C:\\Users\\Admin\\file.dat", "Error opening [PATH_REDACTED]");
+
+    // 15. UNC path with spaces
+    test_redaction("Network read \\\\NAS\\My Share\\data.bin", "Network read [PATH_REDACTED]");
+
+    // 16. Path followed by comma
+    test_redaction("Reading C:\\dir\\file.dat, more text", "Reading [PATH_REDACTED], more text");
+
+    // 17. Negative prose test cases (must NOT be redacted)
+    test_redaction("Ratio 16:9 or Note: test", "Ratio 16:9 or Note: test");
+    test_redaction("Volume C: not found", "Volume C: not found");
+    test_redaction("Update on Tuesday", "Update on Tuesday");
+    test_redaction("Files and folders", "Files and folders");
+    test_redaction("See https://aka.ms/stuttometer for help", "See https://aka.ms/stuttometer for help");
+    test_redaction("Visit http://example.com/page.html for details", "Visit http://example.com/page.html for details");
+
+    // 18. Extended length path
+    test_redaction("Extended path \\\\?\\C:\\Users\\Administrator\\game.exe", "Extended path [PATH_REDACTED]");
+
+    // 19. Multi-line quoted string does not cross line boundaries
+    test_redaction("Error 'C:\\Users\\Admin\\file.dat\nNext 'line'", "Error [PATH_REDACTED]\nNext 'line'");
+
+    std::cout << "  -> Comprehensive PII path redaction suite PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer JSON Schema & Redaction Tests ===\n";
     try {
@@ -339,6 +433,7 @@ int main() {
         test_secondary_tid_and_pid_redaction();
         test_case_insensitive_tid_and_pid_redaction();
         test_path_and_username_pii_redaction();
+        test_comprehensive_pii_path_redaction();
         test_audio_glitch_json_serialization();
         test_save_to_file_non_ascii_path();
         std::cout << ">>> All JSON Schema tests PASSED! <<<\n\n";

@@ -102,6 +102,13 @@ struct EtwSessionConfig {
     uint32_t flush_interval_ms{100};
 };
 
+[[nodiscard]] inline uint32_t compute_recommended_buffer_slots(const EtwSessionConfig& cfg, uint32_t requested_slots) noexcept {
+    if (cfg.enable_dxgkrnl || cfg.enable_dwm_core || cfg.enable_kernel_cswitch) {
+        return std::max(requested_slots, 262144U);
+    }
+    return requested_slots;
+}
+
 struct PresentInFlight {
     uint64_t start_qpc{0};
     uint32_t pid{0};
@@ -341,6 +348,28 @@ public:
     // Static callback entry point for ProcessTrace
     static void WINAPI on_event_record(PEVENT_RECORD p_event);
 
+    void update_sync_time_for_test(uint64_t utc, uint64_t qpc) noexcept {
+        const uint64_t s = sync_time_seq_.load(std::memory_order_relaxed);
+        sync_time_seq_.store(s + 1, std::memory_order_release);
+        sync_time_utc_.store(utc, std::memory_order_relaxed);
+        sync_time_qpc_.store(qpc, std::memory_order_relaxed);
+        sync_time_seq_.store(s + 2, std::memory_order_release);
+    }
+
+    void read_sync_time(uint64_t& out_utc, uint64_t& out_qpc) const noexcept {
+        uint64_t s1 = 0, s2 = 0;
+        do {
+            s1 = sync_time_seq_.load(std::memory_order_acquire);
+            while (s1 % 2 != 0) {
+                cpu_pause();
+                s1 = sync_time_seq_.load(std::memory_order_acquire);
+            }
+            out_utc = sync_time_utc_.load(std::memory_order_relaxed);
+            out_qpc = sync_time_qpc_.load(std::memory_order_relaxed);
+            s2 = sync_time_seq_.load(std::memory_order_acquire);
+        } while (s1 != s2);
+    }
+
 private:
     struct EventContext {
         uint64_t timestamp{0};
@@ -385,6 +414,7 @@ private:
     std::atomic<uint32_t> recent_dwm_glitch_idx_{0};
     std::atomic<uint64_t> sync_time_utc_{0};
     std::atomic<uint64_t> sync_time_qpc_{0};
+    std::atomic<uint64_t> sync_time_seq_{0};
     std::atomic<uint32_t> user_events_lost_{0};
     std::atomic<uint32_t> kernel_events_lost_{0};
     std::atomic<uint32_t> user_buffers_lost_{0};

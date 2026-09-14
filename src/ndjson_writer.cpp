@@ -3,9 +3,12 @@
 #endif
 
 #include "stuttometer/ndjson_writer.hpp"
+#include "stuttometer/fixed_table.hpp"
 #include <system_error>
 #include <cstring>
 #include <string>
+#include <algorithm>
+#include <iostream>
 
 namespace stuttometer {
 
@@ -14,7 +17,7 @@ NdjsonWriter::NdjsonWriter(std::FILE* file, bool owns_file, std::filesystem::pat
     , owns_file_(owns_file)
     , base_path_(std::move(base_path))
     , max_bytes_(max_bytes)
-    , max_files_(max_files)
+    , max_files_(std::max<size_t>(1, max_files))
 {
     ring_ = std::make_unique<Cell[]>(RING_CAPACITY);
     for (size_t i = 0; i < RING_CAPACITY; ++i) {
@@ -70,6 +73,7 @@ void NdjsonWriter::stop() noexcept {
 
 void NdjsonWriter::pause_worker_for_test() noexcept {
     test_paused_.store(true, std::memory_order_release);
+    resume_cv_.notify_all();
     std::unique_lock<std::mutex> lock(pause_mutex_);
     pause_cv_.wait(lock, [this]() { return worker_is_paused_.load(std::memory_order_acquire); });
 }
@@ -110,12 +114,7 @@ void NdjsonWriter::rotate_files() {
 
     std::error_code ec;
     if (max_files_ == 1) {
-        // Truncate active file
-#if defined(_WIN32)
-        file_ = _wfopen(base_path_.c_str(), L"wb");
-#else
-        file_ = std::fopen(base_path_.string().c_str(), "wb");
-#endif
+        // Truncate active file - will be reopened below
     } else if (max_files_ > 1) {
         // Delete oldest rotated file if it exists: base.(max_files - 1)
         std::filesystem::path oldest = base_path_.string() + "." + std::to_string(max_files_ - 1);
@@ -135,28 +134,30 @@ void NdjsonWriter::rotate_files() {
             std::filesystem::path dst1 = base_path_.string() + ".1";
             std::filesystem::rename(base_path_, dst1, ec);
         }
+    }
 
-        // Reopen base_path_
+    // Reopen base_path_
 #if defined(_WIN32)
-        file_ = _wfopen(base_path_.c_str(), L"wb");
+    file_ = _wfopen(base_path_.c_str(), L"wb");
 #else
-        file_ = std::fopen(base_path_.string().c_str(), "wb");
+    file_ = std::fopen(base_path_.string().c_str(), "wb");
 #endif
+    if (!file_) {
+        if (!rotation_error_logged_.exchange(true, std::memory_order_relaxed)) {
+            std::cerr << "[NDJSON] Error: Failed to reopen file after rotation: " << base_path_.string() << "\n";
+        }
     }
     current_file_bytes_ = 0;
 }
 
 void NdjsonWriter::worker_loop() {
-    // Worker busy-polls the ring; do not replace with a blocking wait, or pause_worker_for_test() will not observe the pause request.
+    size_t idle_spins = 0;
     while (running_.load(std::memory_order_relaxed) || enqueue_pos_.load(std::memory_order_relaxed) != dequeue_pos_.load(std::memory_order_relaxed)) {
         if (test_paused_.load(std::memory_order_acquire)) {
-            {
-                std::lock_guard<std::mutex> lock(pause_mutex_);
-                worker_is_paused_.store(true, std::memory_order_release);
-            }
+            std::unique_lock<std::mutex> lock(pause_mutex_);
+            worker_is_paused_.store(true, std::memory_order_release);
             pause_cv_.notify_all();
 
-            std::unique_lock<std::mutex> lock(pause_mutex_);
             resume_cv_.wait(lock, [this]() {
                 return !test_paused_.load(std::memory_order_acquire) || !running_.load(std::memory_order_relaxed);
             });
@@ -169,12 +170,13 @@ void NdjsonWriter::worker_loop() {
         intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
 
         if (dif == 0) {
+            idle_spins = 0;
             if (dequeue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
                 EtwEventRecord rec = cell.record;
                 cell.sequence.store(pos + RING_MASK + 1, std::memory_order_release);
 
                 const std::string_view cat_sv = category_to_string(static_cast<EventCategory>(rec.category));
-                char buf[256];
+                char buf[1024];
                 int len = std::snprintf(buf, sizeof(buf),
                     "{\"v\":%u,\"ts_qpc\":%llu,\"cat\":\"%.*s\",\"id\":%u,\"pid\":%u,\"tid\":%u,\"cpu\":%u,\"dur_us\":%u,\"aux\":%llu,\"flags\":%u}\n",
                     NDJSON_LINE_SCHEMA_VERSION,
@@ -189,7 +191,9 @@ void NdjsonWriter::worker_loop() {
                     static_cast<unsigned int>(rec.flags)
                 );
 
-                if (len > 0 && static_cast<size_t>(len) < sizeof(buf)) {
+                if (len <= 0 || static_cast<size_t>(len) >= sizeof(buf) || file_ == nullptr) {
+                    dropped_records_.fetch_add(1, std::memory_order_relaxed);
+                } else {
                     if (owns_file_ && max_bytes_ > 0 && current_file_bytes_ + static_cast<size_t>(len) > max_bytes_) {
                         rotate_files();
                     }
@@ -197,6 +201,8 @@ void NdjsonWriter::worker_loop() {
                         std::fwrite(buf, 1, static_cast<size_t>(len), file_);
                         current_file_bytes_ += static_cast<size_t>(len);
                         written_records_.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        dropped_records_.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
             }
@@ -204,7 +210,18 @@ void NdjsonWriter::worker_loop() {
             if (!running_.load(std::memory_order_relaxed) && enqueue_pos_.load(std::memory_order_relaxed) == dequeue_pos_.load(std::memory_order_relaxed)) {
                 break;
             }
-            std::this_thread::yield();
+            if (idle_spins < 64) {
+                cpu_pause();
+                ++idle_spins;
+            } else if (idle_spins < 128) {
+                std::this_thread::yield();
+                ++idle_spins;
+            } else {
+                std::unique_lock<std::mutex> lock(pause_mutex_);
+                resume_cv_.wait_for(lock, std::chrono::milliseconds(2), [this]() {
+                    return test_paused_.load(std::memory_order_acquire) || !running_.load(std::memory_order_relaxed);
+                });
+            }
         }
     }
 }

@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
     }
 
     if (print_version) {
-        std::cout << "Stuttometer v0.2.0\n";
+        std::cout << "Stuttometer v0.3.0\n";
         return 0;
     }
 
@@ -313,7 +313,7 @@ int main(int argc, char** argv) {
         std::cerr << "[STUTTOMETER] Warning: Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
     }
 
-    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.2.0 (Elevated Mode)...\n";
+    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.3.0 (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
     stuttometer::EtwSessionConfig etw_config;
@@ -330,8 +330,10 @@ int main(int argc, char** argv) {
     etw_config.enable_d3d12 = (provider_tier != "minimal");
     etw_config.enable_kernel_memory = (provider_tier != "minimal");
 
-    if (etw_config.enable_dxgkrnl || etw_config.enable_dwm_core) {
-        buffer_slots = std::max(buffer_slots, 262144U);
+    const uint32_t requested_slots = buffer_slots;
+    buffer_slots = stuttometer::compute_recommended_buffer_slots(etw_config, requested_slots);
+    if (buffer_slots > requested_slots) {
+        std::cout << "[STUTTOMETER] Buffer capacity automatically bumped to " << buffer_slots << " slots for active providers\n";
     }
 
     stuttometer::FlightRecorder flight_recorder(buffer_slots);
@@ -456,6 +458,7 @@ int main(int argc, char** argv) {
                 while (session_mgr.last_processed_qpc() < to_qpc && std::chrono::steady_clock::now() < deadline) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
                 uint64_t drops = 0;
                 auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);

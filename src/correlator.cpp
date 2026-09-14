@@ -256,7 +256,9 @@ DiagnosticReport CorrelationEngine::correlate(
                 break;
             case EventCategory::DWM_GLITCH:
                 ++report.event_counts.dwm_glitch;
-                dwm_candidates.push_back({ rec, offset_ms });
+                if (rec.duration_us > 0) {
+                    dwm_candidates.push_back({ rec, offset_ms });
+                }
                 break;
             case EventCategory::DPC:
                 ++report.event_counts.dpc;
@@ -306,8 +308,16 @@ DiagnosticReport CorrelationEngine::correlate(
                             cswitch_candidates.push_back({ switch_out_rec, offset_ms, false });
                         }
                     }
+                } else if (trigger.target_pid != 0) {
+                    const bool is_target_in = (rec.pid == trigger.target_pid);
+                    const bool is_target_out = (rec.payload.cswitch.prev_pid == trigger.target_pid);
+                    if ((is_target_in || is_target_out) && !(rec.flags & EventFlags::CSWITCH_VOLUNTARY)) {
+                        if (rec.duration_us >= (thresholds_.cswitch_preempt_ms * 1000)) {
+                            cswitch_candidates.push_back({ rec, offset_ms, true });
+                        }
+                    }
                 } else {
-                    // Auto-detect mode: collect severe involuntary preemptions across any thread
+                    // Auto-detect mode (monitor-all): collect severe involuntary preemptions across any thread
                     if (rec.duration_us >= (thresholds_.cswitch_preempt_ms * 1000) && !(rec.flags & EventFlags::CSWITCH_VOLUNTARY)) {
                         cswitch_candidates.push_back({ rec, offset_ms, true });
                     }
@@ -363,6 +373,8 @@ DiagnosticReport CorrelationEngine::correlate(
                 if (rec.duration_us >= thresholds_.mem_physical_latency_us) {
                     mem_physical_candidates.push_back({ rec, offset_ms });
                 }
+                break;
+            case EventCategory::PROCESS:
                 break;
             default:
                 break;
@@ -546,6 +558,7 @@ DiagnosticReport CorrelationEngine::correlate(
         dpc_candidates.empty() && 
         disk_candidates.empty() && 
         cswitch_candidates.empty() &&
+        dwm_candidates.empty() &&
         vram_candidates.empty() && 
         mem_alloc_candidates.empty() && 
         mem_trim_candidates.empty() && 

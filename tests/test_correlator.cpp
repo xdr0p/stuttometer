@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include "stuttometer/correlator.hpp"
+#include "stuttometer/trigger_engine.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include <iostream>
 
@@ -1238,6 +1239,178 @@ static void test_correlator_attribution_pipeline_wiring() {
     std::cout << "  -> Frame timeline points retained: " << report.frame_timeline.size() << " PASSED.\n";
 }
 
+static void test_cswitch_targeted_autodetect_filtering() {
+    std::cout << "[TEST] Validating Targeted CSwitch Auto-Detect Filtering (target_pid != 0, target_tid == 0)...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger;
+    trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+    trigger.duration_ms = 40.0;
+    trigger.target_pid = 1234;
+    trigger.target_tid = 0; // Auto-detect threads of PID 1234
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // Involuntary preemption of unrelated background PID 9999
+    stuttometer::EtwEventRecord cs_unrelated{};
+    cs_unrelated.category = static_cast<uint16_t>(stuttometer::EventCategory::CSWITCH);
+    cs_unrelated.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(15.0, qpc_freq);
+    cs_unrelated.pid = 9999;
+    cs_unrelated.tid = 5555;
+    cs_unrelated.duration_us = 15000;
+    cs_unrelated.flags = 0; // Involuntary
+    cs_unrelated.payload.cswitch.prev_pid = 8888;
+    cs_unrelated.payload.cswitch.prev_tid = 7777;
+    snapshot.push_back(cs_unrelated);
+
+    stuttometer::ProviderContext p_ctx;
+    p_ctx.kernel_cswitch_active = true;
+
+    auto report_unrelated = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+    // Should NOT diagnose context_switch_interference because PID 9999 is not target_pid 1234
+    for (const auto& diag : report_unrelated.diagnoses) {
+        STUTTO_ASSERT(diag.hypothesis != "context_switch_interference");
+    }
+
+    // Now add involuntary preemption of target PID 1234
+    stuttometer::EtwEventRecord cs_target{};
+    cs_target.category = static_cast<uint16_t>(stuttometer::EventCategory::CSWITCH);
+    cs_target.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+    cs_target.pid = 1234;
+    cs_target.tid = 2222;
+    cs_target.duration_us = 12000;
+    cs_target.flags = 0; // Involuntary
+    cs_target.payload.cswitch.prev_pid = 9999;
+    cs_target.payload.cswitch.prev_tid = 5555;
+    snapshot.push_back(cs_target);
+
+    auto report_target = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+    STUTTO_ASSERT(!report_target.diagnoses.empty());
+    STUTTO_ASSERT(report_target.diagnoses[0].hypothesis == "context_switch_interference");
+    STUTTO_ASSERT(report_target.diagnoses[0].confidence >= 0.65);
+
+    std::cout << "  -> Targeted CSwitch Auto-Detect filtering PASSED.\n";
+}
+
+static void test_dwm_glitch_suppresses_gpu_pipeline_stall() {
+    std::cout << "[TEST] Validating DWM Glitch Suppresses GPU Pipeline Stall...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger;
+    trigger.source = stuttometer::TriggerSource::KERNEL_FRAME_STALL;
+    trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+    trigger.duration_ms = 40.0;
+    trigger.target_pid = 1234;
+    trigger.target_tid = 5678;
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // Add a DWM glitch event in the snapshot
+    stuttometer::EtwEventRecord dwm{};
+    dwm.category = static_cast<uint16_t>(stuttometer::EventCategory::DWM_GLITCH);
+    dwm.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+    dwm.duration_us = 33000; // 33ms DWM compositor stall
+    dwm.auxiliary_data = 1; // glitch type
+    snapshot.push_back(dwm);
+
+    stuttometer::ProviderContext p_ctx;
+    p_ctx.user_dwm_active = true;
+
+    auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+
+    // dwm_compositor_stall must be diagnosed
+    bool has_dwm = false;
+    bool has_gpu = false;
+    for (const auto& diag : report.diagnoses) {
+        if (diag.hypothesis == "dwm_compositor_stall") has_dwm = true;
+        if (diag.hypothesis == "gpu_pipeline_stall") has_gpu = true;
+    }
+    STUTTO_ASSERT(has_dwm);
+    STUTTO_ASSERT(!has_gpu); // gpu_pipeline_stall suppressed by DWM candidates!
+
+    std::cout << "  -> DWM compositor stall diagnosed and GPU pipeline stall suppressed PASSED.\n";
+}
+
+static void test_monitor_all_glitch_attribution() {
+    std::cout << "[TEST] Validating Monitor-All Glitch Attribution (target_pid == 0)...\n";
+
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    // 1. DWM glitch trigger in monitor-all mode (target_pid == 0)
+    stuttometer::TriggerInfo dwm_trigger;
+    dwm_trigger.source = stuttometer::TriggerSource::DWM_GLITCH;
+    dwm_trigger.trigger_timestamp_qpc = 1000000;
+    dwm_trigger.duration_ms = 33.3;
+    dwm_trigger.target_pid = 0;
+    dwm_trigger.target_tid = 0;
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::ProviderContext p_ctx;
+
+    auto dwm_report = correlator.correlate(snapshot, dwm_trigger, qpc_freq, p_ctx);
+    STUTTO_ASSERT(dwm_report.target_process.empty());
+    STUTTO_ASSERT(dwm_report.trigger.target_pid == 0);
+
+    // 2. Audio glitch trigger in monitor-all mode (target_pid == 0)
+    stuttometer::TriggerInfo audio_trigger;
+    audio_trigger.source = stuttometer::TriggerSource::AUDIO_GLITCH;
+    audio_trigger.trigger_timestamp_qpc = 1000000;
+    audio_trigger.glitch_count = 3;
+    audio_trigger.target_pid = 0;
+    audio_trigger.target_tid = 0;
+
+    auto audio_report = correlator.correlate(snapshot, audio_trigger, qpc_freq, p_ctx);
+    STUTTO_ASSERT(audio_report.target_process.empty());
+    STUTTO_ASSERT(audio_report.trigger.target_pid == 0);
+
+    // Also verify TriggerEngine itself produces effective_pid = 0 in monitor-all mode
+    // DWM glitch with DWM PID 999
+    {
+        stuttometer::TriggerConfig trg_cfg;
+        stuttometer::TriggerEngine engine(trg_cfg, qpc_freq);
+        engine.update_target_pid(0); // Monitor all mode
+        bool dwm_fired = engine.on_dwm_glitch(999, 1000, 33.3, 1000000, 0);
+        STUTTO_ASSERT(dwm_fired);
+        stuttometer::TriggerInfo trg_out{};
+        uint64_t from_q = 0, to_q = 0;
+        bool polled = engine.poll_state(1000000 + qpc_freq, trg_out, from_q, to_q);
+        STUTTO_ASSERT(polled);
+        STUTTO_ASSERT(trg_out.target_pid == 0);
+        STUTTO_ASSERT(trg_out.target_tid == 0);
+    }
+
+    // Audio glitch with audiodg PID 888
+    {
+        stuttometer::TriggerConfig trg_cfg;
+        trg_cfg.audio_trigger_enabled = true;
+        stuttometer::TriggerEngine engine(trg_cfg, qpc_freq);
+        engine.update_target_pid(0); // Monitor all mode
+        bool audio_fired = engine.on_audio_glitch(888, 1001, 2, 2000000, 0);
+        STUTTO_ASSERT(audio_fired);
+        stuttometer::TriggerInfo trg_out{};
+        uint64_t from_q = 0, to_q = 0;
+        bool polled = engine.poll_state(2000000 + qpc_freq, trg_out, from_q, to_q);
+        STUTTO_ASSERT(polled);
+        STUTTO_ASSERT(trg_out.target_pid == 0);
+        STUTTO_ASSERT(trg_out.target_tid == 0);
+    }
+
+    std::cout << "  -> Monitor-all glitch attribution verification PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -1248,8 +1421,11 @@ int main() {
         test_cswitch_voluntary_wait_ignored();
         test_cswitch_switch_out_duration_non_pollution();
         test_cswitch_autodetect_mode_correlation();
+        test_cswitch_targeted_autodetect_filtering();
         test_dwm_compositor_stall_correlation();
+        test_dwm_glitch_suppresses_gpu_pipeline_stall();
         test_dwm_secondary_diagnosis_and_smi_suppression();
+        test_monitor_all_glitch_attribution();
         test_page_fault_stall_correlation();
         test_thermal_throttle_correlation();
         test_antimalware_interference_correlation();

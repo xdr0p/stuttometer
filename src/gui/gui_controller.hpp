@@ -6,6 +6,7 @@
 #include "stuttometer/json_reporter.hpp"
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
+#include "osd_types.hpp"
 
 #include <windows.h>
 #include <string>
@@ -69,6 +70,11 @@ struct GuiConfig {
     double min_spike_delta_ms{4.0};
     bool enable_judder_detection{true};
     double judder_swing_ratio{0.35};
+
+    // In-Game OSD Toast Configuration
+    bool enable_osd{false};
+    uint32_t osd_duration_ms{3500};
+    OsdPosition osd_position{OsdPosition::TOP_RIGHT};
 };
 
 struct GuiMetrics {

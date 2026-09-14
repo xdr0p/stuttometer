@@ -356,7 +356,6 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
         std::lock_guard<std::mutex> lock(s_resolve_mutex);
         auto it = s_resolve_cache.find(cache_key);
         if (it != s_resolve_cache.end()) {
-            const auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.cached_at).count();
             if (it->second.pid != 0) {
                 HANDLE h_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, it->second.pid);
                 if (h_proc) {
@@ -377,8 +376,11 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
                     }
                     CloseHandle(h_proc);
                 }
-            } else if (elapsed_sec < 3) {
-                return 0; // Short negative cache (3s) before re-scanning for launch
+            } else {
+                const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.cached_at).count();
+                if (elapsed_ms < 250) {
+                    return 0; // Short 250ms negative cache TTL
+                }
             }
         }
     }

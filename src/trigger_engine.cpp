@@ -194,7 +194,7 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
     return false;
 }
 
-bool TriggerEngine::on_dwm_glitch(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
+bool TriggerEngine::on_dwm_glitch(uint32_t /*pid*/, uint32_t /*tid*/, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
     const double jitter_guard = std::max(0.5, config_.present_threshold_ms * 0.05);
     const double effective_threshold = std::max(1.0, config_.present_threshold_ms - jitter_guard);
 
@@ -211,8 +211,8 @@ bool TriggerEngine::on_dwm_glitch(uint32_t pid, uint32_t tid, double duration_ms
         return false;
     }
     const uint32_t target_pid = static_cast<uint32_t>(target_state >> 32);
-    const uint32_t effective_pid = (target_pid != 0) ? target_pid : pid;
-    const uint32_t effective_tid = (target_pid != 0) ? 0 : tid;
+    const uint32_t effective_pid = (target_pid != 0) ? target_pid : 0;
+    const uint32_t effective_tid = 0;
 
     return initiate_trigger_atomic(
         TriggerSource::DWM_GLITCH,
@@ -226,7 +226,7 @@ bool TriggerEngine::on_dwm_glitch(uint32_t pid, uint32_t tid, double duration_ms
     );
 }
 
-bool TriggerEngine::on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
+bool TriggerEngine::on_audio_glitch(uint32_t /*pid*/, uint32_t /*tid*/, uint32_t glitch_count, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
     if (!config_.audio_trigger_enabled || glitch_count == 0) {
         return false;
     }
@@ -240,8 +240,8 @@ bool TriggerEngine::on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_
     // Audio glitches originate from audiodg.exe or audio service, not the game PID directly.
     // If a target PID is actively configured and running, attribute trigger to target PID with target_tid = 0.
     const uint32_t target_pid = static_cast<uint32_t>(target_state >> 32);
-    const uint32_t effective_pid = (target_pid != 0) ? target_pid : pid;
-    const uint32_t effective_tid = (target_pid != 0) ? 0 : tid;
+    const uint32_t effective_pid = (target_pid != 0) ? target_pid : 0;
+    const uint32_t effective_tid = 0;
 
     return initiate_trigger_atomic(
         TriggerSource::AUDIO_GLITCH,

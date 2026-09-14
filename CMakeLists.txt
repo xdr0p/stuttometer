@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   stuttometer
-  VERSION 0.2.0
+  VERSION 0.3.0
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )
@@ -103,6 +103,8 @@ target_compile_features(stuttometer PRIVATE cxx_std_20)
 add_executable(stuttometer_gui WIN32
   src/gui/main_gui.cpp
   src/gui/gui_controller.cpp
+  src/gui/card_renderer.cpp
+  src/gui/osd_toast.cpp
   src/gui/resources.rc
   src/gui/stuttometer_gui.manifest
 )
@@ -117,6 +119,7 @@ target_link_libraries(stuttometer_gui
     stuttometer_core
     user32
     gdi32
+    gdiplus
     comctl32
     comdlg32
     dwmapi
@@ -235,6 +238,26 @@ add_executable(test_report_serialization_consistency
 target_link_libraries(test_report_serialization_consistency PRIVATE stuttometer_core)
 add_test(NAME test_report_serialization_consistency COMMAND test_report_serialization_consistency)
 set_tests_properties(test_report_serialization_consistency PROPERTIES TIMEOUT 30)
+
+add_executable(test_card_renderer
+  tests/test_card_renderer.cpp
+  src/gui/card_renderer.cpp
+)
+target_include_directories(test_card_renderer
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
+)
+target_link_libraries(test_card_renderer
+  PRIVATE
+    stuttometer_core
+    gdiplus
+    ole32
+    gdi32
+    user32
+)
+add_test(NAME test_card_renderer COMMAND test_card_renderer)
+set_tests_properties(test_card_renderer PROPERTIES TIMEOUT 30)
+
 
 
 

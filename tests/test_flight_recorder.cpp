@@ -443,6 +443,96 @@ static void test_flight_recorder_reverse_snapshot_bounds() {
     std::cout << "  -> FlightRecorder reverse snapshot bounds, chronological sort & underflow safety PASSED.\n";
 }
 
+static void test_flight_recorder_capacity_extremes() {
+    std::cout << "[TEST] Validating FlightRecorder Capacity Extremes (64 slots & 1,048,576 slots)...\n";
+
+    // 1. Small capacity: 64 slots
+    {
+        stuttometer::FlightRecorder fr_small(64);
+        STUTTO_ASSERT(fr_small.capacity() == 64);
+
+        // Fill exactly to capacity
+        for (uint64_t i = 0; i < 64; ++i) {
+            stuttometer::EtwEventRecord rec{};
+            rec.qpc_timestamp = 1000 + (i * 10);
+            rec.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+            rec.pid = 1234;
+            rec.tid = static_cast<uint32_t>(i);
+            fr_small.push(rec);
+        }
+
+        uint64_t drops = 0;
+        auto snap = fr_small.snapshot(1000, 2000, &drops);
+        STUTTO_ASSERT(drops == 0);
+        STUTTO_ASSERT(snap.size() == 64);
+
+        // Exact wrap boundary: push 1 more event (head = 65, seq = 64)
+        // start_seq becomes 65 - 64 = 1.
+        // The slot for seq 0 (ts 1000) was overwritten by seq 64 (ts 1640).
+        stuttometer::EtwEventRecord rec64{};
+        rec64.qpc_timestamp = 1000 + (64 * 10); // 1640
+        rec64.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+        rec64.pid = 1234;
+        rec64.tid = 64;
+        fr_small.push(rec64);
+
+        // Snapshot covering [1010, 2000] - all 64 active tickets are within window
+        drops = 0;
+        auto snap2 = fr_small.snapshot(1010, 2000, &drops);
+        STUTTO_ASSERT(drops == 0);
+        STUTTO_ASSERT(snap2.size() == 64);
+        STUTTO_ASSERT(snap2.front().qpc_timestamp == 1010);
+        STUTTO_ASSERT(snap2.back().qpc_timestamp == 1640);
+
+        // Multiple complete wraps: push 63 more to complete 2 full laps (head = 128)
+        for (uint64_t i = 65; i < 128; ++i) {
+            stuttometer::EtwEventRecord r{};
+            r.qpc_timestamp = 1000 + (i * 10);
+            r.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+            r.pid = 1234;
+            r.tid = static_cast<uint32_t>(i);
+            fr_small.push(r);
+        }
+        STUTTO_ASSERT(fr_small.current_head() == 128);
+
+        drops = 0;
+        auto snap3 = fr_small.snapshot(1000 + (64 * 10), 3000, &drops);
+        STUTTO_ASSERT(drops == 0);
+        STUTTO_ASSERT(snap3.size() == 64);
+        STUTTO_ASSERT(snap3.front().qpc_timestamp == 1000 + (64 * 10));
+        STUTTO_ASSERT(snap3.back().qpc_timestamp == 1000 + (127 * 10));
+    }
+
+    // 2. Large capacity: 1,048,576 slots (maximum supported capacity)
+    {
+        stuttometer::FlightRecorder fr_large(1048576);
+        STUTTO_ASSERT(fr_large.capacity() == 1048576);
+
+        constexpr size_t TEST_EVENTS = 10000;
+        for (size_t i = 0; i < TEST_EVENTS; ++i) {
+            stuttometer::EtwEventRecord rec{};
+            rec.qpc_timestamp = 5000000 + (i * 100);
+            rec.category = static_cast<uint16_t>(stuttometer::EventCategory::CSWITCH);
+            rec.pid = 5000;
+            rec.tid = static_cast<uint32_t>(i);
+            fr_large.push(rec);
+        }
+
+        uint64_t drops = 0;
+        auto snap = fr_large.snapshot(5000000, 5000000 + (TEST_EVENTS * 100), &drops);
+        STUTTO_ASSERT(drops == 0);
+        STUTTO_ASSERT(snap.size() == TEST_EVENTS);
+        for (size_t i = 0; i < snap.size(); ++i) {
+            STUTTO_ASSERT(snap[i].qpc_timestamp == 5000000 + (i * 100));
+            if (i > 0) {
+                STUTTO_ASSERT(snap[i - 1].qpc_timestamp <= snap[i].qpc_timestamp);
+            }
+        }
+    }
+
+    std::cout << "  -> FlightRecorder capacity extremes (64 and 1048576 slots) PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Flight Recorder & Concurrency Tests ===\n";
     try {
@@ -455,6 +545,7 @@ int main() {
         test_trigger_engine_watchdog_zero_post_window();
         test_flight_recorder_wraparound();
         test_flight_recorder_reverse_snapshot_bounds();
+        test_flight_recorder_capacity_extremes();
         test_multithreaded_flight_recorder();
         test_driver_symbol_resolver_thread_safety();
         std::cout << ">>> All Flight Recorder tests PASSED! <<<\n\n";

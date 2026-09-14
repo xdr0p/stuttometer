@@ -120,8 +120,12 @@ std::vector<EtwEventRecord> FlightRecorder::snapshot(
             continue; // In-flight write; skip without artificially inflating drop statistics
         }
 
-        // If overwritten by a newer generation sequence
+        // If overwritten or not yet published
         if (seq1 != (seq * 2 + 2)) {
+            if (current_head <= (seq + capacity_)) {
+                // Ring has not wrapped past ticket seq; write is in-flight by a concurrent producer
+                continue;
+            }
             ++local_dropped;
             continue;
         }

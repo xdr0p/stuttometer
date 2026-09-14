@@ -5,7 +5,13 @@
 namespace stuttometer::csv {
 
 void export_to_stream(const DiagnosticReport& report, std::ostream& out) {
-    out << "frame_index,relative_index,qpc_timestamp,duration_ms,offset_from_trigger_ms,is_trigger_frame,is_pacing_stall\r\n";
+    out << escape_csv_field("frame_index") << ','
+        << escape_csv_field("relative_index") << ','
+        << escape_csv_field("qpc_timestamp") << ','
+        << escape_csv_field("duration_ms") << ','
+        << escape_csv_field("offset_from_trigger_ms") << ','
+        << escape_csv_field("is_trigger_frame") << ','
+        << escape_csv_field("is_pacing_stall") << "\r\n";
     for (const auto& pt : report.frame_timeline) {
         out << pt.frame_index << ','
             << pt.relative_index << ','

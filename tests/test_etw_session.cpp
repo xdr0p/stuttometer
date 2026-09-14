@@ -742,6 +742,25 @@ static void test_etw_session_ndjson_streaming() {
 
     EtwSessionManager::on_event_record(&ev_dxgi_stop);
 
+    // 4. Disk Init event (opcode 12 = KERNEL_OPCODE_DISK_READ_INIT) with raw KVA IRP pointer
+    constexpr uint8_t KERNEL_OPCODE_DISK_READ_INIT = 12;
+    EVENT_RECORD ev_disk_init{};
+    ev_disk_init.UserContext = &mgr;
+    ev_disk_init.EventHeader.ProviderId = DISK_IO_GUID;
+    ev_disk_init.EventHeader.EventDescriptor.Opcode = KERNEL_OPCODE_DISK_READ_INIT;
+    ev_disk_init.EventHeader.ProcessId = 1234;
+    ev_disk_init.EventHeader.ThreadId = 5678;
+    ev_disk_init.BufferContext.ProcessorNumber = 2;
+    ev_disk_init.EventHeader.TimeStamp.QuadPart = ev_dxgi_stop.EventHeader.TimeStamp.QuadPart + 1000;
+    struct DiskInitData {
+        uint64_t irp{0xFFFFFA8012345678ULL};
+        uint32_t issuing_tid{5678};
+    } disk_init_payload;
+    ev_disk_init.UserData = &disk_init_payload;
+    ev_disk_init.UserDataLength = sizeof(disk_init_payload);
+
+    EtwSessionManager::on_event_record(&ev_disk_init);
+
     // Stop and flush writer
     writer->stop();
     mgr.set_running_for_test(false);
@@ -759,8 +778,7 @@ static void test_etw_session_ndjson_streaming() {
             lines.push_back(line);
         }
     }
-
-    STUTTO_ASSERT(lines.size() == 3);
+    STUTTO_ASSERT(lines.size() == 4);
 
     // Check Audio Glitch line
     STUTTO_ASSERT(lines[0].find("\"v\":1") != std::string::npos);
@@ -781,8 +799,217 @@ static void test_etw_session_ndjson_streaming() {
     STUTTO_ASSERT(lines[2].find("\"dur_us\":16600") != std::string::npos); // Duration accurately populated!
     STUTTO_ASSERT(lines[2].find("\"aux\":" + std::to_string(swapchain)) != std::string::npos);
 
+    // Check Disk Init line: aux must be 0 (KVA address protection, raw IRP stripped)
+    STUTTO_ASSERT(lines[3].find("\"cat\":\"DISK\"") != std::string::npos);
+    STUTTO_ASSERT(lines[3].find("\"aux\":0") != std::string::npos);
+    STUTTO_ASSERT(lines[3].find("18446741874987620472") == std::string::npos);
+
     std::filesystem::remove_all(test_dir, ec);
     std::cout << "  -> EtwSessionManager NDJSON streaming assertions PASSED.\n";
+}
+
+static void test_dwm_glitch_deduplication_flag_verification() {
+    std::cout << "[TEST] Validating DWM Glitch Deduplication Flag & Duration Parsing...\n";
+
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    trig_cfg.target_pid = 1234;
+    const uint64_t qpc_freq = 10000000ULL;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+
+    EtwSessionConfig sess_cfg;
+    EtwSessionManager mgr(recorder, engine, sess_cfg);
+    mgr.set_running_for_test(true);
+
+    struct DwmGlitchPayload {
+        uint32_t glitch_type{1};
+        uint32_t missed_vblanks{2};
+    } dwm_payload;
+
+    const uint64_t ts1 = 10000000ULL;
+    const uint64_t ts2 = ts1 + ms_to_qpc_delta(10.0, qpc_freq); // 10ms later (< 50ms dedup window)
+
+    // First DWM Glitch
+    EVENT_RECORD ev1{};
+    ev1.UserContext = &mgr;
+    ev1.EventHeader.ProviderId = DWM_CORE_PROVIDER_GUID;
+    ev1.EventHeader.EventDescriptor.Task = 132;
+    ev1.EventHeader.ProcessId = 1234;
+    ev1.EventHeader.ThreadId = 5678;
+    ev1.BufferContext.ProcessorNumber = 1;
+    ev1.EventHeader.TimeStamp.QuadPart = ts1;
+    ev1.UserData = &dwm_payload;
+    ev1.UserDataLength = sizeof(dwm_payload);
+
+    EtwSessionManager::on_event_record(&ev1);
+
+    // Second DWM Glitch (10ms later)
+    EVENT_RECORD ev2{};
+    ev2.UserContext = &mgr;
+    ev2.EventHeader.ProviderId = DWM_CORE_PROVIDER_GUID;
+    ev2.EventHeader.EventDescriptor.Task = 132;
+    ev2.EventHeader.ProcessId = 1234;
+    ev2.EventHeader.ThreadId = 5678;
+    ev2.BufferContext.ProcessorNumber = 1;
+    ev2.EventHeader.TimeStamp.QuadPart = ts2;
+    ev2.UserData = &dwm_payload;
+    ev2.UserDataLength = sizeof(dwm_payload);
+
+    EtwSessionManager::on_event_record(&ev2);
+
+    mgr.set_running_for_test(false);
+
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(ts1 - 100, ts2 + 100, &drops);
+    STUTTO_ASSERT(snap.size() == 2);
+
+    const auto& rec1 = snap[0];
+    const auto& rec2 = snap[1];
+
+    STUTTO_ASSERT(rec1.category == static_cast<uint16_t>(EventCategory::DWM_GLITCH));
+    STUTTO_ASSERT(rec2.category == static_cast<uint16_t>(EventCategory::DWM_GLITCH));
+
+    // First event must NOT have DWM_GLITCH_DEDUPLICATED
+    STUTTO_ASSERT((rec1.flags & EventFlags::DWM_GLITCH_DEDUPLICATED) == 0);
+
+    // Second event MUST have DWM_GLITCH_DEDUPLICATED
+    STUTTO_ASSERT((rec2.flags & EventFlags::DWM_GLITCH_DEDUPLICATED) != 0);
+
+    // Both must have valid parsed durations and aux data
+    STUTTO_ASSERT(rec1.duration_us > 0);
+    STUTTO_ASSERT(rec2.duration_us > 0);
+    STUTTO_ASSERT(rec1.duration_us == rec2.duration_us);
+    STUTTO_ASSERT(rec1.auxiliary_data == 1);
+    STUTTO_ASSERT(rec2.auxiliary_data == 1);
+
+    std::cout << "  -> DWM glitch deduplication flag & duration verification PASSED.\n";
+}
+
+static void test_clock_resync_seqlock_concurrency() {
+    std::cout << "[TEST] Running Clock Resync Seqlock multi-threaded reader/writer stress test...\n";
+
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    const uint64_t qpc_freq = 10000000ULL;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    EtwSessionConfig sess_cfg;
+    EtwSessionManager mgr(recorder, engine, sess_cfg);
+
+    constexpr int NUM_READERS = 4;
+    constexpr int WRITES = 50000;
+    std::atomic<bool> start_flag{false};
+    std::atomic<bool> stop_flag{false};
+    std::atomic<int> readers_ready{0};
+    std::atomic<uint64_t> total_reads{0};
+    std::atomic<uint64_t> torn_reads{0};
+
+    // Readers
+    std::vector<std::thread> readers;
+    for (int r = 0; r < NUM_READERS; ++r) {
+        readers.emplace_back([&]() {
+            readers_ready.fetch_add(1, std::memory_order_release);
+            while (!start_flag.load(std::memory_order_acquire)) {
+                cpu_pause();
+            }
+            while (!stop_flag.load(std::memory_order_relaxed)) {
+                uint64_t utc = 0, qpc = 0;
+                mgr.read_sync_time(utc, qpc);
+                if (utc > 0) {
+                    // Writer enforces invariant: qpc == utc * 2 + 1
+                    if (qpc != (utc * 2 + 1)) {
+                        torn_reads.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                total_reads.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    // Wait for all readers to spawn and be ready
+    while (readers_ready.load(std::memory_order_acquire) < NUM_READERS) {
+        std::this_thread::yield();
+    }
+    start_flag.store(true, std::memory_order_release);
+
+    // Writer
+    for (uint64_t i = 1; i <= WRITES; ++i) {
+        mgr.update_sync_time_for_test(i, i * 2 + 1);
+        if (i % 200 == 0) {
+            std::this_thread::yield();
+        }
+    }
+
+    // Ensure readers executed plenty of reads
+    while (total_reads.load(std::memory_order_relaxed) < 50000) {
+        std::this_thread::yield();
+    }
+
+    stop_flag.store(true, std::memory_order_release);
+    for (auto& r : readers) {
+        r.join();
+    }
+
+    STUTTO_ASSERT(torn_reads.load() == 0);
+    STUTTO_ASSERT(total_reads.load() >= 50000);
+
+    std::cout << "  -> Completed " << total_reads.load() << " reads across " 
+              << NUM_READERS << " threads with 0 torn reads. PASSED.\n";
+}
+
+static void test_synthetic_ordered_drain_invariant() {
+    std::cout << "[TEST] Validating Synthetic Ordered Drain Invariant...\n";
+
+    FlightRecorder recorder(2048);
+    TriggerConfig trig_cfg;
+    trig_cfg.target_pid = 1234;
+    const uint64_t qpc_freq = 10000000ULL;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    EtwSessionConfig sess_cfg;
+    EtwSessionManager mgr(recorder, engine, sess_cfg);
+    mgr.set_running_for_test(true);
+
+    constexpr size_t EVENT_COUNT = 500;
+    const uint64_t base_ts = 1000000ULL;
+
+    struct AudioPayload {
+        uint32_t glitch_count{1};
+        int32_t error_code{0};
+    } audio_data;
+
+    for (size_t i = 0; i < EVENT_COUNT; ++i) {
+        EVENT_RECORD ev{};
+        ev.UserContext = &mgr;
+        ev.EventHeader.ProviderId = AUDIO_PROVIDER_GUID;
+        ev.EventHeader.EventDescriptor.Id = 11;
+        ev.EventHeader.ProcessId = 1234;
+        ev.EventHeader.ThreadId = 5678;
+        ev.BufferContext.ProcessorNumber = 0;
+        ev.EventHeader.TimeStamp.QuadPart = base_ts + (i * 1000);
+        ev.UserData = &audio_data;
+        ev.UserDataLength = sizeof(audio_data);
+
+        EtwSessionManager::on_event_record(&ev);
+
+        // Invariant: after on_event_record returns, last_processed_qpc() >= ev.TimeStamp
+        const uint64_t drained_qpc = mgr.last_processed_qpc();
+        STUTTO_ASSERT(drained_qpc >= static_cast<uint64_t>(ev.EventHeader.TimeStamp.QuadPart));
+    }
+
+    // Now drain and snapshot: all EVENT_COUNT events must be present in snapshot
+    const uint64_t final_drained_qpc = mgr.last_processed_qpc();
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(base_ts, final_drained_qpc, &drops);
+
+    STUTTO_ASSERT(drops == 0);
+    STUTTO_ASSERT(snap.size() == EVENT_COUNT);
+
+    // Verify ordering and timestamps
+    for (size_t i = 0; i < snap.size(); ++i) {
+        STUTTO_ASSERT(snap[i].qpc_timestamp == base_ts + (i * 1000));
+    }
+
+    mgr.set_running_for_test(false);
+    std::cout << "  -> Strictly ordered drain invariant with " << EVENT_COUNT << " events PASSED (zero tail loss).\n";
 }
 
 int main() {
@@ -808,6 +1035,9 @@ int main() {
         test_provider_permutation_config();
         test_environment_self_check_in_memory();
         test_etw_session_ndjson_streaming();
+        test_dwm_glitch_deduplication_flag_verification();
+        test_clock_resync_seqlock_concurrency();
+        test_synthetic_ordered_drain_invariant();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

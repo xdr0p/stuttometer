@@ -218,10 +218,10 @@ void GuiController::session_worker_loop(GuiConfig config) {
         etw_config.enable_d3d12 = (config.provider_tier != "minimal");
         etw_config.enable_kernel_memory = (config.provider_tier != "minimal");
 
-        uint32_t slots = (config.buffer_slots >= 65536) ? std::min(config.buffer_slots, 1048576U) : 262144;
-        if ((etw_config.enable_dxgkrnl || etw_config.enable_dwm_core) && slots < 262144U) {
-            std::cout << "[STUTTOMETER] Notice: Buffer capacity increased to 262,144 slots for DxgKrnl/DWM high-frequency frame events.\n";
-            slots = 262144U;
+        const uint32_t requested_slots = (config.buffer_slots >= 65536) ? std::min(config.buffer_slots, 1048576U) : 262144;
+        const uint32_t slots = compute_recommended_buffer_slots(etw_config, requested_slots);
+        if (slots > requested_slots) {
+            std::cout << "[STUTTOMETER] Notice: Buffer capacity increased to 262,144 slots for active providers.\n";
         }
         FlightRecorder flight_recorder(slots);
 
@@ -418,6 +418,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
                 while (session_mgr->last_processed_qpc() < to_qpc && std::chrono::steady_clock::now() < deadline) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
                 uint64_t drops = 0;
                 auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);

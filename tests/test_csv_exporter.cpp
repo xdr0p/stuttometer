@@ -138,11 +138,73 @@ static void test_directory_rotation() {
     std::cout << "  -> Directory rotation retention cap PASSED.\n";
 }
 
+static void test_csv_field_escaping() {
+    std::cout << "[TEST] Validating RFC 4180 CSV Field Escaping & Baseline Byte-Identity...\n";
+
+    using stuttometer::csv::escape_csv_field;
+
+    // 1. Standard fields without special characters returned unquoted and unchanged
+    STUTTO_ASSERT(escape_csv_field("frame_index") == "frame_index");
+    STUTTO_ASSERT(escape_csv_field("12345") == "12345");
+    STUTTO_ASSERT(escape_csv_field("") == "");
+    STUTTO_ASSERT(escape_csv_field("hello_world_test") == "hello_world_test");
+
+    // 2. Commas require quoting
+    STUTTO_ASSERT(escape_csv_field("hello,world") == "\"hello,world\"");
+
+    // 3. Quotes require wrapping and doubling
+    STUTTO_ASSERT(escape_csv_field("quote \"test\" here") == "\"quote \"\"test\"\" here\"");
+
+    // 4. Newlines and carriage returns require quoting
+    STUTTO_ASSERT(escape_csv_field("line1\r\nline2") == "\"line1\r\nline2\"");
+    STUTTO_ASSERT(escape_csv_field("line1\nline2") == "\"line1\nline2\"");
+
+    // 5. Complex combination of quote, comma, and newline
+    STUTTO_ASSERT(escape_csv_field("a,\"b\"\r\nc") == "\"a,\"\"b\"\"\r\nc\"");
+
+    // 6. Verify export_to_stream output is 100% byte-identical to baseline format
+    stuttometer::DiagnosticReport report;
+    stuttometer::FrameTimelinePoint p1;
+    p1.frame_index = 0;
+    p1.relative_index = -1;
+    p1.qpc_timestamp = 1000000;
+    p1.duration_ms = 16.6667;
+    p1.offset_from_trigger_ms = -16.6667;
+    p1.is_trigger_frame = false;
+    p1.is_pacing_stall = false;
+
+    stuttometer::FrameTimelinePoint p2;
+    p2.frame_index = 1;
+    p2.relative_index = 0;
+    p2.qpc_timestamp = 1100000;
+    p2.duration_ms = 45.1234;
+    p2.offset_from_trigger_ms = 0.0;
+    p2.is_trigger_frame = true;
+    p2.is_pacing_stall = true;
+
+    report.frame_timeline.push_back(p1);
+    report.frame_timeline.push_back(p2);
+
+    std::ostringstream ss;
+    stuttometer::csv::export_to_stream(report, ss);
+    const std::string csv_out = ss.str();
+
+    const std::string baseline = 
+        "frame_index,relative_index,qpc_timestamp,duration_ms,offset_from_trigger_ms,is_trigger_frame,is_pacing_stall\r\n"
+        "0,-1,1000000,16.6667,-16.6667,false,false\r\n"
+        "1,0,1100000,45.1234,0.0000,true,true\r\n";
+
+    STUTTO_ASSERT(csv_out == baseline);
+
+    std::cout << "  -> RFC 4180 CSV escaping and baseline byte-identity PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer CSV Exporter Unit Tests ===\n";
     try {
         test_csv_export_and_crlf();
         test_directory_rotation();
+        test_csv_field_escaping();
         std::cout << ">>> All CSV Exporter tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

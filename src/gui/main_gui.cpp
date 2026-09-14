@@ -1,4 +1,6 @@
 #include "gui_controller.hpp"
+#include "card_renderer.hpp"
+#include "osd_toast.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -108,9 +110,10 @@ constexpr int IDC_BTN_CLEAR          = 1004;
 constexpr int IDC_BTN_EXPORT_JSON    = 1006;
 constexpr int IDC_BTN_COPY_JSON      = 1007;
 constexpr int IDC_COMBO_PROCESS      = 1008;
-constexpr int IDC_BTN_REFRESH        = 1009;
 constexpr int IDC_LIST_STUTTERS      = 1014;
 constexpr int IDC_EDIT_INSPECTOR     = 1015;
+constexpr int IDC_BTN_COPY_CARD      = 1016;
+constexpr int IDC_BTN_EXPORT_CARD    = 1017;
 
 // Settings Dialog Control IDs
 constexpr int IDC_SET_HOTKEY_EDIT    = 2001;
@@ -144,6 +147,9 @@ constexpr int IDC_SET_EDIT_AUTO_SAVE       = 2028;
 constexpr int IDC_SET_BTN_BROWSE_AUTO_SAVE = 2029;
 constexpr int IDC_SET_EDIT_D3D12_PSO       = 2030;
 constexpr int IDC_SET_EDIT_VRAM_DEMOTED    = 2031;
+constexpr int IDC_SET_CHK_OSD              = 2032;
+constexpr int IDC_SET_COMBO_OSD_POS        = 2033;
+constexpr int IDC_SET_EDIT_OSD_DUR         = 2034;
 
 // Global Hotkeys
 constexpr int ID_HOTKEY_TOGGLE_CAPTURE = 9001;
@@ -416,9 +422,13 @@ static HWND g_h_btn_settings = nullptr;
 static HWND g_h_btn_clear = nullptr;
 static HWND g_h_btn_export = nullptr;
 static HWND g_h_btn_copy = nullptr;
+static HWND g_h_btn_export_card = nullptr;
+static HWND g_h_btn_copy_card = nullptr;
 static HWND g_h_list_stutters = nullptr;
 static HWND g_h_edit_inspector = nullptr;
 static HWND g_h_list_header = nullptr;
+
+static OsdToast g_osd_toast;
 
 // Centralized Settings & Preferences State (Single Source of Truth)
 static GuiConfig g_settings_config;
@@ -643,6 +653,20 @@ static void load_user_settings() {
         if (j.contains("auto_save_dir") && j["auto_save_dir"].is_string()) {
             g_settings_config.output_dir = utf8_to_wstring(j["auto_save_dir"].get<std::string>());
         }
+        if (j.contains("enable_osd") && j["enable_osd"].is_boolean()) {
+            g_settings_config.enable_osd = j["enable_osd"].get<bool>();
+        }
+        if (j.contains("osd_duration_ms") && j["osd_duration_ms"].is_number_unsigned()) {
+            uint32_t v = j["osd_duration_ms"].get<uint32_t>();
+            if (v >= 500 && v <= 30000) g_settings_config.osd_duration_ms = v;
+        }
+        if (j.contains("osd_position") && j["osd_position"].is_string()) {
+            std::string pos = j["osd_position"].get<std::string>();
+            if (pos == "bottom_right") g_settings_config.osd_position = OsdPosition::BOTTOM_RIGHT;
+            else if (pos == "top_left") g_settings_config.osd_position = OsdPosition::TOP_LEFT;
+            else if (pos == "bottom_left") g_settings_config.osd_position = OsdPosition::BOTTOM_LEFT;
+            else g_settings_config.osd_position = OsdPosition::TOP_RIGHT;
+        }
         if (j.contains("last_target_process") && j["last_target_process"].is_string()) {
             g_settings_last_target_process = j["last_target_process"].get<std::string>();
         }
@@ -664,6 +688,17 @@ static void save_user_settings() {
         j["provider_tier"] = g_settings_config.provider_tier;
         j["enable_audio_glitch"] = g_settings_config.enable_audio;
         j["enable_pii_redaction"] = g_settings_config.redact;
+        j["enable_osd"] = g_settings_config.enable_osd;
+        j["osd_duration_ms"] = g_settings_config.osd_duration_ms;
+        std::string pos_str = "top_right";
+        switch (g_settings_config.osd_position) {
+            case OsdPosition::BOTTOM_RIGHT: pos_str = "bottom_right"; break;
+            case OsdPosition::TOP_LEFT: pos_str = "top_left"; break;
+            case OsdPosition::BOTTOM_LEFT: pos_str = "bottom_left"; break;
+            case OsdPosition::TOP_RIGHT:
+            default: pos_str = "top_right"; break;
+        }
+        j["osd_position"] = pos_str;
         j["window_pre_ms"] = g_settings_config.window_pre_ms;
         j["window_post_ms"] = g_settings_config.window_post_ms;
         j["cooldown_ms"] = g_settings_config.cooldown_ms;
@@ -722,6 +757,9 @@ struct SettingsDialogState {
     HWND h_chk_auto_save{nullptr};
     HWND h_edit_auto_save{nullptr};
     HWND h_btn_browse_auto_save{nullptr};
+    HWND h_chk_osd{nullptr};
+    HWND h_combo_osd_pos{nullptr};
+    HWND h_edit_osd_dur{nullptr};
     HWND h_chk_advanced{nullptr};
     HWND h_combo_tier{nullptr};
     HWND h_edit_pre_win{nullptr};
@@ -752,6 +790,7 @@ struct SettingsDialogState {
     RECT rc_lbl_rd{};
     RECT rc_lbl_aud{};
     RECT rc_lbl_auto_save{};
+    RECT rc_lbl_osd{};
     RECT rc_lbl_adv{};
     RECT rc_lbl_judder{};
 };
@@ -996,34 +1035,44 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     SendMessageW(state->h_edit_auto_save, EM_SETRECTNP, 0, (LPARAM)&rc_as);
     MoveWindow(state->h_btn_browse_auto_save, c1_x + scale_dpi(14) + edit_as_w + scale_dpi(8), r5_y, browse_w, scale_dpi(24), TRUE);
 
+    int r6_osd_y = c1_y + scale_dpi(170);
+    MoveWindow(state->h_chk_osd, c1_x + scale_dpi(14), r6_osd_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_osd = { c1_x + scale_dpi(38), r6_osd_y, c1_x + c1_w - scale_dpi(8), r6_osd_y + scale_dpi(24) };
+
+    int r7_osd_y = c1_y + scale_dpi(198);
+    MoveWindow(state->h_combo_osd_pos, c1_x + scale_dpi(72), r7_osd_y + scale_dpi(1), scale_dpi(115), scale_dpi(150), TRUE);
+    MoveWindow(state->h_edit_osd_dur, c1_x + scale_dpi(252), r7_osd_y + scale_dpi(1), scale_dpi(45), scale_dpi(24), TRUE);
+    RECT rc_osd_dur = { scale_dpi(2), scale_dpi(3), scale_dpi(45) - scale_dpi(2), scale_dpi(24) };
+    SendMessageW(state->h_edit_osd_dur, EM_SETRECTNP, 0, (LPARAM)&rc_osd_dur);
+
     // ==========================================
     // LEFT COLUMN: Card 2 (Frame Pacing & Dynamic Triggers)
     // ==========================================
     const int c2_x = c_left_x;
-    const int c2_y = scale_dpi(202);
+    const int c2_y = scale_dpi(246);
     const int c2_w = col_w;
 
-    int r6_y = c2_y + scale_dpi(32);
-    MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(110), r6_y + scale_dpi(2), c2_w - scale_dpi(124), scale_dpi(150), TRUE);
+    int p6_y = c2_y + scale_dpi(32);
+    MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(110), p6_y + scale_dpi(2), c2_w - scale_dpi(124), scale_dpi(150), TRUE);
 
-    int r7_y = c2_y + scale_dpi(68);
-    MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(150), r7_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
+    int p7_y = c2_y + scale_dpi(68);
+    MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(150), p7_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
     RECT rc_fps = { scale_dpi(2), scale_dpi(3), scale_dpi(55) - scale_dpi(2), scale_dpi(24) };
     SendMessageW(state->h_edit_target_fps, EM_SETRECTNP, 0, (LPARAM)&rc_fps);
 
-    int r8_y = c2_y + scale_dpi(102);
-    MoveWindow(state->h_edit_spike_mult, c2_x + scale_dpi(150), r8_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
+    int p8_y = c2_y + scale_dpi(102);
+    MoveWindow(state->h_edit_spike_mult, c2_x + scale_dpi(150), p8_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
     RECT rc_sm = { scale_dpi(2), scale_dpi(3), scale_dpi(55) - scale_dpi(2), scale_dpi(24) };
     SendMessageW(state->h_edit_spike_mult, EM_SETRECTNP, 0, (LPARAM)&rc_sm);
 
-    int r9_y = c2_y + scale_dpi(136);
-    MoveWindow(state->h_edit_min_delta, c2_x + scale_dpi(150), r9_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
+    int p9_y = c2_y + scale_dpi(136);
+    MoveWindow(state->h_edit_min_delta, c2_x + scale_dpi(150), p9_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
     RECT rc_md = { scale_dpi(2), scale_dpi(3), scale_dpi(55) - scale_dpi(2), scale_dpi(24) };
     SendMessageW(state->h_edit_min_delta, EM_SETRECTNP, 0, (LPARAM)&rc_md);
 
-    int r10_y = c2_y + scale_dpi(170);
-    MoveWindow(state->h_chk_judder, c2_x + scale_dpi(14), r10_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_judder = { c2_x + scale_dpi(38), r10_y, c2_x + c2_w - scale_dpi(8), r10_y + scale_dpi(26) };
+    int p10_y = c2_y + scale_dpi(170);
+    MoveWindow(state->h_chk_judder, c2_x + scale_dpi(14), p10_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_judder = { c2_x + scale_dpi(38), p10_y, c2_x + c2_w - scale_dpi(8), p10_y + scale_dpi(26) };
 
     // ==========================================
     // RIGHT COLUMN: Card 3 (Advanced Engine Tuning)
@@ -1059,7 +1108,7 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     // RIGHT COLUMN: Card 4 (Correlation Anomaly Thresholds)
     // ==========================================
     const int c4_x = c_right_x;
-    const int c4_y = scale_dpi(202);
+    const int c4_y = scale_dpi(246);
 
     int t1_y = c4_y + scale_dpi(30);
     MoveWindow(state->h_edit_dpc, c4_x + scale_dpi(160), t1_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
@@ -1114,7 +1163,7 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     // ==========================================
     // FOOTER BUTTONS
     // ==========================================
-    const int f_y = scale_dpi(620);
+    const int f_y = scale_dpi(660);
     const int f_h = scale_dpi(32);
     MoveWindow(state->h_btn_reset, margin, f_y, scale_dpi(130), f_h, TRUE);
 
@@ -1186,6 +1235,31 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SetPropW(state->h_btn_browse_auto_save, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::QuickAction));
             SetWindowSubclass(state->h_btn_browse_auto_save, DarkButtonSubclassProc, IDC_SET_BTN_BROWSE_AUTO_SAVE, 0);
 
+            wchar_t num_buf[64]{};
+
+            state->h_chk_osd = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_OSD, NULL, NULL);
+            SendMessageW(state->h_chk_osd, BM_SETCHECK, g_settings_config.enable_osd ? BST_CHECKED : BST_UNCHECKED, 0);
+            apply_control_dark_theme(state->h_chk_osd);
+
+            state->h_combo_osd_pos = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_OSD_POS, NULL, NULL);
+            SendMessageW(state->h_combo_osd_pos, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
+            SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
+            SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
+            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Top-Right");
+            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Bottom-Right");
+            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Top-Left");
+            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Bottom-Left");
+            int osd_pos_idx = static_cast<int>(g_settings_config.osd_position);
+            if (osd_pos_idx < 0 || osd_pos_idx > 3) osd_pos_idx = 0;
+            SendMessageW(state->h_combo_osd_pos, CB_SETCURSEL, osd_pos_idx, 0);
+            apply_control_dark_theme(state->h_combo_osd_pos);
+            SetWindowSubclass(state->h_combo_osd_pos, DarkComboSubclassProc, IDC_SET_COMBO_OSD_POS, 0);
+
+            swprintf_s(num_buf, L"%u", g_settings_config.osd_duration_ms);
+            state->h_edit_osd_dur = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_OSD_DUR, NULL, NULL);
+            SendMessageW(state->h_edit_osd_dur, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+            apply_control_dark_theme(state->h_edit_osd_dur);
+
             // Advanced Settings Safeguard Checkbox
             state->h_chk_advanced = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_ADVANCED, NULL, NULL);
             SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_UNCHECKED, 0);
@@ -1203,8 +1277,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SendMessageW(state->h_combo_tier, CB_SETCURSEL, tier_sel, 0);
             apply_control_dark_theme(state->h_combo_tier);
             SetWindowSubclass(state->h_combo_tier, DarkComboSubclassProc, IDC_SET_COMBO_TIER, 0);
-
-            wchar_t num_buf[64]{};
 
             swprintf_s(num_buf, L"%.1f", g_settings_config.window_pre_ms);
             state->h_edit_pre_win = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_PRE_WIN, NULL, NULL);
@@ -1377,6 +1449,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 } else if (PtInRect(&state->rc_lbl_auto_save, pt)) {
                     BOOL cur = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     SendMessageW(state->h_chk_auto_save, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
+                } else if (PtInRect(&state->rc_lbl_osd, pt)) {
+                    BOOL cur = (SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    SendMessageW(state->h_chk_osd, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
                 } else if (PtInRect(&state->rc_lbl_adv, pt)) {
                     BOOL cur = (SendMessageW(state->h_chk_advanced, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     SendMessageW(state->h_chk_advanced, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
@@ -1429,12 +1504,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             const int c1_x = c_left_x;
             const int c1_y = scale_dpi(14);
             const int c1_w = col_w;
-            const int c1_h = scale_dpi(176);
+            const int c1_h = scale_dpi(228);
             RoundRect(mem_dc, c1_x, c1_y, c1_x + c1_w, c1_y + c1_h, scale_dpi(10), scale_dpi(10));
 
             // Card 2: Frame Pacing & Dynamic Triggers (Left Bottom)
             const int c2_x = c_left_x;
-            const int c2_y = scale_dpi(202);
+            const int c2_y = scale_dpi(246);
             const int c2_w = col_w;
             const int c2_h = scale_dpi(400);
             RoundRect(mem_dc, c2_x, c2_y, c2_x + c2_w, c2_y + c2_h, scale_dpi(10), scale_dpi(10));
@@ -1443,12 +1518,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             const int c3_x = c_right_x;
             const int c3_y = scale_dpi(14);
             const int c3_w = col_w;
-            const int c3_h = scale_dpi(176);
+            const int c3_h = scale_dpi(228);
             RoundRect(mem_dc, c3_x, c3_y, c3_x + c3_w, c3_y + c3_h, scale_dpi(10), scale_dpi(10));
 
             // Card 4: Correlation Anomaly Thresholds (Right Bottom)
             const int c4_x = c_right_x;
-            const int c4_y = scale_dpi(202);
+            const int c4_y = scale_dpi(246);
             const int c4_w = col_w;
             const int c4_h = scale_dpi(400);
             RoundRect(mem_dc, c4_x, c4_y, c4_x + c4_w, c4_y + c4_h, scale_dpi(10), scale_dpi(10));
@@ -1481,6 +1556,19 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             DrawTextW(mem_dc, L"Redact PII (Sanitize paths & usernames in reports & exports)", -1, &state->rc_lbl_rd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             DrawTextW(mem_dc, L"Enable Audio Glitch Trigger (Microsoft-Windows-Audio ID 11)", -1, &state->rc_lbl_aud, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             DrawTextW(mem_dc, L"Auto-save JSON reports to folder:", -1, &state->rc_lbl_auto_save, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(mem_dc, L"Enable In-Game OSD Toast (WS_EX_LAYERED non-activating overlay)", -1, &state->rc_lbl_osd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            int r7_osd_y = c1_y + scale_dpi(198);
+            RECT rc_lbl_pos = { c1_x + scale_dpi(38), r7_osd_y, c1_x + scale_dpi(70), r7_osd_y + scale_dpi(24) };
+            DrawTextW(mem_dc, L"Pos:", -1, &rc_lbl_pos, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            RECT rc_lbl_dur = { c1_x + scale_dpi(194), r7_osd_y, c1_x + scale_dpi(248), r7_osd_y + scale_dpi(24) };
+            DrawTextW(mem_dc, L"Duration:", -1, &rc_lbl_dur, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            SelectObject(mem_dc, g_font_ui);
+            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+            RECT rc_lbl_dur_unit = { c1_x + scale_dpi(302), r7_osd_y, c1_x + c1_w - scale_dpi(8), r7_osd_y + scale_dpi(24) };
+            DrawTextW(mem_dc, L"ms (500-10000)", -1, &rc_lbl_dur_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             // Card 2 Labels (Frame Pacing & Dynamic Triggers)
             COLORREF adv_lbl_color = state->advanced_unlocked ? COLOR_TEXT_LABEL : COLOR_TEXT_MUTED;
@@ -1700,6 +1788,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             draw_edit_frame(state->h_hotkey_edit);
             draw_edit_frame(state->h_edit_auto_save);
+            draw_edit_frame(state->h_edit_osd_dur);
             draw_edit_frame(state->h_edit_pre_win);
             draw_edit_frame(state->h_edit_post_win);
             draw_edit_frame(state->h_edit_cooldown);
@@ -1824,6 +1913,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 SendMessageW(state->h_chk_audio, BM_SETCHECK, BST_CHECKED, 0);
                 SendMessageW(state->h_chk_auto_save, BM_SETCHECK, BST_UNCHECKED, 0);
                 SetWindowTextW(state->h_edit_auto_save, L"");
+                SendMessageW(state->h_chk_osd, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessageW(state->h_combo_osd_pos, CB_SETCURSEL, 0, 0);
+                SetWindowTextW(state->h_edit_osd_dur, L"3500");
                 SendMessageW(state->h_combo_tier, CB_SETCURSEL, 0, 0);
 
                 SetWindowTextW(state->h_edit_pre_win, L"250.0");
@@ -1869,6 +1961,11 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 g_sound_cues_enabled = (SendMessageW(state->h_chk_sound, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 g_settings_config.redact = (SendMessageW(state->h_chk_redact, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 g_settings_config.enable_audio = (SendMessageW(state->h_chk_audio, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                g_settings_config.enable_osd = (SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                int pos_sel = static_cast<int>(SendMessageW(state->h_combo_osd_pos, CB_GETCURSEL, 0, 0));
+                if (pos_sel >= 0 && pos_sel <= 3) {
+                    g_settings_config.osd_position = static_cast<OsdPosition>(pos_sel);
+                }
 
                 bool auto_save_checked = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 if (auto_save_checked) {
@@ -1894,6 +1991,10 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 else g_settings_config.provider_tier = "standard";
 
                 wchar_t buf[64]{};
+
+                GetWindowTextW(state->h_edit_osd_dur, buf, 64);
+                long v_dur = _wtol(buf);
+                g_settings_config.osd_duration_ms = static_cast<uint32_t>(std::clamp(v_dur, 500L, 10000L));
 
                 GetWindowTextW(state->h_edit_pre_win, buf, 64);
                 std::wstring w_pre(buf); std::replace(w_pre.begin(), w_pre.end(), L',', L'.');
@@ -2034,7 +2135,7 @@ static void ShowSettingsDialog(HWND hParent) {
     if (dpi == 0) dpi = 96;
 
     int dlg_w = MulDiv(880, dpi, 96);
-    int dlg_h = MulDiv(700, dpi, 96);
+    int dlg_h = MulDiv(740, dpi, 96);
 
     RECT rc_parent{};
     GetWindowRect(hParent, &rc_parent);
@@ -2256,6 +2357,8 @@ static void update_fonts_for_dpi(UINT dpi) {
     if (g_h_btn_clear) SendMessageW(g_h_btn_clear, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_export) SendMessageW(g_h_btn_export, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_copy) SendMessageW(g_h_btn_copy, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+    if (g_h_btn_export_card) SendMessageW(g_h_btn_export_card, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+    if (g_h_btn_copy_card) SendMessageW(g_h_btn_copy_card, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_list_stutters) SendMessageW(g_h_list_stutters, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
     if (g_h_edit_inspector) SendMessageW(g_h_edit_inspector, WM_SETFONT, (WPARAM)g_font_mono, TRUE);
 
@@ -2270,6 +2373,13 @@ static void update_fonts_for_dpi(UINT dpi) {
             if (state->h_chk_auto_save) SendMessageW(state->h_chk_auto_save, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             if (state->h_edit_auto_save) SendMessageW(state->h_edit_auto_save, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             if (state->h_btn_browse_auto_save) SendMessageW(state->h_btn_browse_auto_save, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+            if (state->h_chk_osd) SendMessageW(state->h_chk_osd, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
+            if (state->h_combo_osd_pos) {
+                SendMessageW(state->h_combo_osd_pos, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
+                SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
+                SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
+            }
+            if (state->h_edit_osd_dur) SendMessageW(state->h_edit_osd_dur, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             if (state->h_chk_advanced) SendMessageW(state->h_chk_advanced, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             if (state->h_combo_tier) {
                 SendMessageW(state->h_combo_tier, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
@@ -2652,7 +2762,8 @@ static void draw_custom_button(LPDRAWITEMSTRUCT pdis) {
 
     // Pre-fill bounding rectangle with parent container background to eliminate black corner edges
     HBRUSH bg_parent = g_theme.br_bg;
-    if (ctl_id == IDC_BTN_COPY_JSON || ctl_id == IDC_BTN_EXPORT_JSON) {
+    if (ctl_id == IDC_BTN_COPY_JSON || ctl_id == IDC_BTN_EXPORT_JSON ||
+        ctl_id == IDC_BTN_COPY_CARD || ctl_id == IDC_BTN_EXPORT_CARD) {
         bg_parent = g_theme.br_card;
     }
     FillRect(hdc, &rc, bg_parent);
@@ -2789,6 +2900,8 @@ static void update_inspector(int selected_index) {
         }
         EnableWindow(g_h_btn_export, FALSE);
         EnableWindow(g_h_btn_copy, FALSE);
+        EnableWindow(g_h_btn_export_card, FALSE);
+        EnableWindow(g_h_btn_copy_card, FALSE);
         return;
     }
 
@@ -2874,6 +2987,9 @@ static void update_inspector(int selected_index) {
     SetWindowTextW(g_h_edit_inspector, oss.str().c_str());
     EnableWindow(g_h_btn_export, TRUE);
     EnableWindow(g_h_btn_copy, TRUE);
+    bool can_card = CardRenderer::is_initialized();
+    EnableWindow(g_h_btn_export_card, can_card ? TRUE : FALSE);
+    EnableWindow(g_h_btn_copy_card, can_card ? TRUE : FALSE);
 }
 
 // Copy JSON string to clipboard
@@ -2938,6 +3054,51 @@ static void export_selected_report_json(HWND hwnd) {
             MessageBoxW(hwnd, L"Report exported successfully!", L"Export Complete", MB_OK | MB_ICONINFORMATION);
         } else {
             MessageBoxW(hwnd, L"Failed to save JSON report file.", L"Export Error", MB_OK | MB_ICONERROR);
+        }
+    }
+}
+
+// Copy Visual Stutter Card to clipboard
+static void copy_selected_report_card(HWND hwnd) {
+    if (g_selected_stutter_index < 0 || g_selected_stutter_index >= static_cast<int>(g_stutters.size())) {
+        return;
+    }
+
+    const auto& item = g_stutters[g_selected_stutter_index];
+    CardRenderOptions opts;
+    opts.dark_theme = true;
+
+    if (CardRenderer::copy_card_to_clipboard(hwnd, *item.report, opts)) {
+        MessageBoxW(hwnd, L"Visual Stutter Card copied to clipboard!\r\nYou can now paste directly into Discord, Slack, or image editors (Ctrl+V).", L"Card Copied", MB_OK | MB_ICONINFORMATION);
+    } else {
+        MessageBoxW(hwnd, L"Failed to copy Visual Stutter Card to clipboard.", L"Clipboard Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+// Export Visual Stutter Card to PNG file
+static void export_selected_report_card(HWND hwnd) {
+    if (g_selected_stutter_index < 0 || g_selected_stutter_index >= static_cast<int>(g_stutters.size())) {
+        return;
+    }
+
+    const auto& item = g_stutters[g_selected_stutter_index];
+    wchar_t filename_buf[MAX_PATH] = L"stutto_card.png";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"PNG Image (*.png)\0*.png\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = filename_buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"png";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (GetSaveFileNameW(&ofn)) {
+        CardRenderOptions opts;
+        opts.dark_theme = true;
+        if (CardRenderer::save_card_to_png(*item.report, std::filesystem::path(filename_buf), opts)) {
+            MessageBoxW(hwnd, L"Visual Stutter Card exported successfully!", L"Export Complete", MB_OK | MB_ICONINFORMATION);
+        } else {
+            MessageBoxW(hwnd, L"Failed to save Visual Stutter Card PNG file.", L"Export Error", MB_OK | MB_ICONERROR);
         }
     }
 }
@@ -3081,6 +3242,35 @@ static void handle_processes_updated(std::unique_ptr<ProcessList> procs) {
 
     if (*procs == g_cached_processes) {
         return; // List is identical, zero UI churn or listbox flicker
+    }
+
+    bool same_identities = (procs->size() == g_cached_processes.size());
+    if (same_identities) {
+        for (size_t i = 0; i < procs->size(); ++i) {
+            if ((*procs)[i].pid != g_cached_processes[i].pid || (*procs)[i].name != g_cached_processes[i].name) {
+                same_identities = false;
+                break;
+            }
+        }
+    }
+
+    if (same_identities) {
+        int cur_sel = static_cast<int>(SendMessageW(g_h_combo_process, CB_GETCURSEL, 0, 0));
+        for (size_t i = 0; i < procs->size(); ++i) {
+            const auto& p = (*procs)[i];
+            if (p.window_title != g_cached_processes[i].window_title) {
+                g_cached_processes[i].window_title = p.window_title;
+                std::wstring item_str = p.name + (p.window_title.empty() ? L"" : L" (" + p.window_title.substr(0, 24) + L")");
+                int item_idx = static_cast<int>(i + 1);
+                SendMessageW(g_h_combo_process, CB_DELETESTRING, item_idx, 0);
+                SendMessageW(g_h_combo_process, CB_INSERTSTRING, item_idx, reinterpret_cast<LPARAM>(item_str.c_str()));
+                SendMessageW(g_h_combo_process, CB_SETITEMDATA, item_idx, static_cast<LPARAM>(i));
+            }
+        }
+        if (cur_sel != CB_ERR) {
+            SendMessageW(g_h_combo_process, CB_SETCURSEL, static_cast<WPARAM>(cur_sel), 0);
+        }
+        return;
     }
 
     std::wstring selected_proc_name;
@@ -3347,15 +3537,21 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     if (insp_card_h < min_insp_h) insp_card_h = min_insp_h;
 
     int insp_hdr_h = scale_dpi(34);
-    int btn_quick_w = scale_dpi(92);
+    int btn_quick_w = scale_dpi(88);
     int btn_quick_h = scale_dpi(24);
     int btn_quick_y = insp_card_y + (insp_hdr_h - btn_quick_h) / 2;
+    int btn_quick_gap = scale_dpi(6);
 
-    // Position Copy and Export buttons on the top-right of the Inspector Header
-    int btn_exp_x = margin + list_w - scale_dpi(8) - btn_quick_w;
-    int btn_cpy_x = btn_exp_x - scale_dpi(8) - btn_quick_w;
-    MoveWindow(g_h_btn_export, btn_exp_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
-    MoveWindow(g_h_btn_copy, btn_cpy_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
+    // Position Copy and Export buttons (Card and JSON) on the top-right of the Inspector Header
+    int btn_exp_card_x = margin + list_w - scale_dpi(8) - btn_quick_w;
+    int btn_cpy_card_x = btn_exp_card_x - btn_quick_gap - btn_quick_w;
+    int btn_exp_json_x = btn_cpy_card_x - btn_quick_gap - btn_quick_w;
+    int btn_cpy_json_x = btn_exp_json_x - btn_quick_gap - btn_quick_w;
+
+    MoveWindow(g_h_btn_export_card, btn_exp_card_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
+    MoveWindow(g_h_btn_copy_card, btn_cpy_card_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
+    MoveWindow(g_h_btn_export, btn_exp_json_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
+    MoveWindow(g_h_btn_copy, btn_cpy_json_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
 
     // Inset the multi-line edit control inside the Inspector card
     int edit_margin = scale_dpi(8);
@@ -3451,6 +3647,14 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             EnableWindow(g_h_btn_clear, FALSE);
 
             // Inspector Header Action Buttons
+            g_h_btn_copy_card = CreateWindowExW(0, L"BUTTON", L"Copy Card", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_COPY_CARD, NULL, NULL);
+            SetPropW(g_h_btn_copy_card, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::QuickAction));
+            EnableWindow(g_h_btn_copy_card, FALSE);
+
+            g_h_btn_export_card = CreateWindowExW(0, L"BUTTON", L"Export Card", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_EXPORT_CARD, NULL, NULL);
+            SetPropW(g_h_btn_export_card, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::QuickAction));
+            EnableWindow(g_h_btn_export_card, FALSE);
+
             g_h_btn_copy = CreateWindowExW(0, L"BUTTON", L"Copy JSON", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_COPY_JSON, NULL, NULL);
             SetPropW(g_h_btn_copy, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::QuickAction));
             EnableWindow(g_h_btn_copy, FALSE);
@@ -3462,8 +3666,13 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SetWindowSubclass(g_h_btn_start, DarkButtonSubclassProc, IDC_BTN_START, 0);
             SetWindowSubclass(g_h_btn_stop, DarkButtonSubclassProc, IDC_BTN_STOP, 0);
             SetWindowSubclass(g_h_btn_clear, DarkButtonSubclassProc, IDC_BTN_CLEAR, 0);
+            SetWindowSubclass(g_h_btn_copy_card, DarkButtonSubclassProc, IDC_BTN_COPY_CARD, 0);
+            SetWindowSubclass(g_h_btn_export_card, DarkButtonSubclassProc, IDC_BTN_EXPORT_CARD, 0);
             SetWindowSubclass(g_h_btn_copy, DarkButtonSubclassProc, IDC_BTN_COPY_JSON, 0);
             SetWindowSubclass(g_h_btn_export, DarkButtonSubclassProc, IDC_BTN_EXPORT_JSON, 0);
+
+            HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
+            g_osd_toast.create(hInst);
 
             // Stutter Events ListView (LVS_EX_DOUBLEBUFFER: High throughput, flicker-free)
             g_h_list_stutters = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_LIST_STUTTERS, NULL, NULL);
@@ -3773,11 +3982,6 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     break;
                 }
 
-                case IDC_BTN_REFRESH: {
-                    g_controller->enumerate_graphical_processes_async();
-                    break;
-                }
-
                 case IDC_BTN_EXPORT_JSON: {
                     export_selected_report_json(hwnd);
                     break;
@@ -3785,6 +3989,16 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
                 case IDC_BTN_COPY_JSON: {
                     copy_selected_report_json(hwnd);
+                    break;
+                }
+
+                case IDC_BTN_EXPORT_CARD: {
+                    export_selected_report_card(hwnd);
+                    break;
+                }
+
+                case IDC_BTN_COPY_CARD: {
+                    copy_selected_report_card(hwnd);
                     break;
                 }
 
@@ -3892,6 +4106,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         case WM_STUTTO_TRIGGER: {
             std::unique_ptr<DiagnosticReport> report(reinterpret_cast<DiagnosticReport*>(lParam));
+            if (report && g_settings_config.enable_osd) {
+                g_osd_toast.show(*report, g_settings_config.osd_duration_ms, g_settings_config.osd_position);
+            }
             handle_new_report(std::move(report));
             return 0;
         }
@@ -4001,6 +4218,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_DESTROY: {
             UnregisterHotKey(hwnd, ID_HOTKEY_TOGGLE_CAPTURE);
 
+            g_osd_toast.destroy();
+
             if (g_controller) {
                 g_controller->shutdown();
             }
@@ -4046,6 +4265,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 // Win32 Application Entry Point
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int nCmdShow) {
     HRESULT hr_com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (!stuttometer::gui::CardRenderer::initialize()) {
+        OutputDebugStringA("[Stuttometer] Warning: CardRenderer::initialize() failed. Visual cards disabled.\n");
+    }
 
     INITCOMMONCONTROLSEX icex{};
     icex.dwSize = sizeof(icex);
@@ -4073,6 +4295,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
 
     if (!RegisterClassExW(&wc)) {
         MessageBoxW(NULL, L"Failed to register window class.", L"Error", MB_OK | MB_ICONERROR);
+        stuttometer::gui::CardRenderer::shutdown();
         if (SUCCEEDED(hr_com)) CoUninitialize();
         return 1;
     }
@@ -4118,6 +4341,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
 
     if (!hwnd) {
         MessageBoxW(NULL, L"Failed to create main application window.", L"Error", MB_OK | MB_ICONERROR);
+        stuttometer::gui::CardRenderer::shutdown();
         if (SUCCEEDED(hr_com)) CoUninitialize();
         return 1;
     }
@@ -4140,6 +4364,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
     if (hIconBig) DestroyIcon(hIconBig);
     if (hIconSmall && hIconSmall != hIconBig) DestroyIcon(hIconSmall);
 
+    stuttometer::gui::CardRenderer::shutdown();
     if (SUCCEEDED(hr_com)) CoUninitialize();
 
     return static_cast<int>(msg.wParam);

@@ -69,6 +69,7 @@ private:
     size_t max_bytes_{0};
     size_t max_files_{3};
     size_t current_file_bytes_{0};
+    std::atomic<bool> rotation_error_logged_{false};
 
     std::atomic<bool> running_{true};
     std::atomic<bool> stopped_{false};

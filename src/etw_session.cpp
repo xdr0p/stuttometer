@@ -423,6 +423,7 @@ void EtwSessionManager::active_flush_worker_loop() {
     const uint64_t pso_max_age_qpc = ms_to_qpc_delta(12000.0, qpc_freq_);
     const uint64_t ws_trim_max_age_qpc = ms_to_qpc_delta(12000.0, qpc_freq_);
     uint64_t loop_counter = 0;
+    uint64_t last_resync_qpc = sync_time_qpc_.load(std::memory_order_relaxed);
 
     while (running_.load(std::memory_order_relaxed)) {
         TRACEHANDLE user_sess = user_session_handle_.load(std::memory_order_acquire);
@@ -461,6 +462,25 @@ void EtwSessionManager::active_flush_worker_loop() {
             last_present_table_.evict_stale(current_qpc, last_present_max_age_qpc, [](const LastPresentEntry& e) { return e.last_present_qpc; });
             last_flip_table_.evict_stale(current_qpc, last_present_max_age_qpc, [](const LastFlipEntry& e) { return e.last_flip_qpc; });
             trigger_engine_.evict_stale_pacing_entries(current_qpc, last_present_max_age_qpc);
+        }
+
+        // Periodic wall-clock clock resynchronization (~3 seconds regardless of flush interval)
+        const uint64_t current_qpc = get_current_qpc();
+        if ((current_qpc - last_resync_qpc) >= (3 * qpc_freq_)) {
+            FILETIME ft{};
+            GetSystemTimeAsFileTime(&ft);
+            ULARGE_INTEGER uli{};
+            uli.LowPart = ft.dwLowDateTime;
+            uli.HighPart = ft.dwHighDateTime;
+            const uint64_t new_utc = uli.QuadPart;
+            const uint64_t new_qpc = get_current_qpc();
+
+            const uint64_t s = sync_time_seq_.load(std::memory_order_relaxed);
+            sync_time_seq_.store(s + 1, std::memory_order_release); // odd = write in progress
+            sync_time_utc_.store(new_utc, std::memory_order_relaxed);
+            sync_time_qpc_.store(new_qpc, std::memory_order_relaxed);
+            sync_time_seq_.store(s + 2, std::memory_order_release); // even = published
+            last_resync_qpc = current_qpc;
         }
 
         if (!running_.load(std::memory_order_relaxed)) {
@@ -727,22 +747,6 @@ void EtwSessionManager::handle_dxgkrnl_paging_event(PEVENT_RECORD p_event, EtwEv
 void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
     rec.category = static_cast<uint16_t>(EventCategory::DWM_GLITCH);
 
-    const uint64_t dedup_window_qpc = ms_to_qpc_delta(50.0, qpc_freq_);
-    for (size_t i = 0; i < 16; ++i) {
-        uint64_t recent_ts = recent_dwm_glitches_qpc_[i].load(std::memory_order_acquire);
-        if (recent_ts > 0) {
-            const uint64_t delta_qpc = (ctx.timestamp >= recent_ts) ? (ctx.timestamp - recent_ts) : (recent_ts - ctx.timestamp);
-            if (delta_qpc < dedup_window_qpc) {
-                NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-                if (writer) writer->push(rec);
-                return;
-            }
-        }
-    }
-
-    uint32_t slot = (recent_dwm_glitch_idx_.fetch_add(1, std::memory_order_relaxed)) & 15;
-    recent_dwm_glitches_qpc_[slot].store(ctx.timestamp, std::memory_order_release);
-
     const double vblank_ms = (trigger_engine_.vblank_interval_ms() > 0.0) 
         ? trigger_engine_.vblank_interval_ms() 
         : 16.67;
@@ -756,12 +760,35 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
     rec.auxiliary_data = glitch_type;
     const double dur_ms = (missed_vblanks >= 1) ? (missed_vblanks * vblank_ms) : vblank_ms;
     rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1000.0, 10000000.0));
+
+    bool is_dedup = false;
+    const uint64_t dedup_window_qpc = ms_to_qpc_delta(50.0, qpc_freq_);
+    for (size_t i = 0; i < 16; ++i) {
+        uint64_t recent_ts = recent_dwm_glitches_qpc_[i].load(std::memory_order_acquire);
+        if (recent_ts > 0) {
+            const uint64_t delta_qpc = (ctx.timestamp >= recent_ts) ? (ctx.timestamp - recent_ts) : (recent_ts - ctx.timestamp);
+            if (delta_qpc < dedup_window_qpc) {
+                is_dedup = true;
+                break;
+            }
+        }
+    }
+
+    if (is_dedup) {
+        rec.flags |= EventFlags::DWM_GLITCH_DEDUPLICATED;
+    } else {
+        uint32_t slot = (recent_dwm_glitch_idx_.fetch_add(1, std::memory_order_relaxed)) & 15;
+        recent_dwm_glitches_qpc_[slot].store(ctx.timestamp, std::memory_order_release);
+    }
+
     flight_recorder_.push(rec);
 
     NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
     if (writer) writer->push(rec);
 
-    trigger_engine_.on_dwm_glitch(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, ctx.cpu);
+    if (!is_dedup) {
+        trigger_engine_.on_dwm_glitch(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, ctx.cpu);
+    }
 }
 
 void EtwSessionManager::handle_power_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
@@ -962,7 +989,7 @@ void EtwSessionManager::handle_kernel_memory_event(PEVENT_RECORD p_event, EtwEve
 }
 
 void EtwSessionManager::handle_process_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
-    rec.category = static_cast<uint16_t>(EventCategory::UNKNOWN);
+    rec.category = static_cast<uint16_t>(EventCategory::PROCESS);
 
     if (ctx.event_id == 1 && p_event->UserDataLength >= 4 && p_event->UserData) {
         uint32_t target_pid = 0;
@@ -970,15 +997,26 @@ void EtwSessionManager::handle_process_event(PEVENT_RECORD p_event, EtwEventReco
         if (target_pid != 0) {
             rec.pid = target_pid;
             std::string proc_name;
-            if (p_event->UserDataLength > 24) {
+            if (p_event->UserDataLength >= 26) {
                 const auto* raw_bytes = static_cast<const uint8_t*>(p_event->UserData) + 24;
                 const auto* p_ws = reinterpret_cast<const wchar_t*>(raw_bytes);
                 const size_t max_wchars = (p_event->UserDataLength - 24) / sizeof(wchar_t);
                 size_t wlen = 0;
-                while (wlen < max_wchars && p_ws[wlen] != L'\0') {
+                bool null_terminated = false;
+                bool valid_chars = true;
+                while (wlen < max_wchars && wlen < MAX_PATH) {
+                    wchar_t wc = p_ws[wlen];
+                    if (wc == L'\0') {
+                        null_terminated = true;
+                        break;
+                    }
+                    if ((wc < 0x20 && wc != L'\t') || wc == 0x7F) {
+                        valid_chars = false;
+                        break;
+                    }
                     ++wlen;
                 }
-                if (wlen > 0) {
+                if (null_terminated && valid_chars && wlen > 0) {
                     std::string full_path = utf16_to_utf8(std::wstring_view(p_ws, wlen));
                     const size_t slash = full_path.find_last_of("\\/");
                     proc_name = (slash != std::string::npos) ? full_path.substr(slash + 1) : full_path;
@@ -1153,7 +1191,7 @@ void EtwSessionManager::handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventReco
             if (issuing_tid == 0) issuing_tid = ctx.tid;
             in_flight_disk_.insert(irp, { ctx.timestamp, ctx.pid, issuing_tid, (ctx.opcode == KERNEL_OPCODE_DISK_WRITE_INIT) });
             rec.payload.file_key = irp;
-            rec.auxiliary_data = irp;
+            rec.auxiliary_data = 0;
             if (ctx.opcode == KERNEL_OPCODE_DISK_WRITE_INIT) {
                 rec.flags |= EventFlags::DISK_IS_WRITE;
             }
@@ -1221,8 +1259,8 @@ void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRec
 
             uint64_t initial_time_ft = static_cast<uint64_t>(initial_time);
             constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL; // Jan 1, 2000 00:00:00 UTC
-            uint64_t sync_utc = sync_time_utc_.load(std::memory_order_relaxed);
-            uint64_t sync_qpc = sync_time_qpc_.load(std::memory_order_relaxed);
+            uint64_t sync_utc = 0, sync_qpc = 0;
+            read_sync_time(sync_utc, sync_qpc);
 
             if (initial_time_ft >= MIN_VALID_FILETIME && sync_utc > 0 && sync_qpc > 0 && ctx.timestamp >= sync_qpc) {
                 const uint64_t delta_qpc = ctx.timestamp - sync_qpc;
@@ -1287,12 +1325,6 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
     const uint8_t cpu = static_cast<uint8_t>(p_event->BufferContext.ProcessorNumber);
     const uint16_t event_id = p_event->EventHeader.EventDescriptor.Id;
     const uint8_t opcode = p_event->EventHeader.EventDescriptor.Opcode;
-
-    // Monotonically advance highest processed QPC timestamp for deterministic post-trigger draining
-    uint64_t cur_qpc = mgr->last_processed_qpc_.load(std::memory_order_relaxed);
-    while (timestamp > cur_qpc &&
-           !mgr->last_processed_qpc_.compare_exchange_weak(
-               cur_qpc, timestamp, std::memory_order_release, std::memory_order_relaxed)) {}
 
     EventContext ctx{ timestamp, pid, tid, cpu, event_id, opcode };
 
@@ -1359,6 +1391,13 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
             mgr->handle_nt_fault_event(p_event, rec, ctx);
         }
     }
+
+    // Monotonically advance highest processed QPC timestamp for deterministic post-trigger draining
+    // Published at the very end of on_event_record to guarantee all delivered events with timestamp <= to_qpc are published
+    uint64_t cur_qpc = mgr->last_processed_qpc_.load(std::memory_order_relaxed);
+    while (timestamp > cur_qpc &&
+           !mgr->last_processed_qpc_.compare_exchange_weak(
+               cur_qpc, timestamp, std::memory_order_release, std::memory_order_relaxed)) {}
 }
 
 bool run_environment_self_check(std::ostream& out) {

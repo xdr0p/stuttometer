@@ -26,7 +26,8 @@ enum class EventCategory : uint16_t {
     DXGKRNL_VRAM_PAGING = 15,
     MEM_VIRTUAL_ALLOC = 16,
     MEM_WORKING_SET_TRIM = 17,
-    MEM_PHYSICAL_ALLOC = 18
+    MEM_PHYSICAL_ALLOC = 18,
+    PROCESS          = 19
 };
 
 inline std::string_view category_to_string(EventCategory cat) noexcept {
@@ -49,6 +50,7 @@ inline std::string_view category_to_string(EventCategory cat) noexcept {
         case EventCategory::MEM_VIRTUAL_ALLOC:    return "MEM_VIRTUAL_ALLOC";
         case EventCategory::MEM_WORKING_SET_TRIM: return "MEM_WORKING_SET_TRIM";
         case EventCategory::MEM_PHYSICAL_ALLOC:   return "MEM_PHYSICAL_ALLOC";
+        case EventCategory::PROCESS:              return "PROCESS";
         default:                                  return "UNKNOWN";
     }
 }
@@ -67,6 +69,7 @@ namespace EventFlags {
     inline constexpr uint16_t VRAM_DEMOTED_COMMITMENT = 0x0100;
     inline constexpr uint16_t VRAM_USAGE_OVER_BUDGET  = 0x0200;
     inline constexpr uint16_t VRAM_PAGING_TRANSFER    = 0x0400;
+    inline constexpr uint16_t DWM_GLITCH_DEDUPLICATED = 0x0800; // Bit 11
     inline constexpr uint16_t MEM_ALLOC_COMMIT        = 0x1000;
     inline constexpr uint16_t MEM_WS_TRIM_OUTSWAP      = 0x2000;
     inline constexpr uint16_t MEM_PHYSICAL_CONTIGUOUS  = 0x4000;

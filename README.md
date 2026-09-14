@@ -15,12 +15,12 @@ Leave it running in the background; when a stutter happens, the evidence is alre
 ## How It Works
 
 - **Zero-Allocation Flight Recorder:** Events stream into a pre-allocated lock-free ring buffer (262,144 slots × 64 bytes, one seqlock per slot). No heap allocations occur while tracing is active, preventing diagnostic overhead from inducing its own DPCs or memory pressure.
-- **Active ETW Flushing:** A dedicated worker thread issues kernel flush commands (`ControlTraceW` with `EVENT_TRACE_CONTROL_FLUSH`) every 100 ms (configurable down to 25–50 ms) so events reach the flight recorder with minimal delivery latency.
+- **Active ETW Flushing:** A dedicated worker thread issues kernel flush commands (`ControlTraceW` with `EVENT_TRACE_CONTROL_FLUSH`) every 100 ms (configurable down to 25–50 ms) so events reach the flight recorder with minimal delivery latency. Periodic clock resynchronization bounds the age of the last UTC↔QPC snapshot to ≤ 3 seconds + flush interval (default: ~3.1 seconds), ensuring tear-free alignment between wall-clock timestamps and hardware query performance counters.
 - **Hybrid Trigger Engine:** Tracks a moving-median frametime baseline to catch relative spikes (`--spike-multiplier`) and detects cadence variance ("judder")—the micro-stutters that never cross a fixed millisecond threshold. Static and dynamic trigger modes are also supported.
 - **Three-Tier Presentation Timing:**
   - `Microsoft-Windows-DxgKrnl` (`MMIOFlip` / `FlipEvent` / `PresentStop`) — hardware flip completion events (DirectX 12, Vulkan, DirectX 11).
   - `Microsoft-Windows-DXGI` — CPU-side Present submission latency to isolate API bottlenecks from GPU delivery stalls.
-  - `Microsoft-Windows-Dwm-Core` — desktop compositor schedule glitches with kernel-side keyword filtering.
+  - `Microsoft-Windows-Dwm-Core` — desktop compositor schedule glitches with kernel-side keyword filtering. Rapid successive glitches within 50 ms are tagged with `DWM_GLITCH_DEDUPLICATED` (`0x0800`) and parsed completely with accurate durations.
 - **Audio Underrun Detection:** Subscribes to `Microsoft-Windows-Audio` (Event ID 11) to capture audio dropouts and crackling.
 
 ---
@@ -84,9 +84,11 @@ The build produces two executables:
 Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Controls v6 with zero external runtime dependencies.
 
 - **Stutter Inspector:** Live report feed with ranked root-cause diagnoses, confidence score meters, and evidence timelines.
+- **Visual Stutter Card:** Export high-resolution diagnostic cards (PNG) or copy directly to clipboard (`CF_DIB` format) for seamless `Ctrl+V` pasting into Discord, Slack, Reddit, GitHub issues, and community forums.
+- **In-Game OSD Toast:** Non-intrusive on-screen notification (`WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT`) displaying stall duration, attribution tag, culprit driver/module, and diagnosis summary when a stutter occurs, without stealing game focus or input. *Note: OSD notifications are suppressed by hardware fullscreen-exclusive presentations; use borderless-windowed mode to receive in-game notifications.*
 - **Process Picker:** Discovers running graphical games and applications via `EnumWindows`.
 - **Live Activity Feed:** Visualizes real-time frametimes, DPC/ISR spikes, disk I/O, and memory events.
-- **Export & Privacy:** One-click JSON report export and clipboard copying, with a toggleable `--redact` mode to sanitize process names, file paths, and usernames.
+- **Export & Privacy:** One-click JSON report export and clipboard copying, with a toggleable `--redact` mode to sanitize process names, file paths, and usernames. Unquoted path redaction operates conservatively: it scans without an arbitrary length bound until a delimiter (`\n`, `\r`, `\t`, `"`, `'`, `` ` ``, `,`, `;`, `]`, `}`, `>`, `<`) or end of string; trailing unquoted prose without an intervening delimiter is conservatively over-redacted into `[PATH_REDACTED]`; and exotic pathnames containing unquoted commas or brackets should be enclosed in quotes.
 
 ```powershell
 .\build\Release\stuttometer_gui.exe
@@ -147,7 +149,7 @@ Subsystem Anomaly Thresholds:
 
 Targeting, Output & General:
   --target-pid INT                Target Process ID to monitor (default: 0 = monitor all)
-  --target-process TEXT           Target process name substring (e.g. Game.exe)
+  --target-process TEXT           Target process name substring (e.g. Game.exe; attaches to first matching instance)
   --output PATH                   Output file path for single JSON report
   --output-dir PATH               Directory to save individual trigger reports (auto-saves paired JSON and CSV capped to 100 latest)
   --export-csv PATH               Export frame pacing timeline to CSV (overwritten on each trigger; use --output-dir for per-trigger files)
@@ -156,7 +158,7 @@ Targeting, Output & General:
   --dump-max-files INT            Maximum number of rotated NDJSON files to retain (1-10, default: 3; ignored when --dump-events is -)
   --max-reports INT               Maximum number of reports before exiting (default: 0 = continuous)
   --tier TEXT                     Provider tier: minimal, standard, full (default: standard)
-  --redact                        Redact process names, file paths, and user identifiers
+  --redact                        Redact process names, file paths, and user identifiers (conservative unquoted delimiter scan; quote exotic paths)
   --verbose                       Print detailed event stream metrics to console
   --version                       Print version information and exit
   --self-check                    Run non-destructive environment diagnostics & ETW provider checks, then exit
@@ -170,7 +172,8 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
   ```json
   {"v":1,"ts_qpc":123456789,"cat":"DXGI","id":43,"pid":4568,"tid":8912,"cpu":2,"dur_us":16670,"aux":0,"flags":0}
   ```
-  `dur_us` is `0` for instant/start events; consumers distinguish start vs. stop by `cat` and event `id`.
+  `dur_us` is `0` for instant/start events; consumers distinguish start vs. stop by `cat` and event `id`. Disk Init events carry `"aux": 0` rather than leaking kernel virtual addresses (KVA), while completed I/O byte counts remain in `aux` on Stop events.
+- **Zero Idle CPU & Latency Trade-Off:** The background NDJSON writer drops idle CPU to 0% via escalating backoff (64 pauses, 64 yields, then 2 ms wait on a condition variable); under active event flow, events stream immediately with zero additional latency.
 - **PowerShell / `jq` Piping Example:**
   ```powershell
   # Stream events and filter DXGI presents in real time
@@ -197,6 +200,7 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 ## Limitations
 
 - **Platform & Privileges:** Windows 10/11 x64 only. Live tracing strictly requires administrator privileges.
+- **In-Game OSD Presentation:** OSD notifications are suppressed by hardware fullscreen-exclusive presentations; use borderless-windowed mode to receive in-game notifications.
 - **Heuristic Confidence:** Root-cause rankings are probabilistic correlation heuristics designed as high-signal starting points for investigation.
 - **Scope:** Stuttometer identifies root causes and isolates culpable subsystems; it does not alter driver behavior, inject into game processes, or modify system scheduler priorities.
 
