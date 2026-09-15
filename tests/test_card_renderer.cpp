@@ -14,7 +14,7 @@ using namespace stuttometer::gui;
 
 static DiagnosticReport create_dummy_report() {
     DiagnosticReport report;
-    report.tool_version = "0.3.0";
+    report.tool_version = "0.3.1";
     report.timestamp_utc = "2026-09-15 01:00:00 UTC";
     report.target_process = "Cyberpunk2077.exe";
     report.trigger.source = TriggerSource::DXGI_PRESENT_STUTTER;
