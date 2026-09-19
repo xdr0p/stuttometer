@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
     }
 
     if (print_version) {
-        std::cout << "Stuttometer v0.3.2\n";
+        std::cout << "Stuttometer v0.4.0\n";
         return 0;
     }
 
@@ -313,7 +313,7 @@ int main(int argc, char** argv) {
         std::cerr << "[STUTTOMETER] Warning: Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
     }
 
-    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.3.2 (Elevated Mode)...\n";
+    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.4.0 (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
     stuttometer::EtwSessionConfig etw_config;

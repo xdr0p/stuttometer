@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   stuttometer
-  VERSION 0.3.2
+  VERSION 0.4.0
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )
@@ -58,6 +58,7 @@ add_library(stuttometer_core STATIC
   src/flight_recorder.cpp
   src/etw_session.cpp
   src/trigger_engine.cpp
+  src/session_benchmark.cpp
   src/correlator.cpp
   src/json_reporter.cpp
   src/privilege_utils.cpp
@@ -105,6 +106,7 @@ add_executable(stuttometer_gui WIN32
   src/gui/gui_controller.cpp
   src/gui/card_renderer.cpp
   src/gui/osd_toast.cpp
+  src/gui/benchmark_view.cpp
   src/gui/resources.rc
   src/gui/stuttometer_gui.manifest
 )
@@ -257,6 +259,13 @@ target_link_libraries(test_card_renderer
 )
 add_test(NAME test_card_renderer COMMAND test_card_renderer)
 set_tests_properties(test_card_renderer PROPERTIES TIMEOUT 30)
+
+add_executable(test_session_benchmark
+  tests/test_session_benchmark.cpp
+)
+target_link_libraries(test_session_benchmark PRIVATE stuttometer_core)
+add_test(NAME test_session_benchmark COMMAND test_session_benchmark)
+set_tests_properties(test_session_benchmark PROPERTIES TIMEOUT 30)
 
 
 

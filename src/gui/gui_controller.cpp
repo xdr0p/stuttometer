@@ -102,6 +102,7 @@ GuiController::GuiController(HWND main_hwnd)
     : hwnd_(main_hwnd)
 {
     log_redirector_ = std::make_unique<GuiLogRedirector>(main_hwnd);
+    session_benchmark_ = std::make_shared<SessionBenchmark>(get_qpc_frequency());
 }
 
 GuiController::~GuiController() {
@@ -173,6 +174,23 @@ void GuiController::update_target_filter(uint32_t pid, const std::string& proces
     if (active_trigger_engine_) {
         active_trigger_engine_->update_target_pid(pid, (pid == 0 && !process_name.empty()));
     }
+    if (pid == 0 && process_name.empty()) {
+        // Monitor-all mode: Detach sink FIRST, then retarget to 0 (Resolves S-9-1)
+        if (active_trigger_engine_) {
+            active_trigger_engine_->set_benchmark_sink(nullptr);
+        }
+        if (session_benchmark_) {
+            session_benchmark_->retarget(0);
+        }
+    } else {
+        // Targeted or waiting mode: Retarget FIRST, then attach sink
+        if (session_benchmark_) {
+            session_benchmark_->retarget(pid);
+        }
+        if (active_trigger_engine_) {
+            active_trigger_engine_->set_benchmark_sink(session_benchmark_.get());
+        }
+    }
 }
 
 void GuiController::session_worker_loop(GuiConfig config) {
@@ -198,6 +216,16 @@ void GuiController::session_worker_loop(GuiConfig config) {
         trig_config.judder_swing_ratio = config.judder_swing_ratio;
 
         auto trigger_engine = std::make_unique<TriggerEngine>(trig_config, qpc_freq);
+        if (session_benchmark_) {
+            if (config.target_pid != 0 || !config.target_process_name.empty()) {
+                // Attach sink if target PID is set OR if waiting for a target process by name (Resolves S-10-2)
+                trigger_engine->set_benchmark_sink(session_benchmark_.get());
+                session_benchmark_->retarget(config.target_pid);
+            } else {
+                // In monitor-all mode, reset benchmark for clean session start (sink remains null)
+                session_benchmark_->reset();
+            }
+        }
         TriggerEngine* engine_ptr = trigger_engine.get();
         {
             std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
@@ -469,6 +497,10 @@ void GuiController::session_worker_loop(GuiConfig config) {
                     }
                 }
                 ++report_count;
+
+                if (session_benchmark_) {
+                    session_benchmark_->ingest_report(report);
+                }
 
                 // Transfer ownership of report across thread boundary only on success
                 auto p_report = std::make_unique<DiagnosticReport>(std::move(report));

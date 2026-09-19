@@ -1,4 +1,5 @@
 #include "stuttometer/trigger_engine.hpp"
+#include "stuttometer/session_benchmark.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include <algorithm>
 
@@ -7,15 +8,33 @@ namespace stuttometer {
 TriggerEngine::TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq)
     : config_(config)
     , qpc_freq_(qpc_freq)
+    , qpc_1s_delta_(ms_to_qpc_delta(1000.0, qpc_freq))
     , pre_window_qpc_(ms_to_qpc_delta(config.window_pre_ms, qpc_freq))
     , gpu_pre_window_qpc_(ms_to_qpc_delta(std::max(config.window_pre_ms, std::clamp(config.window_pre_ms * 1.5, 250.0, 1200.0)), qpc_freq))
     , post_window_qpc_(ms_to_qpc_delta(config.window_post_ms, qpc_freq))
     , cooldown_qpc_(ms_to_qpc_delta(config.cooldown_ms, qpc_freq))
     , watchdog_qpc_(ms_to_qpc_delta(5000.0, qpc_freq)) // 5.0s recovery
+    , last_target_pid_(config.target_pid)
 {
     const bool waiting = (!config.target_process_name.empty() && config.target_pid == 0);
     const uint64_t initial_state = (static_cast<uint64_t>(config.target_pid) << 32) | (waiting ? 1ULL : 0ULL);
     target_state_.store(initial_state, std::memory_order_relaxed);
+    target_attach_qpc_.store(get_current_qpc(), std::memory_order_release);
+}
+
+void TriggerEngine::on_target_changed(uint32_t new_pid) noexcept {
+    std::lock_guard<std::mutex> lock(target_change_mutex_);
+    // Skip redundant reset if target PID didn't change (Resolves M-10-1)
+    // Note N-4: The early exit is safe because try_attach_pid only succeeds when
+    // target_state_ is in the waiting state (which update_target_pid(pid, false) clears)
+    // and vice versa.
+    if (new_pid == last_target_pid_) {
+        return;
+    }
+    last_target_pid_ = new_pid;
+    dxgi_observed_for_target_.store(false, std::memory_order_release);
+    last_dxgi_timestamp_qpc_.store(0, std::memory_order_release);
+    target_attach_qpc_.store(get_current_qpc(), std::memory_order_release);
 }
 
 bool TriggerEngine::initiate_trigger_atomic(
@@ -129,6 +148,18 @@ bool TriggerEngine::evaluate_frame_pacing_common(
 }
 
 bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc, uint64_t stream_key, uint8_t cpu_index) noexcept {
+    if (!should_trigger_on_process(pid)) {
+        return false;
+    }
+
+    SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
+    if (sink) {
+        // Note N-3: intentional: only latch when a target is actively benchmarked.
+        dxgi_observed_for_target_.store(true, std::memory_order_release);
+        last_dxgi_timestamp_qpc_.store(timestamp_qpc, std::memory_order_release);
+        sink->ingest_frame(pid, duration_ms, timestamp_qpc);
+    }
+
     FramePacingResult pacing_res{};
     if (!evaluate_frame_pacing_common(pid, tid, duration_ms, timestamp_qpc, stream_key, pacing_res)) {
         return false;
@@ -154,6 +185,18 @@ bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_
 }
 
 bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc, uint64_t stream_key, uint8_t cpu_index) noexcept {
+    if (!should_trigger_on_process(pid)) {
+        return false;
+    }
+
+    SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
+    if (sink && !dxgi_observed_for_target_.load(std::memory_order_acquire)) {
+        const uint64_t attach_qpc = target_attach_qpc_.load(std::memory_order_acquire);
+        if (timestamp_qpc > attach_qpc && (timestamp_qpc - attach_qpc) > qpc_1s_delta_) {
+            sink->ingest_frame(pid, duration_ms, timestamp_qpc);
+        }
+    }
+
     FramePacingResult pacing_res{};
     if (!evaluate_frame_pacing_common(pid, tid, duration_ms, timestamp_qpc, stream_key, pacing_res)) {
         return false;
@@ -379,6 +422,7 @@ bool TriggerEngine::try_attach_pid(uint32_t pid) noexcept {
         if (target_state_.compare_exchange_weak(expected, desired,
                                                 std::memory_order_acq_rel,
                                                 std::memory_order_acquire)) {
+            on_target_changed(pid);
             return true;
         }
     }
@@ -395,6 +439,7 @@ bool TriggerEngine::try_detach_pid(uint32_t pid) noexcept {
         if (target_state_.compare_exchange_weak(expected, desired,
                                                 std::memory_order_acq_rel,
                                                 std::memory_order_acquire)) {
+            on_target_changed(0);
             return true;
         }
     }

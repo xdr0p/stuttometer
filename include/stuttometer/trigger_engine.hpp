@@ -10,6 +10,8 @@
 
 namespace stuttometer {
 
+class SessionBenchmark;
+
 enum class TriggerSource : uint8_t {
     NONE                  = 0,
     DXGI_PRESENT_STUTTER  = 1,
@@ -105,10 +107,16 @@ public:
     // Notifies that analysis/reporting is done, moving state to COOLDOWN
     void on_report_completed(uint64_t current_qpc) noexcept;
 
+    // Sets the benchmark sink for session pacing ingestion
+    void set_benchmark_sink(SessionBenchmark* sink) noexcept {
+        benchmark_sink_.store(sink, std::memory_order_release);
+    }
+
     // Dynamically update the active target PID from the background watcher (indivisible 64-bit state)
     void update_target_pid(uint32_t pid, bool waiting_for_process = false) noexcept {
         const uint64_t val = (static_cast<uint64_t>(pid) << 32) | (waiting_for_process ? 1ULL : 0ULL);
         target_state_.store(val, std::memory_order_release);
+        on_target_changed(pid);
     }
 
     // Dynamic atomic CAS target state transitions (thread-safe, lock-free)
@@ -171,13 +179,24 @@ private:
         double spike_ratio = 0.0
     ) noexcept;
 
+    void on_target_changed(uint32_t new_pid) noexcept;
+
     const TriggerConfig config_;
     const uint64_t qpc_freq_;
+    const uint64_t qpc_1s_delta_;
     const uint64_t pre_window_qpc_;
     const uint64_t gpu_pre_window_qpc_;
     const uint64_t post_window_qpc_;
     const uint64_t cooldown_qpc_;
     const uint64_t watchdog_qpc_;
+
+    std::atomic<SessionBenchmark*> benchmark_sink_{nullptr};
+    // Note: latch is per-TriggerEngine-instance; relies on sink being null in monitor-all (Resolves M-10-4)
+    std::atomic<bool> dxgi_observed_for_target_{false};
+    std::atomic<uint64_t> last_dxgi_timestamp_qpc_{0};
+    std::atomic<uint64_t> target_attach_qpc_{0};
+    uint32_t last_target_pid_{0};
+    std::mutex target_change_mutex_;
 
     // Indivisible 64-bit atomic target state: High 32-bits = target_pid, Low 32-bits = waiting_for_process flag
     std::atomic<uint64_t> target_state_{0};

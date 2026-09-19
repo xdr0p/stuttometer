@@ -1,6 +1,7 @@
 #include "gui_controller.hpp"
 #include "card_renderer.hpp"
 #include "osd_toast.hpp"
+#include "benchmark_view.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -125,6 +126,7 @@ constexpr int IDC_LIST_STUTTERS      = 1014;
 constexpr int IDC_EDIT_INSPECTOR     = 1015;
 constexpr int IDC_BTN_COPY_CARD      = 1016;
 constexpr int IDC_BTN_EXPORT_CARD    = 1017;
+constexpr int IDC_BTN_SESSION_SUMMARY = 1018;
 
 // Settings Dialog Control IDs
 constexpr int IDC_SET_HOTKEY_EDIT    = 2001;
@@ -451,6 +453,7 @@ static HWND g_h_combo_process = nullptr;
 static HWND g_h_btn_start = nullptr;
 static HWND g_h_btn_stop = nullptr;
 static HWND g_h_btn_settings = nullptr;
+static HWND g_h_btn_session_summary = nullptr;
 static HWND g_h_btn_clear = nullptr;
 static HWND g_h_btn_export = nullptr;
 static HWND g_h_btn_copy = nullptr;
@@ -1327,7 +1330,7 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     MoveWindow(state->h_chk_advanced, chk_adv_x, f_y + (f_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
     state->rc_lbl_adv = { chk_adv_x + scale_dpi(20), f_y, chk_adv_x + scale_dpi(20) + static_cast<int>(sz_adv.cx) + scale_dpi(8), f_y + f_h };
 
-    int save_w = scale_dpi(120);
+    int save_w = scale_dpi(125);
     int cancel_w = scale_dpi(100);
     int btn_gap = scale_dpi(10);
     int save_x = width - margin - save_w;
@@ -2535,6 +2538,7 @@ static void update_fonts_for_dpi(UINT dpi) {
         SendMessageW(g_h_combo_process, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
     }
     if (g_h_btn_settings) SendMessageW(g_h_btn_settings, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+    if (g_h_btn_session_summary) SendMessageW(g_h_btn_session_summary, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_start) SendMessageW(g_h_btn_start, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_stop) SendMessageW(g_h_btn_stop, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_clear) SendMessageW(g_h_btn_clear, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
@@ -2745,7 +2749,7 @@ static LRESULT CALLBACK HeaderSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
                 wchar_t text[128] = {0};
                 HDITEMW hdi{};
-                hdi.mask = HDI_TEXT;
+                hdi.mask = HDI_TEXT | HDI_FORMAT;
                 hdi.pszText = text;
                 hdi.cchTextMax = 128;
                 Header_GetItem(hwnd, i, &hdi);
@@ -2753,7 +2757,14 @@ static LRESULT CALLBACK HeaderSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 RECT text_rc = item_rc;
                 text_rc.left += scale_dpi(8);
                 text_rc.right -= scale_dpi(8);
-                DrawTextW(hdc, text, -1, &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+                UINT uFormat = DT_LEFT;
+                if (hdi.fmt & HDF_RIGHT) {
+                    uFormat = DT_RIGHT;
+                } else if (hdi.fmt & HDF_CENTER) {
+                    uFormat = DT_CENTER;
+                }
+                DrawTextW(hdc, text, -1, &text_rc, uFormat | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             }
 
             SelectObject(hdc, old_pen);
@@ -3399,8 +3410,8 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
     GetClientRect(g_hwnd_main, &client_rc);
     int pill_w = scale_dpi(280);
     int pill_left = (client_rc.right - pill_w) / 2;
-    int pill_top = scale_dpi(9);
-    int pill_bottom = pill_top + scale_dpi(30);
+    int pill_top = scale_dpi(8);
+    int pill_bottom = pill_top + scale_dpi(32);
     RECT rc_pill = { pill_left - scale_dpi(2), pill_top - scale_dpi(2), pill_left + pill_w + scale_dpi(2), pill_bottom + scale_dpi(2) };
     InvalidateRect(g_hwnd_main, &rc_pill, FALSE);
 
@@ -3587,6 +3598,10 @@ static void update_session_ui_state(GuiSessionState state) {
         }
     }
 
+    if (g_h_btn_session_summary) {
+        EnableWindow(g_h_btn_session_summary, TRUE);
+    }
+
     switch (state) {
         case GuiSessionState::IDLE:
             EnableWindow(g_h_btn_start, TRUE);
@@ -3676,12 +3691,16 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
 
     int margin = scale_dpi(16);
 
-    // 0. Header Settings Button (Y: 9, Height: 30)
-    int elem_h = scale_dpi(30);
-    int elem_y = scale_dpi(9);
+    // 0. Header Settings & Session Summary Buttons (Y: 8, Height: 32)
+    int elem_h = scale_dpi(32);
+    int elem_y = scale_dpi(8);
     int btn_set_w = scale_dpi(105);
     int btn_set_x = width - margin - btn_set_w;
     MoveWindow(g_h_btn_settings, btn_set_x, elem_y, btn_set_w, elem_h, TRUE);
+
+    int btn_sum_w = scale_dpi(145);
+    int btn_sum_x = btn_set_x - scale_dpi(8) - btn_sum_w;
+    MoveWindow(g_h_btn_session_summary, btn_sum_x, elem_y, btn_sum_w, elem_h, TRUE);
 
     // 1. Configuration Card (Y: 54, Height: 52)
     const int card_y = scale_dpi(54);
@@ -3711,7 +3730,7 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     bx += btn_w + btn_gap;
     MoveWindow(g_h_btn_stop, bx, act_y, btn_w, act_h, TRUE);
     bx += btn_w + btn_gap;
-    MoveWindow(g_h_btn_clear, bx, act_y, scale_dpi(65), act_h, TRUE);
+    MoveWindow(g_h_btn_clear, bx, act_y, scale_dpi(75), act_h, TRUE);
 
     // 3. Stutter Events Table (ListView) and Diagnostic Inspector Card
     int content_top = act_y + act_h + scale_dpi(10);
@@ -3819,6 +3838,12 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SendMessageW(g_h_btn_settings, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             SetWindowSubclass(g_h_btn_settings, DarkButtonSubclassProc, IDC_BTN_SETTINGS, 0);
 
+            // Header Session Summary Button
+            g_h_btn_session_summary = CreateWindowExW(0, L"BUTTON", L"Session Summary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_SESSION_SUMMARY, NULL, NULL);
+            SetPropW(g_h_btn_session_summary, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
+            SendMessageW(g_h_btn_session_summary, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+            SetWindowSubclass(g_h_btn_session_summary, DarkButtonSubclassProc, IDC_BTN_SESSION_SUMMARY, 0);
+
             // Configuration Controls
             g_h_lbl_target = CreateWindowExW(0, L"STATIC", L"Target:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
             SendMessageW(g_h_lbl_target, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
@@ -3893,13 +3918,13 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
             LVCOLUMNW col{};
             col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM | LVCF_FMT;
-            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"#"); col.cx = scale_dpi(42); ListView_InsertColumn(g_h_list_stutters, 0, &col);
-            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Time (UTC)"); col.cx = scale_dpi(145); ListView_InsertColumn(g_h_list_stutters, 1, &col);
-            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Target Process"); col.cx = scale_dpi(150); ListView_InsertColumn(g_h_list_stutters, 2, &col);
-            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Trigger Reason"); col.cx = scale_dpi(145); ListView_InsertColumn(g_h_list_stutters, 3, &col);
-            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"Duration"); col.cx = scale_dpi(85); ListView_InsertColumn(g_h_list_stutters, 4, &col);
+            col.fmt = LVCFMT_CENTER; col.pszText = const_cast<LPWSTR>(L"#"); col.cx = scale_dpi(42); ListView_InsertColumn(g_h_list_stutters, 0, &col);
+            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Time (UTC)"); col.cx = scale_dpi(140); ListView_InsertColumn(g_h_list_stutters, 1, &col);
+            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Target Process"); col.cx = scale_dpi(145); ListView_InsertColumn(g_h_list_stutters, 2, &col);
+            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Trigger Reason"); col.cx = scale_dpi(140); ListView_InsertColumn(g_h_list_stutters, 3, &col);
+            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"Duration"); col.cx = scale_dpi(120); ListView_InsertColumn(g_h_list_stutters, 4, &col);
             col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Primary Culprit / Hypothesis"); col.cx = scale_dpi(280); ListView_InsertColumn(g_h_list_stutters, 5, &col);
-            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"Confidence"); col.cx = scale_dpi(95); ListView_InsertColumn(g_h_list_stutters, 6, &col);
+            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"Confidence"); col.cx = scale_dpi(90); ListView_InsertColumn(g_h_list_stutters, 6, &col);
 
             // Inspector Multi-line Viewer (Clean High-Contrast Monospace Dark Pane)
             g_h_edit_inspector = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_EDIT_INSPECTOR, NULL, NULL);
@@ -3990,8 +4015,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 DrawTextW(mem_dc, L"REAL-TIME ETW DIAGNOSTIC", -1, &subtitle_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Real-Time Status Pill (True Horizontal Center)
-                int elem_h = scale_dpi(30);
-                int elem_y = scale_dpi(9);
+                int elem_h = scale_dpi(32);
+                int elem_y = scale_dpi(8);
                 int pill_w = scale_dpi(280);
                 int pill_left = (width - pill_w) / 2;
                 int pill_right = pill_left + pill_w;
@@ -4228,6 +4253,13 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             }
 
             switch (wmId) {
+                case IDC_BTN_SESSION_SUMMARY: {
+                    if (g_controller) {
+                        ShowBenchmarkView(hwnd, g_controller->get_session_benchmark(), g_settings_config.redact);
+                    }
+                    break;
+                }
+
                 case IDC_BTN_SETTINGS: {
                     ShowSettingsDialog(hwnd);
                     break;

@@ -2,6 +2,7 @@
 
 #include "stuttometer/flight_recorder.hpp"
 #include "stuttometer/trigger_engine.hpp"
+#include "stuttometer/session_benchmark.hpp"
 #include "stuttometer/correlator.hpp"
 #include "stuttometer/json_reporter.hpp"
 #include "stuttometer/etw_session.hpp"
@@ -156,6 +157,10 @@ public:
         return s == GuiSessionState::RUNNING || s == GuiSessionState::DEGRADED_USER_ONLY || s == GuiSessionState::DEGRADED_KERNEL_ONLY || s == GuiSessionState::STARTING;
     }
 
+    std::shared_ptr<SessionBenchmark> get_session_benchmark() const noexcept {
+        return session_benchmark_;
+    }
+
 private:
     void session_worker_loop(GuiConfig config);
 
@@ -171,6 +176,8 @@ private:
 
     std::unique_ptr<GuiLogRedirector> log_redirector_;
     std::string target_process_name_;
+    // Declared before active_trigger_engine_ to guarantee session_benchmark_ outlives the engine (Resolves M-10-5)
+    std::shared_ptr<SessionBenchmark> session_benchmark_;
     std::unique_ptr<TriggerEngine> active_trigger_engine_;
     std::mutex trigger_engine_mutex_;
 };
