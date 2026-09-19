@@ -88,6 +88,14 @@ static void apply_control_dark_theme(HWND hwnd) {
     SetWindowTheme(hwnd, L"DarkMode_Explorer", NULL);
 }
 
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
+
 void apply_window_dark_titlebar(HWND hwnd) {
     if (!hwnd) return;
     BOOL use_dark_mode = TRUE;
@@ -100,6 +108,9 @@ void apply_window_dark_titlebar(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption_color, sizeof(caption_color));
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text_color, sizeof(text_color));
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_color, sizeof(border_color));
+
+    DWORD corner_pref = DWMWCP_ROUND;
+    (void)DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner_pref, sizeof(corner_pref));
 }
 
 // Control IDs
@@ -148,6 +159,7 @@ constexpr int IDC_SET_EDIT_D3D12_PSO       = 2030;
 constexpr int IDC_SET_EDIT_VRAM_DEMOTED    = 2031;
 constexpr int IDC_SET_CHK_OSD              = 2032;
 constexpr int IDC_SET_COMBO_OSD_POS        = 2033;
+constexpr int IDC_SET_BTN_CANCEL           = 2034;
 
 // Global Hotkeys
 constexpr int ID_HOTKEY_TOGGLE_CAPTURE = 9001;
@@ -164,7 +176,7 @@ enum class BtnStyle : INT_PTR {
 const COLORREF COLOR_BG              = RGB(17, 19, 23);   // Main Canvas (#111317)
 const COLORREF COLOR_HEADER_BG       = RGB(22, 26, 34);   // Header (#161A22)
 const COLORREF COLOR_HEADER_BORDER   = RGB(38, 45, 60);   // Header Separator (#262D3C)
-const COLORREF COLOR_CARD_BG         = RGB(24, 28, 36);   // Card Panels (#181C24)
+const COLORREF COLOR_CARD_BG         = RGB(28, 33, 44);   // Card Panels (#1C212C - elevated contrast)
 const COLORREF COLOR_CARD_BORDER     = RGB(40, 48, 66);   // Container Outline (#283042)
 const COLORREF COLOR_CARD_DIVIDER    = RGB(36, 43, 58);   // Section Dividers (#242B3A)
 const COLORREF COLOR_INPUT_BG        = RGB(19, 22, 29);   // Input / Inspector Background (#13161D)
@@ -188,6 +200,7 @@ const COLORREF COLOR_ACCENT_EMERALD  = RGB(16, 185, 129); // Fluent Emerald (#10
 const COLORREF COLOR_ACCENT_DANGER   = RGB(239, 68, 68);  // Refined Crimson (#EF4444)
 const COLORREF COLOR_ACCENT_AMB      = RGB(245, 158, 11); // Amber / Warning (#F59E0B)
 const COLORREF COLOR_ACCENT_CYAN     = RGB(56, 189, 248); // Sky / Info (#38BDF8)
+const COLORREF COLOR_ACCENT_PURPLE   = RGB(168, 85, 247); // Purple / DWM (#A855F7)
 
 // Stored Report Item
 struct StutterRecord {
@@ -237,6 +250,13 @@ struct GdiThemeCache {
     HBRUSH br_btn_quick_hover{nullptr};
     HBRUSH br_btn_quick_pressed{nullptr};
     HBRUSH br_btn_disabled{nullptr};
+
+    // Cached Attribution & Iconography Brushes
+    HBRUSH br_attr_game_engine{nullptr};
+    HBRUSH br_attr_dwm_composition{nullptr};
+    HBRUSH br_attr_external_contention{nullptr};
+    HBRUSH br_attr_unknown{nullptr};
+    HBRUSH br_beacon_idle{nullptr};
 
     HPEN pen_header_border{nullptr};
     HPEN pen_card_border{nullptr};
@@ -306,6 +326,13 @@ struct GdiThemeCache {
         pen_btn_quick_hover = CreatePen(PS_SOLID, 1, RGB(65, 78, 105));
         pen_btn_quick_pressed = CreatePen(PS_SOLID, 1, RGB(42, 50, 68));
 
+        // Cached Attribution & Iconography Brushes
+        br_attr_game_engine = CreateSolidBrush(RGB(245, 158, 11));
+        br_attr_dwm_composition = CreateSolidBrush(RGB(168, 85, 247));
+        br_attr_external_contention = CreateSolidBrush(RGB(239, 68, 68));
+        br_attr_unknown = CreateSolidBrush(RGB(100, 116, 139));
+        br_beacon_idle = CreateSolidBrush(RGB(75, 85, 99));
+
         // Buttons: Disabled
         br_btn_disabled = CreateSolidBrush(RGB(20, 23, 31));
         pen_btn_disabled = CreatePen(PS_SOLID, 1, RGB(32, 38, 50));
@@ -329,7 +356,9 @@ struct GdiThemeCache {
             &br_btn_danger, &br_btn_danger_hover, &br_btn_danger_pressed,
             &br_btn_slate, &br_btn_slate_hover, &br_btn_slate_pressed,
             &br_btn_quick, &br_btn_quick_hover, &br_btn_quick_pressed,
-            &br_btn_disabled
+            &br_btn_disabled,
+            &br_attr_game_engine, &br_attr_dwm_composition,
+            &br_attr_external_contention, &br_attr_unknown, &br_beacon_idle
         };
         for (auto* b : brushes) {
             if (!*b) *b = default_brush;
@@ -375,6 +404,11 @@ struct GdiThemeCache {
         if (br_btn_quick_hover) DeleteObject(br_btn_quick_hover);
         if (br_btn_quick_pressed) DeleteObject(br_btn_quick_pressed);
         if (br_btn_disabled) DeleteObject(br_btn_disabled);
+        if (br_attr_game_engine) DeleteObject(br_attr_game_engine);
+        if (br_attr_dwm_composition) DeleteObject(br_attr_dwm_composition);
+        if (br_attr_external_contention) DeleteObject(br_attr_external_contention);
+        if (br_attr_unknown) DeleteObject(br_attr_unknown);
+        if (br_beacon_idle) DeleteObject(br_beacon_idle);
 
         if (pen_header_border) DeleteObject(pen_header_border);
         if (pen_card_border) DeleteObject(pen_card_border);
@@ -741,6 +775,37 @@ static void save_user_settings() {
 // -----------------------------------------------------------------------------
 // Settings Dialog Implementation
 // -----------------------------------------------------------------------------
+struct SettingsSnapshot {
+    std::wstring hotkey_str;
+    bool sound{false};
+    bool redact{false};
+    bool audio{false};
+    bool auto_save{false};
+    std::wstring auto_save_dir;
+    bool osd{false};
+    int osd_pos{0};
+    int tier{0};
+    std::wstring pre_win;
+    std::wstring post_win;
+    std::wstring cooldown;
+    int buffer_sel{0};
+    std::wstring dpc;
+    std::wstring isr;
+    std::wstring disk;
+    std::wstring cswitch;
+    std::wstring smi;
+    std::wstring mem_alloc;
+    std::wstring mem_trim;
+    std::wstring mem_phys;
+    std::wstring d3d12_pso;
+    std::wstring vram_demoted;
+    int trig_mode{0};
+    std::wstring target_fps;
+    std::wstring spike_mult;
+    std::wstring min_delta;
+    bool judder{false};
+};
+
 struct SettingsDialogState {
     UINT hotkey_vk{VK_F11};
     UINT hotkey_mods{MOD_CONTROL};
@@ -779,16 +844,20 @@ struct SettingsDialogState {
     HWND h_edit_min_delta{nullptr};
     HWND h_chk_judder{nullptr};
     HWND h_btn_reset{nullptr};
+    HWND h_btn_cancel{nullptr};
     HWND h_btn_save{nullptr};
 
-    // Synchronized Hit-Testing Rectangles for Checkbox Labels
+    // Synchronized Hit-Testing Rectangles for Master Banner & Checkbox Labels
+    RECT rc_banner{};
+    RECT rc_lbl_adv{};
     RECT rc_lbl_snd{};
     RECT rc_lbl_rd{};
     RECT rc_lbl_aud{};
     RECT rc_lbl_auto_save{};
     RECT rc_lbl_osd{};
-    RECT rc_lbl_adv{};
     RECT rc_lbl_judder{};
+
+    SettingsSnapshot initial_snapshot{};
 };
 
 // Common helper: Dynamically vertically centers text in multiline edit controls based on font metrics
@@ -878,6 +947,18 @@ static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM 
         case WM_PAINT: {
             LRESULT res = DefSubclassProc(hwnd, uMsg, wParam, lParam);
             HideCaret(hwnd);
+            HDC hdc = GetDC(hwnd);
+            if (hdc) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
+                HGDIOBJ old_pen = SelectObject(hdc, pen);
+                HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
+                SelectObject(hdc, old_br);
+                SelectObject(hdc, old_pen);
+                ReleaseDC(hwnd, hdc);
+            }
             return res;
         }
 
@@ -961,29 +1042,80 @@ static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM 
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-static void update_advanced_controls_enablement(SettingsDialogState* state) {
+static std::wstring get_ctrl_text(HWND hwnd) {
+    if (!hwnd) return L"";
+    int len = GetWindowTextLengthW(hwnd);
+    if (len <= 0) return L"";
+    std::wstring s(len + 1, 0);
+    GetWindowTextW(hwnd, s.data(), len + 1);
+    s.resize(len);
+    return s;
+}
+
+static bool is_settings_dirty(SettingsDialogState* state) {
+    if (!state) return false;
+    const auto& snap = state->initial_snapshot;
+    if (get_ctrl_text(state->h_hotkey_edit) != snap.hotkey_str) return true;
+    if ((SendMessageW(state->h_chk_sound, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.sound) return true;
+    if ((SendMessageW(state->h_chk_redact, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.redact) return true;
+    if ((SendMessageW(state->h_chk_audio, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.audio) return true;
+    if ((SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.auto_save) return true;
+    if (get_ctrl_text(state->h_edit_auto_save) != snap.auto_save_dir) return true;
+    if ((SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.osd) return true;
+    if (static_cast<int>(SendMessageW(state->h_combo_osd_pos, CB_GETCURSEL, 0, 0)) != snap.osd_pos) return true;
+    if (static_cast<int>(SendMessageW(state->h_combo_tier, CB_GETCURSEL, 0, 0)) != snap.tier) return true;
+    if (get_ctrl_text(state->h_edit_pre_win) != snap.pre_win) return true;
+    if (get_ctrl_text(state->h_edit_post_win) != snap.post_win) return true;
+    if (get_ctrl_text(state->h_edit_cooldown) != snap.cooldown) return true;
+    if (static_cast<int>(SendMessageW(state->h_combo_buffer, CB_GETCURSEL, 0, 0)) != snap.buffer_sel) return true;
+    if (get_ctrl_text(state->h_edit_dpc) != snap.dpc) return true;
+    if (get_ctrl_text(state->h_edit_isr) != snap.isr) return true;
+    if (get_ctrl_text(state->h_edit_disk) != snap.disk) return true;
+    if (get_ctrl_text(state->h_edit_cswitch) != snap.cswitch) return true;
+    if (get_ctrl_text(state->h_edit_smi) != snap.smi) return true;
+    if (get_ctrl_text(state->h_edit_mem_alloc) != snap.mem_alloc) return true;
+    if (get_ctrl_text(state->h_edit_mem_trim) != snap.mem_trim) return true;
+    if (get_ctrl_text(state->h_edit_mem_phys) != snap.mem_phys) return true;
+    if (get_ctrl_text(state->h_edit_d3d12_pso) != snap.d3d12_pso) return true;
+    if (get_ctrl_text(state->h_edit_vram_demoted) != snap.vram_demoted) return true;
+    if (static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0)) != snap.trig_mode) return true;
+    if (get_ctrl_text(state->h_edit_target_fps) != snap.target_fps) return true;
+    if (get_ctrl_text(state->h_edit_spike_mult) != snap.spike_mult) return true;
+    if (get_ctrl_text(state->h_edit_min_delta) != snap.min_delta) return true;
+    if ((SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.judder) return true;
+    return false;
+}
+
+static void update_settings_dependencies(SettingsDialogState* state) {
     if (!state) return;
-    BOOL enable = state->advanced_unlocked ? TRUE : FALSE;
-    EnableWindow(state->h_combo_tier, enable);
-    EnableWindow(state->h_edit_pre_win, enable);
-    EnableWindow(state->h_edit_post_win, enable);
-    EnableWindow(state->h_edit_cooldown, enable);
-    EnableWindow(state->h_combo_buffer, enable);
-    EnableWindow(state->h_edit_dpc, enable);
-    EnableWindow(state->h_edit_isr, enable);
-    EnableWindow(state->h_edit_disk, enable);
-    EnableWindow(state->h_edit_cswitch, enable);
-    EnableWindow(state->h_edit_smi, enable);
-    EnableWindow(state->h_edit_mem_alloc, enable);
-    EnableWindow(state->h_edit_mem_trim, enable);
-    EnableWindow(state->h_edit_mem_phys, enable);
-    EnableWindow(state->h_edit_d3d12_pso, enable);
-    EnableWindow(state->h_edit_vram_demoted, enable);
-    EnableWindow(state->h_combo_trig_mode, enable);
-    EnableWindow(state->h_edit_target_fps, enable);
-    EnableWindow(state->h_edit_spike_mult, enable);
-    EnableWindow(state->h_edit_min_delta, enable);
-    EnableWindow(state->h_chk_judder, enable);
+    bool auto_save_enabled = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    EnableWindow(state->h_edit_auto_save, auto_save_enabled ? TRUE : FALSE);
+    EnableWindow(state->h_btn_browse_auto_save, auto_save_enabled ? TRUE : FALSE);
+
+    bool osd_enabled = (SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    EnableWindow(state->h_combo_osd_pos, osd_enabled ? TRUE : FALSE);
+
+    BOOL enable_adv = state->advanced_unlocked ? TRUE : FALSE;
+    EnableWindow(state->h_combo_tier, enable_adv);
+    EnableWindow(state->h_edit_pre_win, enable_adv);
+    EnableWindow(state->h_edit_post_win, enable_adv);
+    EnableWindow(state->h_edit_cooldown, enable_adv);
+    EnableWindow(state->h_combo_buffer, enable_adv);
+    EnableWindow(state->h_edit_dpc, enable_adv);
+    EnableWindow(state->h_edit_isr, enable_adv);
+    EnableWindow(state->h_edit_disk, enable_adv);
+    EnableWindow(state->h_edit_cswitch, enable_adv);
+    EnableWindow(state->h_edit_smi, enable_adv);
+    EnableWindow(state->h_edit_mem_alloc, enable_adv);
+    EnableWindow(state->h_edit_mem_trim, enable_adv);
+    EnableWindow(state->h_edit_mem_phys, enable_adv);
+    EnableWindow(state->h_edit_d3d12_pso, enable_adv);
+    EnableWindow(state->h_edit_vram_demoted, enable_adv);
+    EnableWindow(state->h_combo_trig_mode, enable_adv);
+    EnableWindow(state->h_edit_target_fps, enable_adv);
+    EnableWindow(state->h_edit_spike_mult, enable_adv);
+    EnableWindow(state->h_edit_min_delta, enable_adv);
+    EnableWindow(state->h_chk_judder, enable_adv);
 
     InvalidateRect(state->h_combo_tier, NULL, TRUE);
     InvalidateRect(state->h_combo_buffer, NULL, TRUE);
@@ -1005,6 +1137,18 @@ static void update_advanced_controls_enablement(SettingsDialogState* state) {
     InvalidateRect(state->h_edit_spike_mult, NULL, TRUE);
     InvalidateRect(state->h_edit_min_delta, NULL, TRUE);
     InvalidateRect(state->h_chk_judder, NULL, TRUE);
+}
+
+static bool confirm_discard_if_dirty(HWND hwnd, SettingsDialogState* state) {
+    if (!state) return true;
+    if (is_settings_dirty(state)) {
+        int res = MessageBoxW(hwnd,
+            L"You have unsaved changes in Settings.\n\nDo you want to discard them?",
+            L"Discard Changes",
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        return (res == IDYES);
+    }
+    return true;
 }
 
 static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
@@ -1029,7 +1173,7 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     const wchar_t* txt_aud = L"Enable Audio Glitch Trigger";
     const wchar_t* txt_as = L"Auto-save JSON reports to folder:";
     const wchar_t* txt_osd = L"Enable In-Game OSD Toast";
-    const wchar_t* txt_adv = L"Unlock Advanced Engine & Threshold Settings";
+    const wchar_t* txt_adv = L"Unlock Advanced Settings";
     const wchar_t* txt_jud = L"Enable Presentation Judder Detection";
 
     SIZE sz_snd{}, sz_rd{}, sz_aud{}, sz_as{}, sz_osd{}, sz_adv{}, sz_jud{};
@@ -1044,143 +1188,151 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     SelectObject(hdc, old_font);
     ReleaseDC(hwnd, hdc);
 
-    // Explicit Card Dimensions
-    const int c1_h = scale_dpi(228);
-    const int c2_h = scale_dpi(400);
-    const int c3_h = scale_dpi(228);
-    [[maybe_unused]] const int c4_h = scale_dpi(400);
+    double v_scale = 1.0;
+    int target_h = scale_dpi(564);
+    if (client_rc.bottom < target_h) {
+        v_scale = (std::max)(0.85, static_cast<double>(client_rc.bottom) / static_cast<double>(target_h));
+    }
+    auto scale_y = [v_scale](int y) -> int {
+        return static_cast<int>(scale_dpi(y) * v_scale + 0.5);
+    };
+    int ctrl_h = (std::max)(scale_dpi(18), scale_y(24));
 
     // ==========================================
-    // LEFT COLUMN: Card 1 (General Preferences)
+    // LEFT COLUMN: Card 1 (General Preferences) (Y: 16, H: 236)
     // ==========================================
     const int c1_x = c_left_x;
-    const int c1_y = scale_dpi(14);
+    const int c1_y = scale_y(16);
     const int c1_w = col_w;
 
-    int r1_y = c1_y + scale_dpi(28);
-    MoveWindow(state->h_hotkey_edit, c1_x + scale_dpi(116), r1_y, scale_dpi(105), scale_dpi(26), TRUE);
+    int r1_y = c1_y + scale_y(30);
+    MoveWindow(state->h_hotkey_edit, c1_x + scale_dpi(140), r1_y, scale_dpi(110), ctrl_h, TRUE);
     apply_edit_centered_padding(state->h_hotkey_edit);
 
-    MoveWindow(state->h_chk_sound, c1_x + scale_dpi(232), r1_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_snd = { c1_x + scale_dpi(254), r1_y, (std::min<int>)(c1_x + scale_dpi(254) + static_cast<int>(sz_snd.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(8)), r1_y + scale_dpi(26) };
+    int r2_y = c1_y + scale_y(58);
+    MoveWindow(state->h_chk_sound, c1_x + scale_dpi(14), r2_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_snd = { c1_x + scale_dpi(32), r2_y, (std::min<int>)(c1_x + scale_dpi(32) + static_cast<int>(sz_snd.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(14)), r2_y + ctrl_h };
 
-    int r2_y = c1_y + scale_dpi(56);
-    MoveWindow(state->h_chk_redact, c1_x + scale_dpi(14), r2_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_rd = { c1_x + scale_dpi(38), r2_y, (std::min<int>)(c1_x + scale_dpi(38) + static_cast<int>(sz_rd.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(8)), r2_y + scale_dpi(24) };
+    int r3_y = c1_y + scale_y(86);
+    MoveWindow(state->h_chk_redact, c1_x + scale_dpi(14), r3_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_rd = { c1_x + scale_dpi(32), r3_y, (std::min<int>)(c1_x + scale_dpi(32) + static_cast<int>(sz_rd.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(14)), r3_y + ctrl_h };
 
-    int r3_y = c1_y + scale_dpi(84);
-    MoveWindow(state->h_chk_audio, c1_x + scale_dpi(14), r3_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_aud = { c1_x + scale_dpi(38), r3_y, (std::min<int>)(c1_x + scale_dpi(38) + static_cast<int>(sz_aud.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(8)), r3_y + scale_dpi(24) };
+    int r4_y = c1_y + scale_y(114);
+    MoveWindow(state->h_chk_audio, c1_x + scale_dpi(14), r4_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_aud = { c1_x + scale_dpi(32), r4_y, (std::min<int>)(c1_x + scale_dpi(32) + static_cast<int>(sz_aud.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(14)), r4_y + ctrl_h };
 
-    int r4_y = c1_y + scale_dpi(112);
-    MoveWindow(state->h_chk_auto_save, c1_x + scale_dpi(14), r4_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_auto_save = { c1_x + scale_dpi(38), r4_y, (std::min<int>)(c1_x + scale_dpi(38) + static_cast<int>(sz_as.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(8)), r4_y + scale_dpi(24) };
+    int r5_y = c1_y + scale_y(142);
+    MoveWindow(state->h_chk_auto_save, c1_x + scale_dpi(14), r5_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_auto_save = { c1_x + scale_dpi(32), r5_y, (std::min<int>)(c1_x + scale_dpi(32) + static_cast<int>(sz_as.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(14)), r5_y + ctrl_h };
 
-    int r5_y = c1_y + scale_dpi(142);
+    int r6_y = c1_y + scale_y(170);
     int browse_w = scale_dpi(66);
-    int edit_as_w = c1_w - scale_dpi(28) - browse_w - scale_dpi(8);
-    MoveWindow(state->h_edit_auto_save, c1_x + scale_dpi(14), r5_y, edit_as_w, scale_dpi(24), TRUE);
-    RECT rc_as = { scale_dpi(4), scale_dpi(3), edit_as_w - scale_dpi(4), scale_dpi(24) };
+    int edit_as_x = c1_x + scale_dpi(32);
+    int edit_as_w = c1_w - scale_dpi(32) - scale_dpi(14) - browse_w - scale_dpi(8);
+    MoveWindow(state->h_edit_auto_save, edit_as_x, r6_y, edit_as_w, ctrl_h, TRUE);
+    RECT rc_as = { scale_dpi(4), scale_dpi(3), edit_as_w - scale_dpi(4), ctrl_h };
     SendMessageW(state->h_edit_auto_save, EM_SETRECTNP, 0, (LPARAM)&rc_as);
-    MoveWindow(state->h_btn_browse_auto_save, c1_x + scale_dpi(14) + edit_as_w + scale_dpi(8), r5_y, browse_w, scale_dpi(24), TRUE);
+    SendMessageW(state->h_edit_auto_save, EM_SETCUEBANNER, (WPARAM)FALSE, (LPARAM)L"Default: %LOCALAPPDATA%\\Stuttometer\\Reports");
+    MoveWindow(state->h_btn_browse_auto_save, edit_as_x + edit_as_w + scale_dpi(8), r6_y, browse_w, ctrl_h, TRUE);
 
-    int r6_osd_y = c1_y + scale_dpi(170);
-    MoveWindow(state->h_chk_osd, c1_x + scale_dpi(14), r6_osd_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_osd = { c1_x + scale_dpi(38), r6_osd_y, (std::min<int>)(c1_x + scale_dpi(38) + static_cast<int>(sz_osd.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(8)), r6_osd_y + scale_dpi(24) };
-
-    int r7_osd_y = c1_y + scale_dpi(198);
-    MoveWindow(state->h_combo_osd_pos, c1_x + scale_dpi(108), r7_osd_y + scale_dpi(1), scale_dpi(150), scale_dpi(150), TRUE);
-
-    // ==========================================
-    // LEFT COLUMN: Card 2 (Frame Pacing & Dynamic Triggers)
-    // ==========================================
-    const int c2_x = c_left_x;
-    const int c2_y = c1_y + c1_h + gap;
-    const int c2_w = col_w;
-
-    int p6_y = c2_y + scale_dpi(32);
-    MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(110), p6_y + scale_dpi(2), c2_w - scale_dpi(124), scale_dpi(150), TRUE);
-
-    int p7_y = c2_y + scale_dpi(68);
-    MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(150), p7_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int p8_y = c2_y + scale_dpi(102);
-    MoveWindow(state->h_edit_spike_mult, c2_x + scale_dpi(150), p8_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int p9_y = c2_y + scale_dpi(136);
-    MoveWindow(state->h_edit_min_delta, c2_x + scale_dpi(150), p9_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int p10_y = c2_y + scale_dpi(170);
-    MoveWindow(state->h_chk_judder, c2_x + scale_dpi(14), p10_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_judder = { c2_x + scale_dpi(38), p10_y, (std::min<int>)(c2_x + scale_dpi(38) + static_cast<int>(sz_jud.cx) + scale_dpi(6), c2_x + c2_w - scale_dpi(8)), p10_y + scale_dpi(26) };
+    int r7_osd_y = c1_y + scale_y(198);
+    MoveWindow(state->h_chk_osd, c1_x + scale_dpi(14), r7_osd_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_osd = { c1_x + scale_dpi(32), r7_osd_y, c1_x + scale_dpi(216), r7_osd_y + ctrl_h };
+    MoveWindow(state->h_combo_osd_pos, c1_x + scale_dpi(280), r7_osd_y + scale_dpi(1), c1_w - scale_dpi(294), scale_dpi(150), TRUE);
 
     // ==========================================
-    // RIGHT COLUMN: Card 3 (Advanced Engine Tuning)
+    // RIGHT COLUMN: Card 3 (Advanced Engine & Buffer Tuning) (Y: 16, H: 236)
     // ==========================================
     const int c3_x = c_right_x;
-    const int c3_y = scale_dpi(14);
+    const int c3_y = scale_y(16);
     const int c3_w = col_w;
 
-    int r11_y = c3_y + scale_dpi(30);
-    MoveWindow(state->h_chk_advanced, c3_x + scale_dpi(14), r11_y + scale_dpi(4), scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_adv = { c3_x + scale_dpi(38), r11_y, (std::min<int>)(c3_x + scale_dpi(38) + static_cast<int>(sz_adv.cx) + scale_dpi(6), c3_x + c3_w - scale_dpi(8)), r11_y + scale_dpi(26) };
+    int r10_y = c3_y + scale_y(30);
+    MoveWindow(state->h_combo_tier, c3_x + scale_dpi(140), r10_y + scale_dpi(1), c3_w - scale_dpi(154), scale_dpi(200), TRUE);
 
-    int r12_y = c3_y + scale_dpi(76);
-    MoveWindow(state->h_combo_tier, c3_x + scale_dpi(110), r12_y + scale_dpi(2), c3_w - scale_dpi(124), scale_dpi(200), TRUE);
+    int r11_y = c3_y + scale_y(64);
+    MoveWindow(state->h_combo_buffer, c3_x + scale_dpi(140), r11_y + scale_dpi(1), c3_w - scale_dpi(154), scale_dpi(200), TRUE);
 
-    int r13_y = c3_y + scale_dpi(108);
-    MoveWindow(state->h_edit_pre_win, c3_x + scale_dpi(66), r13_y + scale_dpi(1), scale_dpi(46), scale_dpi(24), TRUE);
-    MoveWindow(state->h_edit_post_win, c3_x + scale_dpi(150), r13_y + scale_dpi(1), scale_dpi(40), scale_dpi(24), TRUE);
-    MoveWindow(state->h_edit_cooldown, c3_x + scale_dpi(258), r13_y + scale_dpi(1), scale_dpi(48), scale_dpi(24), TRUE);
+    int r12_y = c3_y + scale_y(128);
+    MoveWindow(state->h_edit_pre_win, c3_x + scale_dpi(140), r12_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
 
-    int r14_y = c3_y + scale_dpi(138);
-    MoveWindow(state->h_combo_buffer, c3_x + scale_dpi(110), r14_y + scale_dpi(2), c3_w - scale_dpi(124), scale_dpi(200), TRUE);
+    int r13_y = c3_y + scale_y(160);
+    MoveWindow(state->h_edit_post_win, c3_x + scale_dpi(140), r13_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
+
+    int r14_y = c3_y + scale_y(192);
+    MoveWindow(state->h_edit_cooldown, c3_x + scale_dpi(140), r14_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
 
     // ==========================================
-    // RIGHT COLUMN: Card 4 (Correlation Anomaly Thresholds)
+    // LEFT COLUMN: Card 2 (Frame Pacing & Judder Triggers) (Y: 266, H: 232)
+    // ==========================================
+    const int c2_x = c_left_x;
+    const int c2_y = scale_y(266);
+    const int c2_w = col_w;
+
+    int p1_y = c2_y + scale_y(36);
+    MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(140), p1_y + scale_dpi(1), c2_w - scale_dpi(154), scale_dpi(150), TRUE);
+
+    int p2_y = c2_y + scale_y(68);
+    MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(140), p2_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
+
+    int p3_y = c2_y + scale_y(100);
+    MoveWindow(state->h_edit_spike_mult, c2_x + scale_dpi(140), p3_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
+
+    int p4_y = c2_y + scale_y(132);
+    MoveWindow(state->h_edit_min_delta, c2_x + scale_dpi(140), p4_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
+
+    int p5_y = c2_y + scale_y(164);
+    MoveWindow(state->h_chk_judder, c2_x + scale_dpi(14), p5_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_judder = { c2_x + scale_dpi(32), p5_y, (std::min<int>)(c2_x + scale_dpi(32) + static_cast<int>(sz_jud.cx) + scale_dpi(6), c2_x + c2_w - scale_dpi(14)), p5_y + ctrl_h };
+
+    // ==========================================
+    // RIGHT COLUMN: Card 4 (Kernel & System Anomaly Thresholds) (Y: 266, H: 232)
+    // Organized into 2 balanced sub-columns
     // ==========================================
     const int c4_x = c_right_x;
-    const int c4_y = c3_y + c3_h + gap;
+    const int c4_y = scale_y(266);
 
-    int t1_y = c4_y + scale_dpi(30);
-    MoveWindow(state->h_edit_dpc, c4_x + scale_dpi(160), t1_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
+    const int col1_edit_x = c4_x + scale_dpi(134);
+    const int col2_edit_x = c4_x + scale_dpi(354);
+    const int th_edit_w = scale_dpi(48);
 
-    int t2_y = c4_y + scale_dpi(63);
-    MoveWindow(state->h_edit_isr, c4_x + scale_dpi(160), t2_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
+    int k1_y = c4_y + scale_y(52);
+    int k2_y = c4_y + scale_y(84);
+    int k3_y = c4_y + scale_y(116);
+    int k4_y = c4_y + scale_y(148);
+    int k5_y = c4_y + scale_y(180);
 
-    int t3_y = c4_y + scale_dpi(96);
-    MoveWindow(state->h_edit_disk, c4_x + scale_dpi(160), t3_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
+    // Left Sub-Column (CPU & GPU Pipeline)
+    MoveWindow(state->h_edit_dpc, col1_edit_x, k1_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_isr, col1_edit_x, k2_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_cswitch, col1_edit_x, k3_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_smi, col1_edit_x, k4_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_d3d12_pso, col1_edit_x, k5_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
 
-    int t4_y = c4_y + scale_dpi(129);
-    MoveWindow(state->h_edit_cswitch, c4_x + scale_dpi(160), t4_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int t5_y = c4_y + scale_dpi(162);
-    MoveWindow(state->h_edit_smi, c4_x + scale_dpi(160), t5_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int t6_y = c4_y + scale_dpi(195);
-    MoveWindow(state->h_edit_mem_alloc, c4_x + scale_dpi(160), t6_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int t7_y = c4_y + scale_dpi(228);
-    MoveWindow(state->h_edit_mem_trim, c4_x + scale_dpi(160), t7_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int t8_y = c4_y + scale_dpi(261);
-    MoveWindow(state->h_edit_mem_phys, c4_x + scale_dpi(160), t8_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int t9_y = c4_y + scale_dpi(294);
-    MoveWindow(state->h_edit_d3d12_pso, c4_x + scale_dpi(160), t9_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
-
-    int t10_y = c4_y + scale_dpi(327);
-    MoveWindow(state->h_edit_vram_demoted, c4_x + scale_dpi(160), t10_y + scale_dpi(1), scale_dpi(55), scale_dpi(24), TRUE);
+    // Right Sub-Column (Memory & Storage)
+    MoveWindow(state->h_edit_disk, col2_edit_x, k1_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_mem_alloc, col2_edit_x, k2_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_mem_trim, col2_edit_x, k3_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_mem_phys, col2_edit_x, k4_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
+    MoveWindow(state->h_edit_vram_demoted, col2_edit_x, k5_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
 
     // ==========================================
-    // FOOTER BUTTONS
+    // FOOTER (Y: 514, H: 34)
     // ==========================================
-    const int f_y = c2_y + c2_h + gap;
-    const int f_h = scale_dpi(32);
+    const int f_y = scale_y(514);
+    const int f_h = (std::max)(scale_dpi(28), scale_y(34));
     MoveWindow(state->h_btn_reset, margin, f_y, scale_dpi(130), f_h, TRUE);
 
+    int chk_adv_x = margin + scale_dpi(130) + scale_dpi(20);
+    MoveWindow(state->h_chk_advanced, chk_adv_x, f_y + (f_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_adv = { chk_adv_x + scale_dpi(20), f_y, chk_adv_x + scale_dpi(20) + static_cast<int>(sz_adv.cx) + scale_dpi(8), f_y + f_h };
+
     int save_w = scale_dpi(120);
+    int cancel_w = scale_dpi(100);
+    int btn_gap = scale_dpi(10);
     int save_x = width - margin - save_w;
+    int cancel_x = save_x - btn_gap - cancel_w;
+    MoveWindow(state->h_btn_cancel, cancel_x, f_y, cancel_w, f_h, TRUE);
     MoveWindow(state->h_btn_save, save_x, f_y, save_w, f_h, TRUE);
 }
 
@@ -1203,6 +1355,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
     switch (uMsg) {
         case WM_CLOSE: {
+            if (!confirm_discard_if_dirty(hwnd, state)) {
+                return 0;
+            }
             dismiss_settings_dialog(hwnd);
             return 0;
         }
@@ -1238,6 +1393,8 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             state->h_edit_auto_save = CreateWindowExW(0, L"EDIT", g_settings_config.output_dir.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_AUTO_SAVE, NULL, NULL);
             SendMessageW(state->h_edit_auto_save, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             apply_control_dark_theme(state->h_edit_auto_save);
+            SetWindowSubclass(state->h_edit_auto_save, EditCenteredSubclassProc, IDC_SET_EDIT_AUTO_SAVE, 0);
+            SendMessageW(state->h_edit_auto_save, EM_SETCUEBANNER, (WPARAM)FALSE, (LPARAM)L"Default: %LOCALAPPDATA%\\Stuttometer\\Reports");
 
             state->h_btn_browse_auto_save = CreateWindowExW(0, L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_BTN_BROWSE_AUTO_SAVE, NULL, NULL);
             SetPropW(state->h_btn_browse_auto_save, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::QuickAction));
@@ -1388,9 +1545,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SendMessageW(state->h_combo_trig_mode, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             SendMessageW(state->h_combo_trig_mode, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
             SendMessageW(state->h_combo_trig_mode, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
-            SendMessageW(state->h_combo_trig_mode, CB_ADDSTRING, 0, (LPARAM)L"Hybrid (Relative Spike + Judder + Static Floor) [Default]");
-            SendMessageW(state->h_combo_trig_mode, CB_ADDSTRING, 0, (LPARAM)L"Dynamic Only (Pure Relative & Judder Triggers)");
-            SendMessageW(state->h_combo_trig_mode, CB_ADDSTRING, 0, (LPARAM)L"Static Only (Legacy Fixed Threshold)");
+            SendMessageW(state->h_combo_trig_mode, CB_ADDSTRING, 0, (LPARAM)L"Hybrid (Relative + Judder) [Default]");
+            SendMessageW(state->h_combo_trig_mode, CB_ADDSTRING, 0, (LPARAM)L"Dynamic Only (Relative & Judder)");
+            SendMessageW(state->h_combo_trig_mode, CB_ADDSTRING, 0, (LPARAM)L"Static FPS Floor Only");
             int tm_sel = (g_settings_config.frame_trigger_mode == FrameTriggerMode::DYNAMIC_ONLY) ? 1 : ((g_settings_config.frame_trigger_mode == FrameTriggerMode::STATIC_ONLY) ? 2 : 0);
             SendMessageW(state->h_combo_trig_mode, CB_SETCURSEL, tm_sel, 0);
             apply_control_dark_theme(state->h_combo_trig_mode);
@@ -1423,12 +1580,16 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SetPropW(state->h_btn_reset, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
             SetWindowSubclass(state->h_btn_reset, DarkButtonSubclassProc, IDC_SET_BTN_RESET, 0);
 
+            state->h_btn_cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_BTN_CANCEL, NULL, NULL);
+            SetPropW(state->h_btn_cancel, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
+            SetWindowSubclass(state->h_btn_cancel, DarkButtonSubclassProc, IDC_SET_BTN_CANCEL, 0);
+
             state->h_btn_save = CreateWindowExW(0, L"BUTTON", L"Save & Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_BTN_SAVE, NULL, NULL);
             SetPropW(state->h_btn_save, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::PrimaryEmerald));
             SetWindowSubclass(state->h_btn_save, DarkButtonSubclassProc, IDC_SET_BTN_SAVE, 0);
 
             if (!state->h_hotkey_edit || !state->h_chk_sound || !state->h_chk_redact ||
-                !state->h_chk_audio || !state->h_btn_save) {
+                !state->h_chk_audio || !state->h_btn_save || !state->h_btn_cancel) {
                 std::cerr << "[GUI] Error: Failed to allocate essential controls for Settings dialog.\n";
                 delete state;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1436,7 +1597,38 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             }
 
             layout_settings_controls(hwnd, state);
-            update_advanced_controls_enablement(state);
+            update_settings_dependencies(state);
+
+            // Capture initial snapshot for dirty tracking
+            state->initial_snapshot.hotkey_str = get_ctrl_text(state->h_hotkey_edit);
+            state->initial_snapshot.sound = (SendMessageW(state->h_chk_sound, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            state->initial_snapshot.redact = (SendMessageW(state->h_chk_redact, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            state->initial_snapshot.audio = (SendMessageW(state->h_chk_audio, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            state->initial_snapshot.auto_save = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            state->initial_snapshot.auto_save_dir = get_ctrl_text(state->h_edit_auto_save);
+            state->initial_snapshot.osd = (SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            state->initial_snapshot.osd_pos = static_cast<int>(SendMessageW(state->h_combo_osd_pos, CB_GETCURSEL, 0, 0));
+            state->initial_snapshot.tier = static_cast<int>(SendMessageW(state->h_combo_tier, CB_GETCURSEL, 0, 0));
+            state->initial_snapshot.pre_win = get_ctrl_text(state->h_edit_pre_win);
+            state->initial_snapshot.post_win = get_ctrl_text(state->h_edit_post_win);
+            state->initial_snapshot.cooldown = get_ctrl_text(state->h_edit_cooldown);
+            state->initial_snapshot.buffer_sel = static_cast<int>(SendMessageW(state->h_combo_buffer, CB_GETCURSEL, 0, 0));
+            state->initial_snapshot.dpc = get_ctrl_text(state->h_edit_dpc);
+            state->initial_snapshot.isr = get_ctrl_text(state->h_edit_isr);
+            state->initial_snapshot.disk = get_ctrl_text(state->h_edit_disk);
+            state->initial_snapshot.cswitch = get_ctrl_text(state->h_edit_cswitch);
+            state->initial_snapshot.smi = get_ctrl_text(state->h_edit_smi);
+            state->initial_snapshot.mem_alloc = get_ctrl_text(state->h_edit_mem_alloc);
+            state->initial_snapshot.mem_trim = get_ctrl_text(state->h_edit_mem_trim);
+            state->initial_snapshot.mem_phys = get_ctrl_text(state->h_edit_mem_phys);
+            state->initial_snapshot.d3d12_pso = get_ctrl_text(state->h_edit_d3d12_pso);
+            state->initial_snapshot.vram_demoted = get_ctrl_text(state->h_edit_vram_demoted);
+            state->initial_snapshot.trig_mode = static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0));
+            state->initial_snapshot.target_fps = get_ctrl_text(state->h_edit_target_fps);
+            state->initial_snapshot.spike_mult = get_ctrl_text(state->h_edit_spike_mult);
+            state->initial_snapshot.min_delta = get_ctrl_text(state->h_edit_min_delta);
+            state->initial_snapshot.judder = (SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
             return 0;
         }
 
@@ -1462,14 +1654,18 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 } else if (PtInRect(&state->rc_lbl_auto_save, pt)) {
                     BOOL cur = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     SendMessageW(state->h_chk_auto_save, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
+                    update_settings_dependencies(state);
+                    InvalidateRect(hwnd, NULL, TRUE);
                 } else if (PtInRect(&state->rc_lbl_osd, pt)) {
                     BOOL cur = (SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     SendMessageW(state->h_chk_osd, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
+                    update_settings_dependencies(state);
+                    InvalidateRect(hwnd, NULL, TRUE);
                 } else if (PtInRect(&state->rc_lbl_adv, pt)) {
                     BOOL cur = (SendMessageW(state->h_chk_advanced, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     SendMessageW(state->h_chk_advanced, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
                     state->advanced_unlocked = !cur;
-                    update_advanced_controls_enablement(state);
+                    update_settings_dependencies(state);
                     InvalidateRect(hwnd, NULL, TRUE);
                 } else if (PtInRect(&state->rc_lbl_judder, pt) && state->advanced_unlocked) {
                     BOOL cur = (SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1505,6 +1701,17 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             HFONT old_font = static_cast<HFONT>(GetCurrentObject(mem_dc, OBJ_FONT));
 
             FillRect(mem_dc, &client_rc, g_theme.br_bg);
+            SetBkMode(mem_dc, TRANSPARENT);
+
+            double v_scale = 1.0;
+            int target_h = scale_dpi(564);
+            if (height < target_h) {
+                v_scale = (std::max)(0.85, static_cast<double>(height) / static_cast<double>(target_h));
+            }
+            auto scale_y = [v_scale](int y) -> int {
+                return static_cast<int>(scale_dpi(y) * v_scale + 0.5);
+            };
+            int ctrl_h = (std::max)(scale_dpi(18), scale_y(24));
 
             const int margin = scale_dpi(16);
             const int gap = scale_dpi(14);
@@ -1515,300 +1722,243 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             // Card 1: General Preferences (Left Top)
             const int c1_x = c_left_x;
-            const int c1_y = scale_dpi(14);
+            const int c1_y = scale_y(16);
             const int c1_w = col_w;
-            const int c1_h = scale_dpi(228);
-            RoundRect(mem_dc, c1_x, c1_y, c1_x + c1_w, c1_y + c1_h, scale_dpi(10), scale_dpi(10));
-
-            // Card 2: Frame Pacing & Dynamic Triggers (Left Bottom)
-            const int c2_x = c_left_x;
-            const int c2_h = scale_dpi(400);
-            const int c2_y = c1_y + c1_h + gap;
-            const int c2_w = col_w;
-            RoundRect(mem_dc, c2_x, c2_y, c2_x + c2_w, c2_y + c2_h, scale_dpi(10), scale_dpi(10));
+            const int c1_h = scale_y(236);
 
             // Card 3: Advanced Engine Tuning (Right Top)
             const int c3_x = c_right_x;
-            const int c3_y = scale_dpi(14);
+            const int c3_y = scale_y(16);
             const int c3_w = col_w;
-            const int c3_h = scale_dpi(228);
-            RoundRect(mem_dc, c3_x, c3_y, c3_x + c3_w, c3_y + c3_h, scale_dpi(10), scale_dpi(10));
+            const int c3_h = scale_y(236);
 
-            // Card 4: Correlation Anomaly Thresholds (Right Bottom)
+            // Card 2: Frame Pacing & Judder Triggers (Left Bottom)
+            const int c2_x = c_left_x;
+            const int c2_y = scale_y(266);
+            const int c2_w = col_w;
+            const int c2_h = scale_y(232);
+
+            // Card 4: Kernel & System Anomaly Thresholds (Right Bottom)
             const int c4_x = c_right_x;
-            const int c4_h = scale_dpi(400);
-            const int c4_y = c3_y + c3_h + gap;
+            const int c4_y = scale_y(266);
             const int c4_w = col_w;
+            const int c4_h = scale_y(232);
+
+            SelectObject(mem_dc, g_theme.br_card);
+            SelectObject(mem_dc, g_theme.pen_card_border);
+            RoundRect(mem_dc, c1_x, c1_y, c1_x + c1_w, c1_y + c1_h, scale_dpi(10), scale_dpi(10));
+            RoundRect(mem_dc, c3_x, c3_y, c3_x + c3_w, c3_y + c3_h, scale_dpi(10), scale_dpi(10));
+            RoundRect(mem_dc, c2_x, c2_y, c2_x + c2_w, c2_y + c2_h, scale_dpi(10), scale_dpi(10));
             RoundRect(mem_dc, c4_x, c4_y, c4_x + c4_w, c4_y + c4_h, scale_dpi(10), scale_dpi(10));
 
             // Section Headers
-            SetBkMode(mem_dc, TRANSPARENT);
             SelectObject(mem_dc, g_font_ui_sm_bold);
             SetTextColor(mem_dc, COLOR_TEXT_LABEL);
 
             RECT t1 = { c1_x + scale_dpi(14), c1_y + scale_dpi(8), c1_x + c1_w, c1_y + scale_dpi(24) };
             DrawTextW(mem_dc, L"GENERAL PREFERENCES", -1, &t1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT t2 = { c2_x + scale_dpi(14), c2_y + scale_dpi(8), c2_x + c2_w, c2_y + scale_dpi(24) };
-            DrawTextW(mem_dc, L"FRAME PACING & DYNAMIC TRIGGERS", -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
             RECT t3 = { c3_x + scale_dpi(14), c3_y + scale_dpi(8), c3_x + c3_w, c3_y + scale_dpi(24) };
-            DrawTextW(mem_dc, L"ADVANCED ENGINE & BUFFER TUNING", -1, &t3, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(mem_dc, state->advanced_unlocked ? L"ADVANCED ENGINE & BUFFER TUNING" : L"ADVANCED ENGINE & BUFFER TUNING (LOCKED)", -1, &t3, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            RECT t2 = { c2_x + scale_dpi(14), c2_y + scale_dpi(8), c2_x + c2_w, c2_y + scale_dpi(24) };
+            DrawTextW(mem_dc, state->advanced_unlocked ? L"FRAME PACING & JUDDER TRIGGERS" : L"FRAME PACING & JUDDER TRIGGERS (LOCKED)", -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             RECT t4 = { c4_x + scale_dpi(14), c4_y + scale_dpi(8), c4_x + c4_w, c4_y + scale_dpi(24) };
-            DrawTextW(mem_dc, L"CORRELATION ANOMALY THRESHOLDS", -1, &t4, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(mem_dc, state->advanced_unlocked ? L"KERNEL & SYSTEM ANOMALY THRESHOLDS" : L"KERNEL & SYSTEM ANOMALY THRESHOLDS (LOCKED)", -1, &t4, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             // Card 1 Labels (General Preferences)
             SelectObject(mem_dc, g_font_ui_bold);
             SetTextColor(mem_dc, COLOR_TEXT_LABEL);
 
-            int r1_y = c1_y + scale_dpi(28);
-            RECT rc_lbl_hk = { c1_x + scale_dpi(14), r1_y, c1_x + scale_dpi(112), r1_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Capture Hotkey:", -1, &rc_lbl_hk, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            DrawTextW(mem_dc, L"Enable Sound Cues", -1, &state->rc_lbl_snd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            DrawTextW(mem_dc, L"Redact Personal Info (usernames & paths)", -1, &state->rc_lbl_rd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            DrawTextW(mem_dc, L"Enable Audio Glitch Trigger", -1, &state->rc_lbl_aud, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            DrawTextW(mem_dc, L"Auto-save JSON reports to folder:", -1, &state->rc_lbl_auto_save, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            DrawTextW(mem_dc, L"Enable In-Game OSD Toast", -1, &state->rc_lbl_osd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            int r1_y = c1_y + scale_y(30);
+            RECT rc_lbl_hk = { c1_x + scale_dpi(14), r1_y, c1_x + scale_dpi(135), r1_y + ctrl_h };
+            DrawTextW(mem_dc, L"Capture Hotkey:", -1, &rc_lbl_hk, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(mem_dc, L"Enable Sound Cues", -1, &state->rc_lbl_snd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(mem_dc, L"Redact Personal Info (usernames & paths)", -1, &state->rc_lbl_rd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(mem_dc, L"Enable Audio Glitch Trigger", -1, &state->rc_lbl_aud, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(mem_dc, L"Auto-save JSON reports to folder:", -1, &state->rc_lbl_auto_save, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(mem_dc, L"Enable In-Game OSD Toast", -1, &state->rc_lbl_osd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            int r7_osd_y = c1_y + scale_dpi(198);
-            RECT rc_lbl_pos = { c1_x + scale_dpi(38), r7_osd_y, c1_x + scale_dpi(106), r7_osd_y + scale_dpi(24) };
-            DrawTextW(mem_dc, L"Position:", -1, &rc_lbl_pos, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            int r7_osd_y = c1_y + scale_y(198);
+            RECT rc_lbl_pos = { c1_x + scale_dpi(220), r7_osd_y, c1_x + scale_dpi(276), r7_osd_y + ctrl_h };
+            DrawTextW(mem_dc, L"Position:", -1, &rc_lbl_pos, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            // Card 2 Labels (Frame Pacing & Dynamic Triggers)
+            // Card 3 Labels (Advanced Engine & Buffer Tuning)
             COLORREF adv_lbl_color = state->advanced_unlocked ? COLOR_TEXT_LABEL : COLOR_TEXT_MUTED;
             SelectObject(mem_dc, g_font_ui_bold);
             SetTextColor(mem_dc, adv_lbl_color);
 
-            int r4_y = c2_y + scale_dpi(32);
-            int r5_y = c2_y + scale_dpi(68);
-            int r6_y = c2_y + scale_dpi(102);
-            int r7_y = c2_y + scale_dpi(136);
+            int r10_y = c3_y + scale_y(30);
+            RECT rc_lbl_tier = { c3_x + scale_dpi(14), r10_y, c3_x + scale_dpi(136), r10_y + ctrl_h };
+            DrawTextW(mem_dc, L"Provider Tier:", -1, &rc_lbl_tier, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            RECT rc_lbl_tm = { c2_x + scale_dpi(14), r4_y, c2_x + scale_dpi(105), r4_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Trigger Mode:", -1, &rc_lbl_tm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            int r11_y = c3_y + scale_y(64);
+            RECT rc_lbl_buf = { c3_x + scale_dpi(14), r11_y, c3_x + scale_dpi(136), r11_y + ctrl_h };
+            DrawTextW(mem_dc, L"Buffer Capacity:", -1, &rc_lbl_buf, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            RECT rc_lbl_fps = { c2_x + scale_dpi(14), r5_y, c2_x + scale_dpi(144), r5_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Target FPS Floor:", -1, &rc_lbl_fps, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(mem_dc, g_font_ui_sm_bold);
+            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+            RECT rc_sub_win = { c3_x + scale_dpi(14), c3_y + scale_y(100), c3_x + c3_w, c3_y + scale_y(116) };
+            DrawTextW(mem_dc, L"EVENT CAPTURE WINDOWS", -1, &rc_sub_win, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            SelectObject(mem_dc, g_font_ui_bold);
+            SetTextColor(mem_dc, adv_lbl_color);
+
+            int r12_y = c3_y + scale_y(128);
+            RECT rc_lbl_pre = { c3_x + scale_dpi(14), r12_y, c3_x + scale_dpi(136), r12_y + ctrl_h };
+            DrawTextW(mem_dc, L"Pre-Event Window:", -1, &rc_lbl_pre, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            int r13_y = c3_y + scale_y(160);
+            RECT rc_lbl_post = { c3_x + scale_dpi(14), r13_y, c3_x + scale_dpi(136), r13_y + ctrl_h };
+            DrawTextW(mem_dc, L"Post-Event Window:", -1, &rc_lbl_post, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            int r14_y = c3_y + scale_y(192);
+            RECT rc_lbl_cd = { c3_x + scale_dpi(14), r14_y, c3_x + scale_dpi(136), r14_y + ctrl_h };
+            DrawTextW(mem_dc, L"Trigger Cooldown:", -1, &rc_lbl_cd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SelectObject(mem_dc, g_font_ui);
             SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_fps_unit = { c2_x + scale_dpi(212), r5_y, c2_x + c2_w - scale_dpi(8), r5_y + scale_dpi(26) };
+            RECT rc_lbl_pre_unit = { c3_x + scale_dpi(204), r12_y, c3_x + c3_w - scale_dpi(14), r12_y + ctrl_h };
+            DrawTextW(mem_dc, L"50.0 \u2013 1000.0 ms", -1, &rc_lbl_pre_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_post_unit = { c3_x + scale_dpi(204), r13_y, c3_x + c3_w - scale_dpi(14), r13_y + ctrl_h };
+            DrawTextW(mem_dc, L"0.0 \u2013 200.0 ms", -1, &rc_lbl_post_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_cd_unit = { c3_x + scale_dpi(204), r14_y, c3_x + c3_w - scale_dpi(14), r14_y + ctrl_h };
+            DrawTextW(mem_dc, L"100 \u2013 10000 ms", -1, &rc_lbl_cd_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            // Card 2 Labels (Frame Pacing & Judder Triggers)
+            SelectObject(mem_dc, g_font_ui_bold);
+            SetTextColor(mem_dc, adv_lbl_color);
+
+            int p1_y = c2_y + scale_y(36);
+            RECT rc_lbl_tm = { c2_x + scale_dpi(14), p1_y, c2_x + scale_dpi(136), p1_y + ctrl_h };
+            DrawTextW(mem_dc, L"Trigger Mode:", -1, &rc_lbl_tm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            int p2_y = c2_y + scale_y(68);
+            RECT rc_lbl_fps = { c2_x + scale_dpi(14), p2_y, c2_x + scale_dpi(136), p2_y + ctrl_h };
+            DrawTextW(mem_dc, L"Target FPS Floor:", -1, &rc_lbl_fps, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            int p3_y = c2_y + scale_y(100);
+            RECT rc_lbl_sm = { c2_x + scale_dpi(14), p3_y, c2_x + scale_dpi(136), p3_y + ctrl_h };
+            DrawTextW(mem_dc, L"Spike Multiplier:", -1, &rc_lbl_sm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            int p4_y = c2_y + scale_y(132);
+            RECT rc_lbl_md = { c2_x + scale_dpi(14), p4_y, c2_x + scale_dpi(136), p4_y + ctrl_h };
+            DrawTextW(mem_dc, L"Min Spike Delta:", -1, &rc_lbl_md, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            DrawTextW(mem_dc, L"Enable Presentation Judder Detection", -1, &state->rc_lbl_judder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, g_font_ui);
+            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+            RECT rc_lbl_fps_unit = { c2_x + scale_dpi(204), p2_y, c2_x + c2_w - scale_dpi(14), p2_y + ctrl_h };
             DrawTextW(mem_dc, L"10 \u2013 500 FPS", -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_sm = { c2_x + scale_dpi(14), r6_y, c2_x + scale_dpi(144), r6_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Spike Multiplier:", -1, &rc_lbl_sm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_sm_unit = { c2_x + scale_dpi(212), r6_y, c2_x + c2_w - scale_dpi(8), r6_y + scale_dpi(26) };
+            RECT rc_lbl_sm_unit = { c2_x + scale_dpi(204), p3_y, c2_x + c2_w - scale_dpi(14), p3_y + ctrl_h };
             DrawTextW(mem_dc, L"1.2x \u2013 10.0x", -1, &rc_lbl_sm_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_md = { c2_x + scale_dpi(14), r7_y, c2_x + scale_dpi(144), r7_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Min Spike Delta:", -1, &rc_lbl_md, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_md_unit = { c2_x + scale_dpi(212), r7_y, c2_x + c2_w - scale_dpi(8), r7_y + scale_dpi(26) };
+            RECT rc_lbl_md_unit = { c2_x + scale_dpi(204), p4_y, c2_x + c2_w - scale_dpi(14), p4_y + ctrl_h };
             DrawTextW(mem_dc, L"1.0 \u2013 50.0 ms", -1, &rc_lbl_md_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            DrawTextW(mem_dc, L"Enable Presentation Judder Detection", -1, &state->rc_lbl_judder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            // Card 4 Labels (Kernel & System Anomaly Thresholds)
+            SelectObject(mem_dc, g_font_ui_sm_bold);
+            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
 
-            // Card 3: Advanced Unlock Label & Warning Banner
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, COLOR_TEXT_LABEL);
-            DrawTextW(mem_dc, L"Unlock Advanced Engine & Threshold Settings", -1, &state->rc_lbl_adv, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            RECT rc_sub_cpu = { c4_x + scale_dpi(14), c4_y + scale_y(28), c4_x + scale_dpi(220), c4_y + scale_y(44) };
+            DrawTextW(mem_dc, L"CPU & GPU PIPELINE", -1, &rc_sub_cpu, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT rc_warn = { c3_x + scale_dpi(14), c3_y + scale_dpi(54), c3_x + c3_w - scale_dpi(10), c3_y + scale_dpi(72) };
-            SelectObject(mem_dc, g_font_ui);
-            if (state->advanced_unlocked) {
-                SetTextColor(mem_dc, COLOR_ACCENT_AMB);
-                DrawTextW(mem_dc, L"\u26A0 Caution: Alters buffer memory & cutoffs.", -1, &rc_warn, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            } else {
-                SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-                DrawTextW(mem_dc, L"\u2014 Advanced settings locked to recommended defaults.", -1, &rc_warn, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            }
+            RECT rc_sub_mem = { c4_x + scale_dpi(234), c4_y + scale_y(28), c4_x + c4_w - scale_dpi(14), c4_y + scale_y(44) };
+            DrawTextW(mem_dc, L"MEMORY & STORAGE", -1, &rc_sub_mem, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            // Card 3 Controls Labels
             SelectObject(mem_dc, g_font_ui_bold);
             SetTextColor(mem_dc, adv_lbl_color);
 
-            int r10_y = c3_y + scale_dpi(76);
-            int r11_y = c3_y + scale_dpi(108);
-            int r12_y = c3_y + scale_dpi(138);
+            int k1_y = c4_y + scale_y(52);
+            int k2_y = c4_y + scale_y(84);
+            int k3_y = c4_y + scale_y(116);
+            int k4_y = c4_y + scale_y(148);
+            int k5_y = c4_y + scale_y(180);
 
-            RECT rc_lbl_tier = { c3_x + scale_dpi(14), r10_y, c3_x + scale_dpi(105), r10_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Provider Tier:", -1, &rc_lbl_tier, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            // Left Sub-Column Labels (CPU & GPU Pipeline)
+            int col1_lbl_x = c4_x + scale_dpi(14);
+            int col1_lbl_w = scale_dpi(116);
 
-            RECT rc_lbl_pre = { c3_x + scale_dpi(14), r11_y, c3_x + scale_dpi(64), r11_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Pre-Win:", -1, &rc_lbl_pre, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            RECT rc_lbl_dpc = { col1_lbl_x, k1_y, col1_lbl_x + col1_lbl_w, k1_y + ctrl_h };
+            DrawTextW(mem_dc, L"Driver DPC Spike:", -1, &rc_lbl_dpc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            RECT rc_lbl_post = { c3_x + scale_dpi(116), r11_y, c3_x + scale_dpi(148), r11_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Post:", -1, &rc_lbl_post, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            RECT rc_lbl_isr = { col1_lbl_x, k2_y, col1_lbl_x + col1_lbl_w, k2_y + ctrl_h };
+            DrawTextW(mem_dc, L"Driver ISR Spike:", -1, &rc_lbl_isr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            RECT rc_lbl_cd = { c3_x + scale_dpi(195), r11_y, c3_x + scale_dpi(254), r11_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Cooldown:", -1, &rc_lbl_cd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            RECT rc_lbl_cs = { col1_lbl_x, k3_y, col1_lbl_x + col1_lbl_w, k3_y + ctrl_h };
+            DrawTextW(mem_dc, L"CSwitch Preempt:", -1, &rc_lbl_cs, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
+            RECT rc_lbl_smi = { col1_lbl_x, k4_y, col1_lbl_x + col1_lbl_w, k4_y + ctrl_h };
+            DrawTextW(mem_dc, L"Hardware SMI Gap:", -1, &rc_lbl_smi, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_d3d12 = { col1_lbl_x, k5_y, col1_lbl_x + col1_lbl_w, k5_y + ctrl_h };
+            DrawTextW(mem_dc, L"D3D12 PSO Compile:", -1, &rc_lbl_d3d12, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            // Right Sub-Column Labels (Memory & Storage)
+            int col2_lbl_x = c4_x + scale_dpi(234);
+            int col2_lbl_w = scale_dpi(116);
+
+            RECT rc_lbl_disk = { col2_lbl_x, k1_y, col2_lbl_x + col2_lbl_w, k1_y + ctrl_h };
+            DrawTextW(mem_dc, L"Disk Latency Stall:", -1, &rc_lbl_disk, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_mem_alloc = { col2_lbl_x, k2_y, col2_lbl_x + col2_lbl_w, k2_y + ctrl_h };
+            DrawTextW(mem_dc, L"VirtualAlloc Stall:", -1, &rc_lbl_mem_alloc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_mem_trim = { col2_lbl_x, k3_y, col2_lbl_x + col2_lbl_w, k3_y + ctrl_h };
+            DrawTextW(mem_dc, L"WorkingSet Trim:", -1, &rc_lbl_mem_trim, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_mem_phys = { col2_lbl_x, k4_y, col2_lbl_x + col2_lbl_w, k4_y + ctrl_h };
+            DrawTextW(mem_dc, L"Physical MDL Stall:", -1, &rc_lbl_mem_phys, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_vram = { col2_lbl_x, k5_y, col2_lbl_x + col2_lbl_w, k5_y + ctrl_h };
+            DrawTextW(mem_dc, L"VRAM Demoted Limit:", -1, &rc_lbl_vram, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            // Unit Labels
             SelectObject(mem_dc, g_font_ui);
             SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_cd_unit = { c3_x + scale_dpi(310), r11_y, c3_x + c3_w, r11_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"ms", -1, &rc_lbl_cd_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
+            int col1_unit_x = c4_x + scale_dpi(192);
+            int col2_unit_x = c4_x + scale_dpi(412);
+
+            RECT rc_u_dpc = { col1_unit_x, k1_y, col1_unit_x + scale_dpi(26), k1_y + ctrl_h };
+            DrawTextW(mem_dc, L"\u00B5s", -1, &rc_u_dpc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_isr = { col1_unit_x, k2_y, col1_unit_x + scale_dpi(26), k2_y + ctrl_h };
+            DrawTextW(mem_dc, L"\u00B5s", -1, &rc_u_isr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_cs = { col1_unit_x, k3_y, col1_unit_x + scale_dpi(26), k3_y + ctrl_h };
+            DrawTextW(mem_dc, L"ms", -1, &rc_u_cs, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_smi = { col1_unit_x, k4_y, col1_unit_x + scale_dpi(26), k4_y + ctrl_h };
+            DrawTextW(mem_dc, L"ms", -1, &rc_u_smi, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_pso = { col1_unit_x, k5_y, col1_unit_x + scale_dpi(26), k5_y + ctrl_h };
+            DrawTextW(mem_dc, L"ms", -1, &rc_u_pso, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_disk = { col2_unit_x, k1_y, col2_unit_x + scale_dpi(28), k1_y + ctrl_h };
+            DrawTextW(mem_dc, L"ms", -1, &rc_u_disk, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_alloc = { col2_unit_x, k2_y, col2_unit_x + scale_dpi(28), k2_y + ctrl_h };
+            DrawTextW(mem_dc, L"MB", -1, &rc_u_alloc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_trim = { col2_unit_x, k3_y, col2_unit_x + scale_dpi(28), k3_y + ctrl_h };
+            DrawTextW(mem_dc, L"MB", -1, &rc_u_trim, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_phys = { col2_unit_x, k4_y, col2_unit_x + scale_dpi(28), k4_y + ctrl_h };
+            DrawTextW(mem_dc, L"\u00B5s", -1, &rc_u_phys, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_u_vram = { col2_unit_x, k5_y, col2_unit_x + scale_dpi(28), k5_y + ctrl_h };
+            DrawTextW(mem_dc, L"MB", -1, &rc_u_vram, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            // Footer: Advanced unlock label
             SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_buf = { c3_x + scale_dpi(14), r12_y, c3_x + scale_dpi(105), r12_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Buffer Capacity:", -1, &rc_lbl_buf, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            // Card 4 Labels (Correlation Anomaly Thresholds)
-            int t1_y = c4_y + scale_dpi(30);
-            int t2_y = c4_y + scale_dpi(63);
-            int t3_y = c4_y + scale_dpi(96);
-            int t4_y = c4_y + scale_dpi(129);
-            int t5_y = c4_y + scale_dpi(162);
-            int t6_y = c4_y + scale_dpi(195);
-            int t7_y = c4_y + scale_dpi(228);
-            int t8_y = c4_y + scale_dpi(261);
-
-            RECT rc_lbl_dpc = { c4_x + scale_dpi(14), t1_y, c4_x + scale_dpi(155), t1_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Driver DPC Spike:", -1, &rc_lbl_dpc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_dpc_unit = { c4_x + scale_dpi(222), t1_y, c4_x + c4_w, t1_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"100 \u2013 50000 \u00B5s", -1, &rc_lbl_dpc_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_isr = { c4_x + scale_dpi(14), t2_y, c4_x + scale_dpi(155), t2_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Driver ISR Spike:", -1, &rc_lbl_isr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_isr_unit = { c4_x + scale_dpi(222), t2_y, c4_x + c4_w, t2_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"50 \u2013 50000 \u00B5s", -1, &rc_lbl_isr_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_disk = { c4_x + scale_dpi(14), t3_y, c4_x + scale_dpi(155), t3_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Disk Latency Stall:", -1, &rc_lbl_disk, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_disk_unit = { c4_x + scale_dpi(222), t3_y, c4_x + c4_w, t3_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"1 \u2013 1000 ms", -1, &rc_lbl_disk_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_cs = { c4_x + scale_dpi(14), t4_y, c4_x + scale_dpi(155), t4_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"CSwitch Preempt:", -1, &rc_lbl_cs, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_cs_unit = { c4_x + scale_dpi(222), t4_y, c4_x + c4_w, t4_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"1 \u2013 500 ms", -1, &rc_lbl_cs_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_smi = { c4_x + scale_dpi(14), t5_y, c4_x + scale_dpi(155), t5_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Hardware SMI Gap:", -1, &rc_lbl_smi, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_smi_unit = { c4_x + scale_dpi(222), t5_y, c4_x + c4_w, t5_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"10.0 \u2013 100.0 ms", -1, &rc_lbl_smi_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_mem_alloc = { c4_x + scale_dpi(14), t6_y, c4_x + scale_dpi(155), t6_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"VirtualAlloc Stall:", -1, &rc_lbl_mem_alloc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_mem_alloc_unit = { c4_x + scale_dpi(222), t6_y, c4_x + c4_w, t6_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"1 \u2013 1024 MB", -1, &rc_lbl_mem_alloc_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_mem_trim = { c4_x + scale_dpi(14), t7_y, c4_x + scale_dpi(155), t7_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"WorkingSet Trim:", -1, &rc_lbl_mem_trim, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_mem_trim_unit = { c4_x + scale_dpi(222), t7_y, c4_x + c4_w, t7_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"1 \u2013 1024 MB", -1, &rc_lbl_mem_trim_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_mem_phys = { c4_x + scale_dpi(14), t8_y, c4_x + scale_dpi(155), t8_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"Physical MDL Stall:", -1, &rc_lbl_mem_phys, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_mem_phys_unit = { c4_x + scale_dpi(222), t8_y, c4_x + c4_w, t8_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"50 \u2013 50000 \u00B5s", -1, &rc_lbl_mem_phys_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            int t9_y = c4_y + scale_dpi(294);
-            int t10_y = c4_y + scale_dpi(327);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_d3d12 = { c4_x + scale_dpi(14), t9_y, c4_x + scale_dpi(155), t9_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"D3D12 PSO Compile:", -1, &rc_lbl_d3d12, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_d3d12_unit = { c4_x + scale_dpi(222), t9_y, c4_x + c4_w, t9_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"1 \u2013 500 ms", -1, &rc_lbl_d3d12_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
-            RECT rc_lbl_vram = { c4_x + scale_dpi(14), t10_y, c4_x + scale_dpi(155), t10_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"VRAM Demoted Limit:", -1, &rc_lbl_vram, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_vram_unit = { c4_x + scale_dpi(222), t10_y, c4_x + c4_w, t10_y + scale_dpi(26) };
-            DrawTextW(mem_dc, L"1 \u2013 1024 MB", -1, &rc_lbl_vram_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            // Rounded frames for edit controls
-            auto draw_edit_frame = [&](HWND hEdit) {
-                if (!hEdit) return;
-                RECT rc_wnd;
-                GetWindowRect(hEdit, &rc_wnd);
-                POINT pt = { rc_wnd.left, rc_wnd.top };
-                ScreenToClient(hwnd, &pt);
-                int w = rc_wnd.right - rc_wnd.left;
-                int h = rc_wnd.bottom - rc_wnd.top;
-                RECT rc_frame = { pt.x - 1, pt.y - 1, pt.x + w + 1, pt.y + h + 1 };
-                SelectObject(mem_dc, g_theme.br_input);
-                SelectObject(mem_dc, g_theme.pen_input_border);
-                RoundRect(mem_dc, rc_frame.left, rc_frame.top, rc_frame.right, rc_frame.bottom, scale_dpi(6), scale_dpi(6));
-            };
-
-            draw_edit_frame(state->h_hotkey_edit);
-            draw_edit_frame(state->h_edit_auto_save);
-            draw_edit_frame(state->h_edit_pre_win);
-            draw_edit_frame(state->h_edit_post_win);
-            draw_edit_frame(state->h_edit_cooldown);
-            draw_edit_frame(state->h_edit_dpc);
-            draw_edit_frame(state->h_edit_isr);
-            draw_edit_frame(state->h_edit_disk);
-            draw_edit_frame(state->h_edit_cswitch);
-            draw_edit_frame(state->h_edit_smi);
-            draw_edit_frame(state->h_edit_mem_alloc);
-            draw_edit_frame(state->h_edit_mem_trim);
-            draw_edit_frame(state->h_edit_mem_phys);
-            draw_edit_frame(state->h_edit_d3d12_pso);
-            draw_edit_frame(state->h_edit_vram_demoted);
-            draw_edit_frame(state->h_edit_target_fps);
-            draw_edit_frame(state->h_edit_spike_mult);
-            draw_edit_frame(state->h_edit_min_delta);
+            SetTextColor(mem_dc, state->advanced_unlocked ? COLOR_ACCENT_AMB : COLOR_TEXT_LABEL);
+            DrawTextW(mem_dc, L"Unlock Advanced Settings", -1, &state->rc_lbl_adv, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
             SelectObject(mem_dc, old_br);
@@ -1824,6 +1974,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
         case WM_CTLCOLORSTATIC: {
             HDC hdcStatic = (HDC)wParam;
+            HWND hCtl = (HWND)lParam;
+            if (state && hCtl == state->h_chk_advanced) {
+                SetBkColor(hdcStatic, COLOR_BG);
+                SetTextColor(hdcStatic, state->advanced_unlocked ? COLOR_ACCENT_AMB : COLOR_TEXT_LABEL);
+                return (LRESULT)g_theme.br_bg;
+            }
             SetBkColor(hdcStatic, COLOR_CARD_BG);
             SetTextColor(hdcStatic, COLOR_TEXT_PRI);
             return (LRESULT)g_theme.br_card;
@@ -1849,7 +2005,11 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
         }
 
         case WM_CTLCOLORBTN: {
+            HWND hCtl = (HWND)lParam;
             SetBkMode((HDC)wParam, TRANSPARENT);
+            if (state && hCtl == state->h_chk_advanced) {
+                return (LRESULT)g_theme.br_bg;
+            }
             return (LRESULT)g_theme.br_card;
         }
 
@@ -1873,8 +2033,14 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             if (wmId == IDC_SET_CHK_ADVANCED) {
                 state->advanced_unlocked = (SendMessageW(state->h_chk_advanced, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                update_advanced_controls_enablement(state);
+                update_settings_dependencies(state);
                 RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                return 0;
+            }
+
+            if (wmId == IDC_SET_CHK_AUTO_SAVE || wmId == IDC_SET_CHK_OSD) {
+                update_settings_dependencies(state);
+                InvalidateRect(hwnd, NULL, TRUE);
                 return 0;
             }
 
@@ -1894,6 +2060,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                             if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath))) {
                                 SetWindowTextW(state->h_edit_auto_save, pszFilePath);
                                 SendMessageW(state->h_chk_auto_save, BM_SETCHECK, BST_CHECKED, 0);
+                                update_settings_dependencies(state);
                                 CoTaskMemFree(pszFilePath);
                             }
                             pItem->Release();
@@ -1948,12 +2115,15 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
                 SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_UNCHECKED, 0);
                 state->advanced_unlocked = false;
-                update_advanced_controls_enablement(state);
+                update_settings_dependencies(state);
                 RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
                 return 0;
             }
 
-            if (wmId == IDCANCEL) {
+            if (wmId == IDC_SET_BTN_CANCEL || wmId == IDCANCEL) {
+                if (!confirm_discard_if_dirty(hwnd, state)) {
+                    return 0;
+                }
                 dismiss_settings_dialog(hwnd);
                 return 0;
             }
@@ -2134,17 +2304,30 @@ static void ShowSettingsDialog(HWND hParent) {
     UINT dpi = GetDpiForWindow(hParent);
     if (dpi == 0) dpi = 96;
 
-    int dlg_w = MulDiv(880, dpi, 96);
-    int dlg_h = MulDiv(740, dpi, 96);
+    int client_w = MulDiv(960, dpi, 96);
+    int client_h = MulDiv(564, dpi, 96);
+
+    DWORD dwStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+    RECT rc = { 0, 0, client_w, client_h };
+    AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
+    int outer_w = rc.right - rc.left;
+    int outer_h = rc.bottom - rc.top;
+
+    RECT rc_work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc_work, 0);
+    int work_w = rc_work.right - rc_work.left;
+    int work_h = rc_work.bottom - rc_work.top;
+    if (outer_h > work_h - 20) {
+        outer_h = work_h - 20;
+    }
+    if (outer_w > work_w - 20) {
+        outer_w = work_w - 20;
+    }
 
     RECT rc_parent{};
     GetWindowRect(hParent, &rc_parent);
-    int pos_x = rc_parent.left + ((rc_parent.right - rc_parent.left) - dlg_w) / 2;
-    int pos_y = rc_parent.top + ((rc_parent.bottom - rc_parent.top) - dlg_h) / 2;
-
-    DWORD dwStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-    RECT rc = { 0, 0, dlg_w, dlg_h };
-    AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
+    int pos_x = rc_parent.left + ((rc_parent.right - rc_parent.left) - outer_w) / 2;
+    int pos_y = rc_parent.top + ((rc_parent.bottom - rc_parent.top) - outer_h) / 2;
 
     HWND hSettingsDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
@@ -2152,7 +2335,7 @@ static void ShowSettingsDialog(HWND hParent) {
         L"Stuttometer Settings",
         dwStyle,
         pos_x, pos_y,
-        rc.right - rc.left, rc.bottom - rc.top,
+        outer_w, outer_h,
         hParent, NULL, hInstance, NULL
     );
 
@@ -2413,6 +2596,7 @@ static void update_fonts_for_dpi(UINT dpi) {
             if (state->h_edit_min_delta) SendMessageW(state->h_edit_min_delta, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             if (state->h_chk_judder) SendMessageW(state->h_chk_judder, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             if (state->h_btn_reset) SendMessageW(state->h_btn_reset, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+            if (state->h_btn_cancel) SendMessageW(state->h_btn_cancel, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             if (state->h_btn_save) SendMessageW(state->h_btn_save, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
         }
     }
@@ -2450,6 +2634,23 @@ static LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wP
         case WM_KILLFOCUS: {
             SendMessageW(hwnd, EM_SETSEL, static_cast<WPARAM>(-1), 0);
             break;
+        }
+
+        case WM_PAINT: {
+            LRESULT res = DefSubclassProc(hwnd, uMsg, wParam, lParam);
+            HDC hdc = GetDC(hwnd);
+            if (hdc) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
+                HGDIOBJ old_pen = SelectObject(hdc, pen);
+                HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
+                SelectObject(hdc, old_br);
+                SelectObject(hdc, old_pen);
+                ReleaseDC(hwnd, hdc);
+            }
+            return res;
         }
     }
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
@@ -2655,9 +2856,9 @@ static LRESULT CALLBACK ListViewSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam
                     r_title.bottom = r_title.top + scale_dpi(20);
                     DrawTextW(hdc, title_str.c_str(), -1, &r_title, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                    // Watermark Subtitle
+                    // Watermark Subtitle (Enhanced Muted Contrast #94A3B8)
                     SelectObject(hdc, g_font_ui);
-                    SetTextColor(hdc, COLOR_TEXT_DIM);
+                    SetTextColor(hdc, COLOR_TEXT_MUTED);
                     RECT r_sub = client_rc;
                     r_sub.top = r_title.bottom + scale_dpi(4);
                     r_sub.bottom = r_sub.top + scale_dpi(20);
@@ -2754,7 +2955,8 @@ static void draw_custom_button(LPDRAWITEMSTRUCT pdis) {
     // Pre-fill bounding rectangle with parent container background to eliminate black corner edges
     HBRUSH bg_parent = g_theme.br_bg;
     if (ctl_id == IDC_BTN_COPY_JSON || ctl_id == IDC_BTN_EXPORT_JSON ||
-        ctl_id == IDC_BTN_COPY_CARD || ctl_id == IDC_BTN_EXPORT_CARD) {
+        ctl_id == IDC_BTN_COPY_CARD || ctl_id == IDC_BTN_EXPORT_CARD ||
+        ctl_id == IDC_SET_BTN_BROWSE_AUTO_SAVE) {
         bg_parent = g_theme.br_card;
     }
     FillRect(hdc, &rc, bg_parent);
@@ -2863,8 +3065,8 @@ static void draw_custom_button(LPDRAWITEMSTRUCT pdis) {
     int offset_y = is_pressed ? 1 : 0;
     if (is_pressed) start_x += 1;
 
-    RECT text_rc = { start_x, rc.top + offset_y, start_x + text_w, rc.bottom + offset_y };
-    DrawTextW(hdc, btn_text, -1, &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    RECT text_rc = { start_x, rc.top + offset_y, (std::min<int>)(start_x + text_w, rc.right - scale_dpi(4)), rc.bottom + offset_y };
+    DrawTextW(hdc, btn_text, -1, &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
     SelectObject(hdc, old_font);
 }
@@ -2997,28 +3199,29 @@ static void copy_selected_report_json(HWND hwnd) {
     std::string json = reporter.to_json_string(*item.report, redact, 2);
     std::wstring wjson = utf8_to_wstring(json);
 
-    if (!OpenClipboard(hwnd)) {
-        MessageBoxW(hwnd, L"Failed to open clipboard.", L"Clipboard Error", MB_OK | MB_ICONERROR);
-        return;
+    bool ok = false;
+    if (OpenClipboard(hwnd)) {
+        EmptyClipboard();
+        HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (wjson.size() + 1) * sizeof(wchar_t));
+        if (hGlob) {
+            wchar_t* pMem = static_cast<wchar_t*>(GlobalLock(hGlob));
+            if (pMem) {
+                wcscpy_s(pMem, wjson.size() + 1, wjson.c_str());
+                GlobalUnlock(hGlob);
+                if (SetClipboardData(CF_UNICODETEXT, hGlob)) {
+                    ok = true;
+                }
+            }
+            if (!ok) GlobalFree(hGlob);
+        }
+        CloseClipboard();
     }
 
-    EmptyClipboard();
-    HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (wjson.size() + 1) * sizeof(wchar_t));
-    if (hGlob) {
-        wchar_t* pMem = static_cast<wchar_t*>(GlobalLock(hGlob));
-        if (pMem) {
-            wcscpy_s(pMem, wjson.size() + 1, wjson.c_str());
-            GlobalUnlock(hGlob);
-            if (SetClipboardData(CF_UNICODETEXT, hGlob)) {
-                CloseClipboard();
-                MessageBoxW(hwnd, L"JSON report copied to clipboard successfully!", L"Copied", MB_OK | MB_ICONINFORMATION);
-                return;
-            }
-        }
-        GlobalFree(hGlob);
+    if (g_h_btn_copy) {
+        SetWindowTextW(g_h_btn_copy, ok ? L"Copied \u2713" : L"Failed \u2715");
+        InvalidateRect(g_h_btn_copy, NULL, TRUE);
+        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy), 1500, NULL);
     }
-    CloseClipboard();
-    MessageBoxW(hwnd, L"Failed to copy JSON report to clipboard.", L"Clipboard Error", MB_OK | MB_ICONERROR);
 }
 
 // Export JSON report to file
@@ -3043,10 +3246,11 @@ static void export_selected_report_json(HWND hwnd) {
 
     if (GetSaveFileNameW(&ofn)) {
         std::string path = wstring_to_utf8(filename_buf);
-        if (reporter.save_to_file(*item.report, path, redact)) {
-            MessageBoxW(hwnd, L"Report exported successfully!", L"Export Complete", MB_OK | MB_ICONINFORMATION);
-        } else {
-            MessageBoxW(hwnd, L"Failed to save JSON report file.", L"Export Error", MB_OK | MB_ICONERROR);
+        bool ok = reporter.save_to_file(*item.report, path, redact);
+        if (g_h_btn_export) {
+            SetWindowTextW(g_h_btn_export, ok ? L"Exported \u2713" : L"Failed \u2715");
+            InvalidateRect(g_h_btn_export, NULL, TRUE);
+            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export), 1500, NULL);
         }
     }
 }
@@ -3059,11 +3263,12 @@ static void copy_selected_report_card(HWND hwnd) {
 
     const auto& item = g_stutters[g_selected_stutter_index];
     CardRenderOptions opts;
+    bool ok = CardRenderer::copy_card_to_clipboard(hwnd, *item.report, opts);
 
-    if (CardRenderer::copy_card_to_clipboard(hwnd, *item.report, opts)) {
-        MessageBoxW(hwnd, L"Visual Stutter Card copied to clipboard!\r\nYou can now paste directly into Discord, Slack, or image editors (Ctrl+V).", L"Card Copied", MB_OK | MB_ICONINFORMATION);
-    } else {
-        MessageBoxW(hwnd, L"Failed to copy Visual Stutter Card to clipboard.", L"Clipboard Error", MB_OK | MB_ICONERROR);
+    if (g_h_btn_copy_card) {
+        SetWindowTextW(g_h_btn_copy_card, ok ? L"Copied \u2713" : L"Failed \u2715");
+        InvalidateRect(g_h_btn_copy_card, NULL, TRUE);
+        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy_card), 1500, NULL);
     }
 }
 
@@ -3086,10 +3291,11 @@ static void export_selected_report_card(HWND hwnd) {
 
     if (GetSaveFileNameW(&ofn)) {
         CardRenderOptions opts;
-        if (CardRenderer::save_card_to_png(*item.report, std::filesystem::path(filename_buf), opts)) {
-            MessageBoxW(hwnd, L"Visual Stutter Card exported successfully!", L"Export Complete", MB_OK | MB_ICONINFORMATION);
-        } else {
-            MessageBoxW(hwnd, L"Failed to save Visual Stutter Card PNG file.", L"Export Error", MB_OK | MB_ICONERROR);
+        bool ok = CardRenderer::save_card_to_png(*item.report, std::filesystem::path(filename_buf), opts);
+        if (g_h_btn_export_card) {
+            SetWindowTextW(g_h_btn_export_card, ok ? L"Exported \u2713" : L"Failed \u2715");
+            InvalidateRect(g_h_btn_export_card, NULL, TRUE);
+            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export_card), 1500, NULL);
         }
     }
 }
@@ -3528,16 +3734,17 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     if (insp_card_h < min_insp_h) insp_card_h = min_insp_h;
 
     int insp_hdr_h = scale_dpi(34);
-    int btn_quick_w = scale_dpi(88);
+    int btn_quick_w = scale_dpi(96);
     int btn_quick_h = scale_dpi(24);
     int btn_quick_y = insp_card_y + (insp_hdr_h - btn_quick_h) / 2;
-    int btn_quick_gap = scale_dpi(6);
+    int btn_pair_gap = scale_dpi(4);
+    int group_gap = scale_dpi(10);
 
-    // Position Copy and Export buttons (Card and JSON) on the top-right of the Inspector Header
+    // Two paired pill groups: [Copy JSON | Export JSON]  [Copy Card | Export Card]
     int btn_exp_card_x = margin + list_w - scale_dpi(8) - btn_quick_w;
-    int btn_cpy_card_x = btn_exp_card_x - btn_quick_gap - btn_quick_w;
-    int btn_exp_json_x = btn_cpy_card_x - btn_quick_gap - btn_quick_w;
-    int btn_cpy_json_x = btn_exp_json_x - btn_quick_gap - btn_quick_w;
+    int btn_cpy_card_x = btn_exp_card_x - btn_pair_gap - btn_quick_w;
+    int btn_exp_json_x = btn_cpy_card_x - group_gap - btn_quick_w;
+    int btn_cpy_json_x = btn_exp_json_x - btn_pair_gap - btn_quick_w;
 
     MoveWindow(g_h_btn_export_card, btn_exp_card_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
     MoveWindow(g_h_btn_copy_card, btn_cpy_card_x, btn_quick_y, btn_quick_w, btn_quick_h, TRUE);
@@ -3685,14 +3892,14 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             }
 
             LVCOLUMNW col{};
-            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-            col.pszText = const_cast<LPWSTR>(L"#"); col.cx = scale_dpi(42); ListView_InsertColumn(g_h_list_stutters, 0, &col);
-            col.pszText = const_cast<LPWSTR>(L"Time (UTC)"); col.cx = scale_dpi(145); ListView_InsertColumn(g_h_list_stutters, 1, &col);
-            col.pszText = const_cast<LPWSTR>(L"Target Process"); col.cx = scale_dpi(150); ListView_InsertColumn(g_h_list_stutters, 2, &col);
-            col.pszText = const_cast<LPWSTR>(L"Trigger Reason"); col.cx = scale_dpi(145); ListView_InsertColumn(g_h_list_stutters, 3, &col);
-            col.pszText = const_cast<LPWSTR>(L"Duration"); col.cx = scale_dpi(85); ListView_InsertColumn(g_h_list_stutters, 4, &col);
-            col.pszText = const_cast<LPWSTR>(L"Primary Culprit / Hypothesis"); col.cx = scale_dpi(280); ListView_InsertColumn(g_h_list_stutters, 5, &col);
-            col.pszText = const_cast<LPWSTR>(L"Confidence"); col.cx = scale_dpi(95); ListView_InsertColumn(g_h_list_stutters, 6, &col);
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM | LVCF_FMT;
+            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"#"); col.cx = scale_dpi(42); ListView_InsertColumn(g_h_list_stutters, 0, &col);
+            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Time (UTC)"); col.cx = scale_dpi(145); ListView_InsertColumn(g_h_list_stutters, 1, &col);
+            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Target Process"); col.cx = scale_dpi(150); ListView_InsertColumn(g_h_list_stutters, 2, &col);
+            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Trigger Reason"); col.cx = scale_dpi(145); ListView_InsertColumn(g_h_list_stutters, 3, &col);
+            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"Duration"); col.cx = scale_dpi(85); ListView_InsertColumn(g_h_list_stutters, 4, &col);
+            col.fmt = LVCFMT_LEFT;  col.pszText = const_cast<LPWSTR>(L"Primary Culprit / Hypothesis"); col.cx = scale_dpi(280); ListView_InsertColumn(g_h_list_stutters, 5, &col);
+            col.fmt = LVCFMT_RIGHT; col.pszText = const_cast<LPWSTR>(L"Confidence"); col.cx = scale_dpi(95); ListView_InsertColumn(g_h_list_stutters, 6, &col);
 
             // Inspector Multi-line Viewer (Clean High-Contrast Monospace Dark Pane)
             g_h_edit_inspector = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_EDIT_INSPECTOR, NULL, NULL);
@@ -3851,7 +4058,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 RECT calc_mode_rc = { 0, 0, 0, 0 };
                 DrawTextW(mem_dc, mode_status_text.c_str(), -1, &calc_mode_rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
                 int mode_text_w = calc_mode_rc.right - calc_mode_rc.left;
-                int badge_mode_w = mode_text_w + scale_dpi(38);
+                int badge_mode_w = mode_text_w + scale_dpi(24);
                 int badge_mode_h = scale_dpi(28);
                 int badge_mode_y = card_y + (card_h - badge_mode_h) / 2;
                 int badge_mode_x = cfg_card_rc.right - scale_dpi(12) - badge_mode_w;
@@ -3874,7 +4081,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 RoundRect(mem_dc, badge_rc.left, badge_rc.top, badge_rc.right, badge_rc.bottom, scale_dpi(10), scale_dpi(10));
 
                 SetBkMode(mem_dc, TRANSPARENT);
-                SelectObject(mem_dc, g_font_ui_bold);
+                SelectObject(mem_dc, g_font_ui);
                 SetTextColor(mem_dc, COLOR_TEXT_MUTED);
 
                 RECT calc_rc = { 0, 0, 0, 0 };
@@ -3906,15 +4113,84 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 MoveToEx(mem_dc, insp_card_box.left, pt_insp.y - scale_dpi(4), NULL);
                 LineTo(mem_dc, insp_card_box.right, pt_insp.y - scale_dpi(4));
 
-                // Inspector Header Title & Status
+                // Inspector Header Title & Status Badges
                 SetBkMode(mem_dc, TRANSPARENT);
                 SelectObject(mem_dc, g_font_ui_bold);
-                SetTextColor(mem_dc, COLOR_TEXT_LABEL);
+
                 std::wstring insp_label = L"DIAGNOSTIC REPORT INSPECTOR";
                 if (g_selected_stutter_index >= 0 && g_selected_stutter_index < static_cast<int>(g_stutters.size())) {
                     insp_label += L" \u2014 Event #" + std::to_wstring(g_stutters[g_selected_stutter_index].id) + L" (" + utf8_to_wstring(g_stutters[g_selected_stutter_index].process_name) + L")";
                 }
-                RECT insp_hdr_text_rc = { insp_card_box.left + scale_dpi(12), insp_card_outer_y, insp_card_box.right - scale_dpi(220), pt_insp.y - scale_dpi(4) };
+
+                // Calculate action buttons start boundary (4 buttons x 96px + gaps)
+                int quick_total_w = scale_dpi(96 * 4 + 4 * 2 + 10 + 8);
+                int quick_start_x = insp_card_box.right - quick_total_w;
+                int first_badge_left = quick_start_x;
+
+                if (g_selected_stutter_index >= 0 && g_selected_stutter_index < static_cast<int>(g_stutters.size())) {
+                    const auto& rec = g_stutters[g_selected_stutter_index];
+                    std::wstring tag_text = utf8_to_wstring(attribution_to_string(rec.report ? rec.report->attribution : AttributionTag::UNKNOWN));
+                    COLORREF tag_color = RGB(100, 116, 139);
+                    if (rec.report) {
+                        switch (rec.report->attribution) {
+                            case AttributionTag::GAME_ENGINE: tag_color = RGB(245, 158, 11); break;
+                            case AttributionTag::DWM_COMPOSITION: tag_color = RGB(168, 85, 247); break;
+                            case AttributionTag::EXTERNAL_CONTENTION: tag_color = RGB(239, 68, 68); break;
+                            case AttributionTag::UNKNOWN: default: tag_color = RGB(100, 116, 139); break;
+                        }
+                    }
+
+                    wchar_t conf_text[32];
+                    swprintf_s(conf_text, L"%.1f%% Conf", rec.confidence * 100.0);
+                    COLORREF conf_color = (rec.confidence >= 0.80) ? COLOR_ACCENT_EMERALD : ((rec.confidence >= 0.50) ? COLOR_ACCENT_AMB : COLOR_TEXT_MUTED);
+
+                    std::wstring frames_text = std::to_wstring(rec.report ? rec.report->frame_timeline.size() : 0) + L" Frames";
+
+                    RECT rc_calc{};
+                    DrawTextW(mem_dc, tag_text.c_str(), -1, &rc_calc, DT_CALCRECT | DT_SINGLELINE);
+                    int w_tag = (rc_calc.right - rc_calc.left) + scale_dpi(16);
+
+                    rc_calc = {0, 0, 0, 0};
+                    DrawTextW(mem_dc, conf_text, -1, &rc_calc, DT_CALCRECT | DT_SINGLELINE);
+                    int w_conf = (rc_calc.right - rc_calc.left) + scale_dpi(16);
+
+                    rc_calc = {0, 0, 0, 0};
+                    DrawTextW(mem_dc, frames_text.c_str(), -1, &rc_calc, DT_CALCRECT | DT_SINGLELINE);
+                    int w_frames = (rc_calc.right - rc_calc.left) + scale_dpi(16);
+
+                    int badge_h = scale_dpi(22);
+                    int badge_y = insp_card_outer_y + (scale_dpi(34) - badge_h) / 2;
+                    int gap_b = scale_dpi(6);
+                    int total_b_w = w_tag + gap_b + w_conf + gap_b + w_frames;
+
+                    first_badge_left = quick_start_x - scale_dpi(14) - total_b_w;
+
+                    // Draw Frame Count Badge
+                    int cur_bx = first_badge_left;
+                    RECT b_frames_rc = { cur_bx, badge_y, cur_bx + w_frames, badge_y + badge_h };
+                    SelectObject(mem_dc, g_theme.br_badge);
+                    SelectObject(mem_dc, g_theme.pen_badge_border);
+                    RoundRect(mem_dc, b_frames_rc.left, b_frames_rc.top, b_frames_rc.right, b_frames_rc.bottom, scale_dpi(6), scale_dpi(6));
+                    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+                    DrawTextW(mem_dc, frames_text.c_str(), -1, &b_frames_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    cur_bx += w_frames + gap_b;
+
+                    // Draw Confidence Badge
+                    RECT b_conf_rc = { cur_bx, badge_y, cur_bx + w_conf, badge_y + badge_h };
+                    RoundRect(mem_dc, b_conf_rc.left, b_conf_rc.top, b_conf_rc.right, b_conf_rc.bottom, scale_dpi(6), scale_dpi(6));
+                    SetTextColor(mem_dc, conf_color);
+                    DrawTextW(mem_dc, conf_text, -1, &b_conf_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    cur_bx += w_conf + gap_b;
+
+                    // Draw Attribution Tag Badge
+                    RECT b_tag_rc = { cur_bx, badge_y, cur_bx + w_tag, badge_y + badge_h };
+                    RoundRect(mem_dc, b_tag_rc.left, b_tag_rc.top, b_tag_rc.right, b_tag_rc.bottom, scale_dpi(6), scale_dpi(6));
+                    SetTextColor(mem_dc, tag_color);
+                    DrawTextW(mem_dc, tag_text.c_str(), -1, &b_tag_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+
+                RECT insp_hdr_text_rc = { insp_card_box.left + scale_dpi(12), insp_card_outer_y, first_badge_left - scale_dpi(10), pt_insp.y - scale_dpi(4) };
+                SetTextColor(mem_dc, COLOR_TEXT_LABEL);
                 DrawTextW(mem_dc, insp_label.c_str(), -1, &insp_hdr_text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             }
 
@@ -4036,10 +4312,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                             return CDRF_NOTIFYITEMDRAW;
 
                         case CDDS_ITEMPREPAINT:
-                            return CDRF_NOTIFYSUBITEMDRAW;
+                            return CDRF_NOTIFYSUBITEMDRAW | CDRF_NOTIFYPOSTPAINT;
 
                         case CDDS_SUBITEM | CDDS_ITEMPREPAINT: {
                             int item_idx = static_cast<int>(pCustomDraw->nmcd.dwItemSpec);
+                            int sub_idx  = pCustomDraw->iSubItem;
                             bool is_selected = (ListView_GetItemState(g_h_list_stutters, item_idx, LVIS_SELECTED) & LVIS_SELECTED) != 0;
 
                             if (is_selected) {
@@ -4048,11 +4325,73 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                             } else {
                                 pCustomDraw->clrTextBk = (item_idx % 2 == 0) ? COLOR_LIST_BG : COLOR_LIST_ROW_ALT;
                                 pCustomDraw->clrText = COLOR_TEXT_BRIGHT;
+
+                                if (item_idx >= 0 && item_idx < static_cast<int>(g_stutters.size())) {
+                                    const auto& rec = g_stutters[item_idx];
+                                    if (sub_idx == 4) { // Duration
+                                        if (rec.report && (rec.report->trigger.source == TriggerSource::FRAME_PACING_JUDDER || rec.duration_ms >= 50.0)) {
+                                            pCustomDraw->clrText = COLOR_ACCENT_AMB;
+                                        }
+                                    } else if (sub_idx == 6) { // Confidence
+                                        if (rec.confidence >= 0.80) {
+                                            pCustomDraw->clrText = COLOR_ACCENT_EMERALD;
+                                        } else if (rec.confidence >= 0.50) {
+                                            pCustomDraw->clrText = COLOR_ACCENT_AMB;
+                                        } else {
+                                            pCustomDraw->clrText = COLOR_TEXT_MUTED;
+                                        }
+                                    }
+                                }
+                            }
+                            return CDRF_DODEFAULT;
+                        }
+
+                        case CDDS_ITEMPOSTPAINT: {
+                            int item_idx = static_cast<int>(pCustomDraw->nmcd.dwItemSpec);
+                            if (item_idx >= 0 && item_idx < static_cast<int>(g_stutters.size())) {
+                                const auto& rec = g_stutters[item_idx];
+                                HBRUSH h_stripe_br = g_theme.br_attr_unknown;
+                                if (rec.report) {
+                                    switch (rec.report->attribution) {
+                                        case AttributionTag::GAME_ENGINE:         h_stripe_br = g_theme.br_attr_game_engine; break;
+                                        case AttributionTag::DWM_COMPOSITION:     h_stripe_br = g_theme.br_attr_dwm_composition; break;
+                                        case AttributionTag::EXTERNAL_CONTENTION: h_stripe_br = g_theme.br_attr_external_contention; break;
+                                        case AttributionTag::UNKNOWN: default:    h_stripe_br = g_theme.br_attr_unknown; break;
+                                    }
+                                }
+                                RECT rc_stripe = pCustomDraw->nmcd.rc;
+                                rc_stripe.right = rc_stripe.left + scale_dpi(3);
+                                FillRect(pCustomDraw->nmcd.hdc, &rc_stripe, h_stripe_br);
                             }
                             return CDRF_DODEFAULT;
                         }
                     }
                 }
+            }
+            break;
+        }
+
+        case WM_TIMER: {
+            if (wParam == reinterpret_cast<UINT_PTR>(g_h_btn_copy)) {
+                KillTimer(hwnd, wParam);
+                SetWindowTextW(g_h_btn_copy, L"Copy JSON");
+                InvalidateRect(g_h_btn_copy, NULL, TRUE);
+                return 0;
+            } else if (wParam == reinterpret_cast<UINT_PTR>(g_h_btn_copy_card)) {
+                KillTimer(hwnd, wParam);
+                SetWindowTextW(g_h_btn_copy_card, L"Copy Card");
+                InvalidateRect(g_h_btn_copy_card, NULL, TRUE);
+                return 0;
+            } else if (wParam == reinterpret_cast<UINT_PTR>(g_h_btn_export)) {
+                KillTimer(hwnd, wParam);
+                SetWindowTextW(g_h_btn_export, L"Export JSON");
+                InvalidateRect(g_h_btn_export, NULL, TRUE);
+                return 0;
+            } else if (wParam == reinterpret_cast<UINT_PTR>(g_h_btn_export_card)) {
+                KillTimer(hwnd, wParam);
+                SetWindowTextW(g_h_btn_export_card, L"Export Card");
+                InvalidateRect(g_h_btn_export_card, NULL, TRUE);
+                return 0;
             }
             break;
         }

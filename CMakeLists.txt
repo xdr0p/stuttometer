@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   stuttometer
-  VERSION 0.3.1
+  VERSION 0.3.2
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )

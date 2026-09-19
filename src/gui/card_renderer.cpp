@@ -152,7 +152,7 @@ static void draw_card(
     float content_w = width - (side_margin * 2.0f);
 
     // Version Badge Pill
-    std::string ver = report.tool_version.empty() ? "0.3.1" : report.tool_version;
+    std::string ver = report.tool_version.empty() ? "0.3.2" : report.tool_version;
     std::wstring ver_badge = L"STUTTOMETER v" + to_wide_str(ver);
     RectF rc_ver(side_margin, top_margin, 130.0f * s, 22.0f * s);
     SolidBrush br_ver_bg(Color(255, 30, 41, 59));
