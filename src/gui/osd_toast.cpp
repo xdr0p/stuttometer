@@ -136,10 +136,10 @@ void OsdToast::init_gdi_resources() noexcept {
     try {
         if (!br_bg_) br_bg_ = CreateSolidBrush(RGB(17, 21, 31));
         if (!pen_border_) pen_border_ = CreatePen(PS_SOLID, 1, RGB(42, 53, 75));
-        if (!br_accent_game_) br_accent_game_ = CreateSolidBrush(RGB(245, 158, 11));
-        if (!br_accent_dwm_) br_accent_dwm_ = CreateSolidBrush(RGB(168, 85, 247));
-        if (!br_accent_ext_) br_accent_ext_ = CreateSolidBrush(RGB(239, 68, 68));
-        if (!br_accent_unk_) br_accent_unk_ = CreateSolidBrush(RGB(100, 116, 139));
+        if (!br_accent_game_) br_accent_game_ = CreateSolidBrush(RGB(218, 161, 66));
+        if (!br_accent_dwm_) br_accent_dwm_ = CreateSolidBrush(RGB(154, 100, 205));
+        if (!br_accent_ext_) br_accent_ext_ = CreateSolidBrush(RGB(197, 86, 86));
+        if (!br_accent_unk_) br_accent_unk_ = CreateSolidBrush(RGB(105, 115, 130));
     } catch (...) {
     }
 }
@@ -439,23 +439,23 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
 
         switch (current_data_.attribution) {
             case AttributionTag::GAME_ENGINE:
-                col_accent = RGB(245, 158, 11);     // Amber
+                col_accent = RGB(218, 161, 66);     // Desaturated Amber
                 br_accent = br_accent_game_;
                 attr_tag = L"GAME ENGINE";
                 break;
             case AttributionTag::DWM_COMPOSITION:
-                col_accent = RGB(168, 85, 247);     // Purple
+                col_accent = RGB(154, 100, 205);     // Desaturated Purple
                 br_accent = br_accent_dwm_;
                 attr_tag = L"DWM COMPOSITION";
                 break;
             case AttributionTag::EXTERNAL_CONTENTION:
-                col_accent = RGB(239, 68, 68);      // Crimson
+                col_accent = RGB(197, 86, 86);      // Desaturated Crimson
                 br_accent = br_accent_ext_;
                 attr_tag = L"EXTERNAL CONTENTION";
                 break;
             case AttributionTag::UNKNOWN:
             default:
-                col_accent = RGB(100, 116, 139);    // Slate
+                col_accent = RGB(105, 115, 130);    // Desaturated Slate
                 br_accent = br_accent_unk_;
                 attr_tag = L"UNKNOWN";
                 break;
@@ -507,7 +507,18 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
             callout_str = dss.str();
         }
 
-        SetTextColor(mem_dc, col_accent);
+        COLORREF col_severity = col_text_pri;
+        if (current_data_.source == TriggerSource::AUDIO_GLITCH) {
+            col_severity = RGB(239, 68, 68); // Audio underrun is critical
+        } else if (current_data_.duration_ms > 50.0) {
+            col_severity = RGB(239, 68, 68); // Crimson for >50ms stall
+        } else if (current_data_.duration_ms >= 30.0) {
+            col_severity = RGB(245, 158, 11); // Amber for 30-50ms stall
+        } else {
+            col_severity = RGB(241, 245, 249); // Soft white for mild hitch
+        }
+
+        SetTextColor(mem_dc, col_severity);
         RECT rc_callout = { width - callout_w - pad_right, r1_top, width - pad_right, r1_bot };
         DrawTextW(mem_dc, callout_str.c_str(), -1, &rc_callout, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 

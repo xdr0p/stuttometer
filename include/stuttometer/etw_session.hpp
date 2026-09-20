@@ -111,6 +111,7 @@ struct EtwSessionConfig {
 
 struct PresentInFlight {
     uint64_t start_qpc{0};
+    uint64_t swapchain_ptr{0};
     uint32_t pid{0};
     uint32_t tid{0};
 };
@@ -173,7 +174,7 @@ struct LastFlipEntry {
     uint32_t tid{0};
 };
 
-static_assert(sizeof(PresentInFlight) == 16, "PresentInFlight must be 16 bytes");
+static_assert(sizeof(PresentInFlight) == 24, "PresentInFlight must be 24 bytes");
 static_assert(std::is_trivially_copyable_v<PresentInFlight>, "PresentInFlight must be trivially copyable");
 static_assert(sizeof(DiskInFlight) == 24, "DiskInFlight must be 24 bytes");
 static_assert(std::is_trivially_copyable_v<DiskInFlight>, "DiskInFlight must be trivially copyable");
@@ -227,10 +228,25 @@ static inline PresentDeltaResult calculate_effective_present_duration(
     return result;
 }
 
-static inline uint64_t make_present_key(uint32_t tid, uint64_t swapchain_ptr) noexcept {
-    // Fallback to 0x1ULL (guaranteed-unmapped 64KB null-page zone) when swapchain_ptr is null
+// In-flight present correlation key (pairs Event 42 Start with Event 43 Stop on the same thread)
+// Trade-off: Keying in-flight presents by (pid, tid) supports multi-threaded fiber present dispatch
+// (common in modern engines). Interleaved multi-swapchain presents from a single thread would orphan
+// the second stop event; this is acceptable as interleaved single-thread presents are vanishingly rare.
+static inline uint64_t make_thread_key(uint32_t pid, uint32_t tid) noexcept {
+    uint64_t k = (static_cast<uint64_t>(pid) << 32) | tid;
+    k ^= 0x9E3779B97F4A7C15ULL;
+    k ^= (k >> 30);
+    k *= 0xBF58476D1CE4E5B9ULL;
+    k ^= (k >> 27);
+    k *= 0x94D049BB133111EBULL;
+    k ^= (k >> 31);
+    return (k != 0) ? k : 0xCAFEBABEDEADBEEFULL;
+}
+
+// Inter-frame swapchain pacing key (tracks frame delivery intervals per swapchain across threads)
+static inline uint64_t make_swapchain_key(uint32_t pid, uint64_t swapchain_ptr) noexcept {
     uint64_t ptr_val = swapchain_ptr ? swapchain_ptr : 0x1ULL;
-    uint64_t k = (static_cast<uint64_t>(tid) << 32) | (tid ^ 0x9E3779B9U);
+    uint64_t k = (static_cast<uint64_t>(pid) << 32) | (pid ^ 0x9E3779B9U);
     k ^= ptr_val + 0x517cc1b727220a95ULL + (k << 6) + (k >> 2);
     k ^= (k >> 30);
     k *= 0xbf58476d1ce4e5b9ULL;
@@ -419,6 +435,7 @@ private:
     std::atomic<uint32_t> kernel_events_lost_{0};
     std::atomic<uint32_t> user_buffers_lost_{0};
     std::atomic<uint32_t> kernel_buffers_lost_{0};
+    std::atomic<uint32_t> cached_dwm_pid_{0};
 
     std::atomic<bool> user_consumer_failed_{false};
     std::atomic<bool> kernel_consumer_failed_{false};

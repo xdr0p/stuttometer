@@ -142,14 +142,14 @@ static void test_in_flight_struct_layouts() {
     static_assert(std::is_trivially_copyable_v<stuttometer::WorkingSetTrimInFlight>);
     static_assert(std::is_trivially_copyable_v<stuttometer::EtwEventRecord>);
 
-    static_assert(sizeof(stuttometer::PresentInFlight) == 16);
+    static_assert(sizeof(stuttometer::PresentInFlight) == 24);
     static_assert(sizeof(stuttometer::DiskInFlight) == 24);
     static_assert(sizeof(stuttometer::ThreadSwitchOut) == 16);
     static_assert(sizeof(stuttometer::PsoInFlight) == 32);
     static_assert(sizeof(stuttometer::WorkingSetTrimInFlight) == 16);
     static_assert(sizeof(stuttometer::EtwEventRecord) == 56);
 
-    STUTTO_ASSERT(sizeof(stuttometer::PresentInFlight) == 16);
+    STUTTO_ASSERT(sizeof(stuttometer::PresentInFlight) == 24);
     STUTTO_ASSERT(sizeof(stuttometer::DiskInFlight) == 24);
     STUTTO_ASSERT(sizeof(stuttometer::ThreadSwitchOut) == 16);
     STUTTO_ASSERT(sizeof(stuttometer::PsoInFlight) == 32);

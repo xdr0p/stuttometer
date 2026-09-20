@@ -452,6 +452,158 @@ static void test_serialization_and_tag_stats() {
     std::cout << "[TEST 13] PASSED\n";
 }
 
+static void test_cadence_state3_warmup_and_redaction() {
+    std::cout << "[TEST 14] Cadence State 3 Warmup & Redacted Monitor-All Check (NI-A)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+
+    // Warmup check on un-targeted / empty session
+    auto empty_summary = benchmark.get_summary();
+    STUTTO_ASSERT(empty_summary.estimated_dynamic_floor_ms == 0.0);
+    STUTTO_ASSERT(empty_summary.estimated_binding_floor_ms == 0.0);
+    STUTTO_ASSERT(empty_summary.binding_floor_source == stuttometer::BindingFloorSource::NONE);
+    STUTTO_ASSERT(empty_summary.rolling_baseline_ms == 0.0);
+    STUTTO_ASSERT(empty_summary.rolling_fps == 0.0);
+    STUTTO_ASSERT(empty_summary.static_floor_ms > 0.0);
+
+    // Monitor-all session (target_pid == 0)
+    benchmark.retarget(0);
+    auto mon_summary = benchmark.get_summary(false);
+    STUTTO_ASSERT(mon_summary.is_monitor_all);
+    STUTTO_ASSERT(mon_summary.target_pid == 0);
+    std::string mon_md = mon_summary.to_markdown();
+    STUTTO_ASSERT(mon_md.find("Cadence telemetry unavailable in Monitor-All mode") != std::string::npos);
+
+    // Redacted targeted session (target_pid != 0, redacted -> target_pid becomes 0, but is_monitor_all must be false!)
+    benchmark.retarget(5678);
+    auto red_summary = benchmark.get_summary(true);
+    STUTTO_ASSERT(!red_summary.is_monitor_all);
+    STUTTO_ASSERT(red_summary.target_pid == 0); // redacted
+    std::string red_md = red_summary.to_markdown();
+    STUTTO_ASSERT(red_md.find("Cadence telemetry unavailable in Monitor-All mode") == std::string::npos);
+    STUTTO_ASSERT(red_md.find("Pending warmup") != std::string::npos);
+
+    std::cout << "[TEST 14] PASSED\n";
+}
+
+static void test_cadence_integrated_pipeline() {
+    std::cout << "[TEST 15] Integrated Pipeline Pacing Telemetry Test (NB1, NM1)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    uint64_t qpc = stuttometer::get_current_qpc();
+
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(100);
+
+    stuttometer::TriggerConfig trig_config;
+    trig_config.target_pid = 100;
+    trig_config.pacing_profile = stuttometer::PacingProfile::AUTO_ADAPTIVE;
+    trig_config.present_threshold_ms = 16.67;
+    trig_config.frame_trigger_mode = stuttometer::FrameTriggerMode::HYBRID;
+
+    stuttometer::TriggerEngine engine(trig_config, qpc_freq);
+    engine.set_benchmark_sink(&benchmark);
+    benchmark.set_pacing_context(
+        trig_config.pacing_profile,
+        trig_config.present_threshold_ms,
+        trig_config.spike_multiplier,
+        trig_config.min_spike_delta_ms
+    );
+
+    // 1. Uniform sequence: Feed 16 frames at 7.14 ms (140 FPS)
+    const uint64_t stream_key = 0x1000ULL;
+    for (int i = 0; i < 16; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(7.14, qpc_freq);
+        engine.on_dxgi_present(100, 200, 7.14, qpc, stream_key, 0);
+        benchmark.ingest_frame(100, 7.14, qpc);
+    }
+
+    auto summary1 = benchmark.get_summary();
+    double test_stream_baseline = engine.current_stream_baseline_ms_for_test(stream_key, 100, 200);
+    STUTTO_ASSERT(std::abs(summary1.rolling_baseline_ms - test_stream_baseline) < 1e-9);
+    STUTTO_ASSERT(summary1.binding_floor_source == stuttometer::BindingFloorSource::DYNAMIC);
+    // At 140 FPS (7.14ms): mult ~ 1.54, delta ~ 2.14 -> floor = max(7.14 * 1.54, 7.14 + 2.14) ~ 11.0 ms
+    STUTTO_ASSERT(std::abs(summary1.estimated_binding_floor_ms - 11.0) < 0.15);
+
+    // 2. Stutter rejection sequence: Feed 1 frame at 15.0 ms (triggers RELATIVE_SPIKE)
+    qpc += stuttometer::ms_to_qpc_delta(15.0, qpc_freq);
+    engine.on_dxgi_present(100, 200, 15.0, qpc, stream_key, 0);
+    benchmark.ingest_frame(100, 15.0, qpc);
+
+    auto summary2 = benchmark.get_summary();
+    // Baseline must remain clean 7.14 ms (not polluted by 15.0 ms stutter frame)
+    STUTTO_ASSERT(std::abs(summary2.rolling_baseline_ms - 7.14) < 0.05);
+
+    std::cout << "[TEST 15] PASSED\n";
+}
+
+static void test_cadence_standalone_fallback_state2() {
+    std::cout << "[TEST 16] Cadence Standalone Fallback State 2 Test...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    uint64_t qpc = stuttometer::get_current_qpc();
+
+    // Pass 1 empty fixture: 10 frames all at 150.0 ms (>= 100.0 ms) -> falls back to session mean
+    {
+        stuttometer::SessionBenchmark benchmark(qpc_freq);
+        benchmark.retarget(100);
+        for (int i = 0; i < 10; ++i) {
+            qpc += stuttometer::ms_to_qpc_delta(150.0, qpc_freq);
+            benchmark.ingest_frame(100, 150.0, qpc);
+        }
+        auto summary = benchmark.get_summary();
+        STUTTO_ASSERT(std::abs(summary.rolling_baseline_ms - 150.0) < 1e-3);
+    }
+
+    // Pass 2 fallback fixture: 8 frames with 6 frames at 10.0 ms and 2 frames at 25.0 ms
+    // Pass 1 clean frames: all 8 frames (< 100ms). Median = 10.0 ms.
+    // Pass 2 clean filter: <= 1.4 * 10.0 = 14.0 ms. Only 6 frames remain (< 8).
+    // Must fall back to Pass 1 median = 10.0 ms.
+    {
+        stuttometer::SessionBenchmark benchmark(qpc_freq);
+        benchmark.retarget(100);
+        for (int i = 0; i < 6; ++i) {
+            qpc += stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+            benchmark.ingest_frame(100, 10.0, qpc);
+        }
+        for (int i = 0; i < 2; ++i) {
+            qpc += stuttometer::ms_to_qpc_delta(25.0, qpc_freq);
+            benchmark.ingest_frame(100, 25.0, qpc);
+        }
+        auto summary = benchmark.get_summary();
+        STUTTO_ASSERT(std::abs(summary.rolling_baseline_ms - 10.0) < 1e-3);
+    }
+
+    std::cout << "[TEST 16] PASSED\n";
+}
+
+static void test_cadence_custom_context_and_session_stop() {
+    std::cout << "[TEST 17] Custom Context & Session-Stop Persistence Test...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(100);
+
+    benchmark.set_pacing_context(
+        stuttometer::PacingProfile::CUSTOM,
+        50.0,
+        3.0,
+        5.0
+    );
+
+    // Push live telemetry
+    benchmark.update_pacing_telemetry(10.0, 3.0, 5.0);
+
+    auto summary = benchmark.get_summary();
+    STUTTO_ASSERT(summary.pacing_profile == stuttometer::PacingProfile::CUSTOM);
+    STUTTO_ASSERT(std::abs(summary.rolling_baseline_ms - 10.0) < 1e-3);
+    STUTTO_ASSERT(std::abs(summary.estimated_dynamic_floor_ms - 30.0) < 1e-3); // max(10 * 3, 10 + 5) = 30.0
+
+    // Emulate session stop: benchmark is NOT reset or retargeted, telemetry persists
+    auto summary_after_stop = benchmark.get_summary();
+    STUTTO_ASSERT(std::abs(summary_after_stop.rolling_baseline_ms - 10.0) < 1e-3);
+    STUTTO_ASSERT(summary_after_stop.binding_floor_source == stuttometer::BindingFloorSource::DYNAMIC);
+
+    std::cout << "[TEST 17] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -467,11 +619,16 @@ int main() {
         test_concurrency_stress();
         test_trigger_engine_canonical_routing();
         test_serialization_and_tag_stats();
+        test_cadence_state3_warmup_and_redaction();
+        test_cadence_integrated_pipeline();
+        test_cadence_standalone_fallback_state2();
+        test_cadence_custom_context_and_session_stop();
 
-        std::cout << "\nAll Session Benchmark tests PASSED successfully!\n";
+        std::cout << "\nAll 17 Session Benchmark tests PASSED successfully!\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\nTest suite failed with exception: " << ex.what() << "\n";
         return 1;
     }
 }
+

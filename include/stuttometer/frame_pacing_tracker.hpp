@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <type_traits>
 #include <string_view>
+#include <optional>
 #include "privilege_utils.hpp"
 
 namespace stuttometer {
@@ -45,6 +46,96 @@ inline std::string_view frame_trigger_mode_to_string(FrameTriggerMode m) noexcep
         case FrameTriggerMode::STATIC_ONLY:  return "static";
         default:                             return "hybrid";
     }
+}
+
+enum class PacingProfile : uint8_t {
+    AUTO_ADAPTIVE = 0,
+    HIGH_REFRESH  = 1,
+    CONSERVATIVE  = 2,
+    CUSTOM        = 3
+};
+
+inline constexpr double HIGH_REFRESH_SPIKE_MULTIPLIER = 1.4;
+inline constexpr double HIGH_REFRESH_MIN_DELTA_MS     = 1.5;
+inline constexpr double CONSERVATIVE_SPIKE_MULTIPLIER = 2.0;
+inline constexpr double CONSERVATIVE_MIN_DELTA_MS     = 4.0;
+
+inline std::string_view pacing_profile_to_string(PacingProfile p) noexcept {
+    switch (p) {
+        case PacingProfile::AUTO_ADAPTIVE: return "auto_adaptive";
+        case PacingProfile::HIGH_REFRESH:  return "high_refresh";
+        case PacingProfile::CONSERVATIVE:  return "conservative";
+        case PacingProfile::CUSTOM:        return "custom";
+        default:                           return "auto_adaptive";
+    }
+}
+
+// Case-insensitive deserializer for JSON and settings.json
+inline PacingProfile pacing_profile_from_string(std::string_view s) noexcept {
+    auto iequals = [](std::string_view a, std::string_view b) noexcept {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            char ca = a[i];
+            char cb = b[i];
+            if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + ('a' - 'A'));
+            if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + ('a' - 'A'));
+            if (ca != cb) return false;
+        }
+        return true;
+    };
+
+    if (iequals(s, "auto_adaptive") || iequals(s, "auto-adaptive") || iequals(s, "auto")) {
+        return PacingProfile::AUTO_ADAPTIVE;
+    }
+    if (iequals(s, "high_refresh") || iequals(s, "high-refresh")) {
+        return PacingProfile::HIGH_REFRESH;
+    }
+    if (iequals(s, "conservative")) {
+        return PacingProfile::CONSERVATIVE;
+    }
+    if (iequals(s, "custom")) {
+        return PacingProfile::CUSTOM;
+    }
+    return PacingProfile::AUTO_ADAPTIVE;
+}
+
+// Strictly used by CLI parser
+inline std::optional<PacingProfile> pacing_profile_from_cli_string(std::string_view s) noexcept {
+    if (s == "auto") {
+        return PacingProfile::AUTO_ADAPTIVE;
+    }
+    if (s == "high-refresh") {
+        return PacingProfile::HIGH_REFRESH;
+    }
+    if (s == "conservative") {
+        return PacingProfile::CONSERVATIVE;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] constexpr inline double calculate_effective_static_threshold(double present_threshold_ms) noexcept {
+    const double jitter_guard = std::max(0.5, present_threshold_ms * 0.05);
+    return present_threshold_ms + jitter_guard;
+}
+
+struct AdaptivePacingParams {
+    double spike_multiplier{2.0};
+    double min_spike_delta_ms{4.0};
+};
+
+[[nodiscard]] inline AdaptivePacingParams compute_adaptive_pacing_params(double mean_ms) noexcept {
+    if (mean_ms <= 0.0) {
+        return { CONSERVATIVE_SPIKE_MULTIPLIER, CONSERVATIVE_MIN_DELTA_MS };
+    }
+    constexpr double T_240_FPS_MS = 1000.0 / 240.0;
+    constexpr double T_60_FPS_MS  = 1000.0 / 60.0;
+
+    const double clamped_t = std::clamp(mean_ms, T_240_FPS_MS, T_60_FPS_MS);
+    const double factor = (clamped_t - T_240_FPS_MS) / (T_60_FPS_MS - T_240_FPS_MS);
+    const double mult = HIGH_REFRESH_SPIKE_MULTIPLIER + factor * (CONSERVATIVE_SPIKE_MULTIPLIER - HIGH_REFRESH_SPIKE_MULTIPLIER);
+    const double delta = std::clamp(mean_ms * 0.3, HIGH_REFRESH_MIN_DELTA_MS, CONSERVATIVE_MIN_DELTA_MS);
+
+    return { mult, delta };
 }
 
 // 64-slot lock-free power-of-two circular buffer for stream frame delivery statistics
@@ -171,7 +262,8 @@ inline FramePacingResult evaluate_frame_pacing(
     double min_spike_delta_ms,
     bool enable_judder,
     double judder_swing_ratio,
-    double effective_static_threshold_ms
+    double effective_static_threshold_ms,
+    PacingProfile profile = PacingProfile::CUSTOM
 ) noexcept {
     FramePacingResult res{};
 
@@ -201,6 +293,18 @@ inline FramePacingResult evaluate_frame_pacing(
     res.baseline_avg_ms = mean_ms;
     res.baseline_fps = (mean_ms > 0.0) ? (1000.0 / mean_ms) : 0.0;
     res.spike_ratio = (mean_ms > 0.0) ? (dur_ms / mean_ms) : 1.0;
+
+    if (profile == PacingProfile::AUTO_ADAPTIVE) {
+        const auto params = compute_adaptive_pacing_params(mean_ms);
+        spike_multiplier = params.spike_multiplier;
+        min_spike_delta_ms = params.min_spike_delta_ms;
+    } else if (profile == PacingProfile::HIGH_REFRESH) {
+        spike_multiplier = HIGH_REFRESH_SPIKE_MULTIPLIER;
+        min_spike_delta_ms = HIGH_REFRESH_MIN_DELTA_MS;
+    } else if (profile == PacingProfile::CONSERVATIVE) {
+        spike_multiplier = CONSERVATIVE_SPIKE_MULTIPLIER;
+        min_spike_delta_ms = CONSERVATIVE_MIN_DELTA_MS;
+    }
 
     if (stats.sample_count < 8) {
         if (mode == FrameTriggerMode::STATIC_ONLY) {

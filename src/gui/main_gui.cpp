@@ -162,6 +162,8 @@ constexpr int IDC_SET_EDIT_VRAM_DEMOTED    = 2031;
 constexpr int IDC_SET_CHK_OSD              = 2032;
 constexpr int IDC_SET_COMBO_OSD_POS        = 2033;
 constexpr int IDC_SET_BTN_CANCEL           = 2034;
+constexpr int IDC_SET_COMBO_PACING_PROFILE = 2035;
+constexpr int IDC_SET_LBL_PROFILE_HINT     = 2036;
 
 // Global Hotkeys
 constexpr int ID_HOTKEY_TOGGLE_CAPTURE = 9001;
@@ -328,11 +330,11 @@ struct GdiThemeCache {
         pen_btn_quick_hover = CreatePen(PS_SOLID, 1, RGB(65, 78, 105));
         pen_btn_quick_pressed = CreatePen(PS_SOLID, 1, RGB(42, 50, 68));
 
-        // Cached Attribution & Iconography Brushes
-        br_attr_game_engine = CreateSolidBrush(RGB(245, 158, 11));
-        br_attr_dwm_composition = CreateSolidBrush(RGB(168, 85, 247));
-        br_attr_external_contention = CreateSolidBrush(RGB(239, 68, 68));
-        br_attr_unknown = CreateSolidBrush(RGB(100, 116, 139));
+        // Cached Attribution & Iconography Brushes (unified 35% desaturated palette)
+        br_attr_game_engine = CreateSolidBrush(RGB(218, 161, 66));
+        br_attr_dwm_composition = CreateSolidBrush(RGB(154, 100, 205));
+        br_attr_external_contention = CreateSolidBrush(RGB(197, 86, 86));
+        br_attr_unknown = CreateSolidBrush(RGB(105, 115, 130));
         br_beacon_idle = CreateSolidBrush(RGB(75, 85, 99));
 
         // Buttons: Disabled
@@ -682,6 +684,16 @@ static void load_user_settings() {
             double v = j["min_spike_delta_ms"].get<double>();
             if (v >= 1.0 && v <= 50.0) g_settings_config.min_spike_delta_ms = v;
         }
+        if (j.contains("pacing_profile") && j["pacing_profile"].is_string()) {
+            std::string p_str = j["pacing_profile"].get<std::string>();
+            g_settings_config.pacing_profile = pacing_profile_from_string(p_str);
+        } else {
+            // Epsilon migration for legacy configs against TriggerConfig defaults
+            TriggerConfig def_cfg{};
+            bool is_custom = (std::abs(g_settings_config.spike_multiplier - def_cfg.spike_multiplier) > 1e-9 ||
+                              std::abs(g_settings_config.min_spike_delta_ms - def_cfg.min_spike_delta_ms) > 1e-9);
+            g_settings_config.pacing_profile = is_custom ? PacingProfile::CUSTOM : PacingProfile::AUTO_ADAPTIVE;
+        }
         if (j.contains("enable_judder_detection") && j["enable_judder_detection"].is_boolean()) {
             g_settings_config.enable_judder_detection = j["enable_judder_detection"].get<bool>();
         }
@@ -749,6 +761,7 @@ static void save_user_settings() {
         j["mem_trim_threshold_mb"] = g_settings_config.mem_trim_threshold_mb;
         j["mem_physical_latency_us"] = g_settings_config.mem_physical_latency_us;
         j["frame_trigger_mode"] = std::string(frame_trigger_mode_to_string(g_settings_config.frame_trigger_mode));
+        j["pacing_profile"] = pacing_profile_to_string(g_settings_config.pacing_profile);
         j["spike_multiplier"] = g_settings_config.spike_multiplier;
         j["min_spike_delta_ms"] = g_settings_config.min_spike_delta_ms;
         j["enable_judder_detection"] = g_settings_config.enable_judder_detection;
@@ -778,37 +791,8 @@ static void save_user_settings() {
 // -----------------------------------------------------------------------------
 // Settings Dialog Implementation
 // -----------------------------------------------------------------------------
-struct SettingsSnapshot {
-    std::wstring hotkey_str;
-    bool sound{false};
-    bool redact{false};
-    bool audio{false};
-    bool auto_save{false};
-    std::wstring auto_save_dir;
-    bool osd{false};
-    int osd_pos{0};
-    int tier{0};
-    std::wstring pre_win;
-    std::wstring post_win;
-    std::wstring cooldown;
-    int buffer_sel{0};
-    std::wstring dpc;
-    std::wstring isr;
-    std::wstring disk;
-    std::wstring cswitch;
-    std::wstring smi;
-    std::wstring mem_alloc;
-    std::wstring mem_trim;
-    std::wstring mem_phys;
-    std::wstring d3d12_pso;
-    std::wstring vram_demoted;
-    int trig_mode{0};
-    std::wstring target_fps;
-    std::wstring spike_mult;
-    std::wstring min_delta;
-    bool judder{false};
-};
-
+// Settings Dialog State & Event Handling
+// -----------------------------------------------------------------------------
 struct SettingsDialogState {
     UINT hotkey_vk{VK_F11};
     UINT hotkey_mods{MOD_CONTROL};
@@ -842,13 +826,20 @@ struct SettingsDialogState {
     HWND h_edit_d3d12_pso{nullptr};
     HWND h_edit_vram_demoted{nullptr};
     HWND h_combo_trig_mode{nullptr};
+    HWND h_combo_pacing_profile{nullptr};
     HWND h_edit_target_fps{nullptr};
     HWND h_edit_spike_mult{nullptr};
     HWND h_edit_min_delta{nullptr};
+    HWND h_lbl_profile_hint{nullptr};
     HWND h_chk_judder{nullptr};
     HWND h_btn_reset{nullptr};
     HWND h_btn_cancel{nullptr};
     HWND h_btn_save{nullptr};
+
+    PacingProfile current_profile{PacingProfile::AUTO_ADAPTIVE};
+    PacingProfile previous_preset{PacingProfile::AUTO_ADAPTIVE};
+    double custom_spike_mult{2.0};
+    double custom_min_delta{4.0};
 
     // Synchronized Hit-Testing Rectangles for Master Banner & Checkbox Labels
     RECT rc_banner{};
@@ -859,8 +850,6 @@ struct SettingsDialogState {
     RECT rc_lbl_auto_save{};
     RECT rc_lbl_osd{};
     RECT rc_lbl_judder{};
-
-    SettingsSnapshot initial_snapshot{};
 };
 
 // Common helper: Dynamically vertically centers text in multiline edit controls based on font metrics
@@ -1045,50 +1034,6 @@ static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM 
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-static std::wstring get_ctrl_text(HWND hwnd) {
-    if (!hwnd) return L"";
-    int len = GetWindowTextLengthW(hwnd);
-    if (len <= 0) return L"";
-    std::wstring s(len + 1, 0);
-    GetWindowTextW(hwnd, s.data(), len + 1);
-    s.resize(len);
-    return s;
-}
-
-static bool is_settings_dirty(SettingsDialogState* state) {
-    if (!state) return false;
-    const auto& snap = state->initial_snapshot;
-    if (get_ctrl_text(state->h_hotkey_edit) != snap.hotkey_str) return true;
-    if ((SendMessageW(state->h_chk_sound, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.sound) return true;
-    if ((SendMessageW(state->h_chk_redact, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.redact) return true;
-    if ((SendMessageW(state->h_chk_audio, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.audio) return true;
-    if ((SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.auto_save) return true;
-    if (get_ctrl_text(state->h_edit_auto_save) != snap.auto_save_dir) return true;
-    if ((SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.osd) return true;
-    if (static_cast<int>(SendMessageW(state->h_combo_osd_pos, CB_GETCURSEL, 0, 0)) != snap.osd_pos) return true;
-    if (static_cast<int>(SendMessageW(state->h_combo_tier, CB_GETCURSEL, 0, 0)) != snap.tier) return true;
-    if (get_ctrl_text(state->h_edit_pre_win) != snap.pre_win) return true;
-    if (get_ctrl_text(state->h_edit_post_win) != snap.post_win) return true;
-    if (get_ctrl_text(state->h_edit_cooldown) != snap.cooldown) return true;
-    if (static_cast<int>(SendMessageW(state->h_combo_buffer, CB_GETCURSEL, 0, 0)) != snap.buffer_sel) return true;
-    if (get_ctrl_text(state->h_edit_dpc) != snap.dpc) return true;
-    if (get_ctrl_text(state->h_edit_isr) != snap.isr) return true;
-    if (get_ctrl_text(state->h_edit_disk) != snap.disk) return true;
-    if (get_ctrl_text(state->h_edit_cswitch) != snap.cswitch) return true;
-    if (get_ctrl_text(state->h_edit_smi) != snap.smi) return true;
-    if (get_ctrl_text(state->h_edit_mem_alloc) != snap.mem_alloc) return true;
-    if (get_ctrl_text(state->h_edit_mem_trim) != snap.mem_trim) return true;
-    if (get_ctrl_text(state->h_edit_mem_phys) != snap.mem_phys) return true;
-    if (get_ctrl_text(state->h_edit_d3d12_pso) != snap.d3d12_pso) return true;
-    if (get_ctrl_text(state->h_edit_vram_demoted) != snap.vram_demoted) return true;
-    if (static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0)) != snap.trig_mode) return true;
-    if (get_ctrl_text(state->h_edit_target_fps) != snap.target_fps) return true;
-    if (get_ctrl_text(state->h_edit_spike_mult) != snap.spike_mult) return true;
-    if (get_ctrl_text(state->h_edit_min_delta) != snap.min_delta) return true;
-    if ((SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED) != snap.judder) return true;
-    return false;
-}
-
 static void update_settings_dependencies(SettingsDialogState* state) {
     if (!state) return;
     bool auto_save_enabled = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1116,9 +1061,34 @@ static void update_settings_dependencies(SettingsDialogState* state) {
     EnableWindow(state->h_edit_vram_demoted, enable_adv);
     EnableWindow(state->h_combo_trig_mode, enable_adv);
     EnableWindow(state->h_edit_target_fps, enable_adv);
-    EnableWindow(state->h_edit_spike_mult, enable_adv);
-    EnableWindow(state->h_edit_min_delta, enable_adv);
+
+    int tm_sel = static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0));
+    FrameTriggerMode mode = (tm_sel == 1) ? FrameTriggerMode::DYNAMIC_ONLY : ((tm_sel == 2) ? FrameTriggerMode::STATIC_ONLY : FrameTriggerMode::HYBRID);
+
+    bool enable_profile = (mode != FrameTriggerMode::STATIC_ONLY);
+    EnableWindow(state->h_combo_pacing_profile, enable_profile);
+
+    bool enable_spike_edits = (state->advanced_unlocked && state->current_profile == PacingProfile::CUSTOM && mode != FrameTriggerMode::STATIC_ONLY);
+    EnableWindow(state->h_edit_spike_mult, enable_spike_edits);
+    EnableWindow(state->h_edit_min_delta, enable_spike_edits);
+
     EnableWindow(state->h_chk_judder, enable_adv);
+
+    if (mode == FrameTriggerMode::STATIC_ONLY) {
+        SetWindowTextW(state->h_lbl_profile_hint, L"(N/A in Static Only mode)");
+    } else if (state->current_profile == PacingProfile::CUSTOM) {
+        if (!state->advanced_unlocked) {
+            SetWindowTextW(state->h_lbl_profile_hint, L"Custom profile active \u2014 click 'Unlock Advanced Settings' below to edit");
+        } else {
+            SetWindowTextW(state->h_lbl_profile_hint, L"");
+        }
+    } else {
+        if (state->advanced_unlocked) {
+            SetWindowTextW(state->h_lbl_profile_hint, L"Preset locked \u2014 select Custom Calibration to edit");
+        } else {
+            SetWindowTextW(state->h_lbl_profile_hint, L"");
+        }
+    }
 
     InvalidateRect(state->h_combo_tier, NULL, TRUE);
     InvalidateRect(state->h_combo_buffer, NULL, TRUE);
@@ -1136,22 +1106,34 @@ static void update_settings_dependencies(SettingsDialogState* state) {
     InvalidateRect(state->h_edit_d3d12_pso, NULL, TRUE);
     InvalidateRect(state->h_edit_vram_demoted, NULL, TRUE);
     InvalidateRect(state->h_combo_trig_mode, NULL, TRUE);
+    InvalidateRect(state->h_combo_pacing_profile, NULL, TRUE);
     InvalidateRect(state->h_edit_target_fps, NULL, TRUE);
     InvalidateRect(state->h_edit_spike_mult, NULL, TRUE);
     InvalidateRect(state->h_edit_min_delta, NULL, TRUE);
+    InvalidateRect(state->h_lbl_profile_hint, NULL, TRUE);
     InvalidateRect(state->h_chk_judder, NULL, TRUE);
 }
 
-static bool confirm_discard_if_dirty(HWND hwnd, SettingsDialogState* state) {
-    if (!state) return true;
-    if (is_settings_dirty(state)) {
+static void toggle_advanced_settings(HWND hwnd, SettingsDialogState* state) {
+    if (!state) return;
+    if (!state->advanced_unlocked) {
         int res = MessageBoxW(hwnd,
-            L"You have unsaved changes in Settings.\n\nDo you want to discard them?",
-            L"Discard Changes",
-            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
-        return (res == IDYES);
+            L"Modifying ETW provider tiers, buffer capacities, frame pacing triggers, or anomaly thresholds can impact diagnostic accuracy, memory consumption, or ETW tracing overhead.\n\nAre you sure you want to unlock advanced settings?",
+            L"Advanced Settings Safeguard",
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+        if (res == IDYES) {
+            state->advanced_unlocked = true;
+            SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_CHECKED, 0);
+        } else {
+            state->advanced_unlocked = false;
+            SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_UNCHECKED, 0);
+        }
+    } else {
+        state->advanced_unlocked = false;
+        SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_UNCHECKED, 0);
     }
-    return true;
+    update_settings_dependencies(state);
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
@@ -1272,21 +1254,29 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     const int c2_y = scale_y(266);
     const int c2_w = col_w;
 
-    int p1_y = c2_y + scale_y(36);
-    MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(140), p1_y + scale_dpi(1), c2_w - scale_dpi(154), scale_dpi(150), TRUE);
+    int p1_y = c2_y + scale_y(30);
+    MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(134), p1_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
 
-    int p2_y = c2_y + scale_y(68);
-    MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(140), p2_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
+    int p2_y = c2_y + scale_y(60);
+    MoveWindow(state->h_combo_pacing_profile, c2_x + scale_dpi(134), p2_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
 
-    int p3_y = c2_y + scale_y(100);
-    MoveWindow(state->h_edit_spike_mult, c2_x + scale_dpi(140), p3_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
+    int p3_y = c2_y + scale_y(90);
+    MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(134), p3_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
 
     int p4_y = c2_y + scale_y(132);
-    MoveWindow(state->h_edit_min_delta, c2_x + scale_dpi(140), p4_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
+    int sm_edit_x = c2_x + scale_dpi(134);
+    int th_pacing_w = scale_dpi(44);
+    MoveWindow(state->h_edit_spike_mult, sm_edit_x, p4_y + scale_dpi(1), th_pacing_w, ctrl_h, TRUE);
 
-    int p5_y = c2_y + scale_y(164);
-    MoveWindow(state->h_chk_judder, c2_x + scale_dpi(14), p5_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_judder = { c2_x + scale_dpi(32), p5_y, (std::min<int>)(c2_x + scale_dpi(32) + static_cast<int>(sz_jud.cx) + scale_dpi(6), c2_x + c2_w - scale_dpi(14)), p5_y + ctrl_h };
+    int md_edit_x = c2_x + scale_dpi(354);
+    MoveWindow(state->h_edit_min_delta, md_edit_x, p4_y + scale_dpi(1), th_pacing_w, ctrl_h, TRUE);
+
+    int p5_hint_y = c2_y + scale_y(160);
+    MoveWindow(state->h_lbl_profile_hint, c2_x + scale_dpi(14), p5_hint_y, c2_w - scale_dpi(28), scale_dpi(18), TRUE);
+
+    int p6_jud_y = c2_y + scale_y(186);
+    MoveWindow(state->h_chk_judder, c2_x + scale_dpi(14), p6_jud_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_judder = { c2_x + scale_dpi(32), p6_jud_y, (std::min<int>)(c2_x + scale_dpi(32) + static_cast<int>(sz_jud.cx) + scale_dpi(6), c2_x + c2_w - scale_dpi(14)), p6_jud_y + ctrl_h };
 
     // ==========================================
     // RIGHT COLUMN: Card 4 (Kernel & System Anomaly Thresholds) (Y: 266, H: 232)
@@ -1353,14 +1343,13 @@ static void dismiss_settings_dialog(HWND hDlg) {
     DestroyWindow(hDlg);
 }
 
+static bool s_settings_saved = false;
+
 static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<SettingsDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (uMsg) {
         case WM_CLOSE: {
-            if (!confirm_discard_if_dirty(hwnd, state)) {
-                return 0;
-            }
             dismiss_settings_dialog(hwnd);
             return 0;
         }
@@ -1556,23 +1545,70 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             apply_control_dark_theme(state->h_combo_trig_mode);
             SetWindowSubclass(state->h_combo_trig_mode, DarkComboSubclassProc, IDC_SET_COMBO_TRIG_MODE, 0);
 
+            state->h_combo_pacing_profile = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_PACING_PROFILE, NULL, NULL);
+            SendMessageW(state->h_combo_pacing_profile, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
+            SendMessageW(state->h_combo_pacing_profile, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
+            SendMessageW(state->h_combo_pacing_profile, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
+            SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"Auto-Adaptive (Dynamic Baseline)");
+            SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"High-Refresh / Low-Latency (1.4x / 1.5ms)");
+            SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"Standard Presentation (Console Parity: 2.0x / 4.0ms)");
+            SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"Custom Calibration");
+
+            state->current_profile = g_settings_config.pacing_profile;
+            state->previous_preset = (g_settings_config.pacing_profile == PacingProfile::CUSTOM)
+                                        ? PacingProfile::AUTO_ADAPTIVE
+                                        : g_settings_config.pacing_profile;
+            state->custom_spike_mult = g_settings_config.spike_multiplier;
+            state->custom_min_delta = g_settings_config.min_spike_delta_ms;
+
+            int prof_idx = 0;
+            switch (state->current_profile) {
+                case PacingProfile::AUTO_ADAPTIVE: prof_idx = 0; break;
+                case PacingProfile::HIGH_REFRESH: prof_idx = 1; break;
+                case PacingProfile::CONSERVATIVE: prof_idx = 2; break;
+                case PacingProfile::CUSTOM: prof_idx = 3; break;
+            }
+            SendMessageW(state->h_combo_pacing_profile, CB_SETCURSEL, prof_idx, 0);
+            apply_control_dark_theme(state->h_combo_pacing_profile);
+            SetWindowSubclass(state->h_combo_pacing_profile, DarkComboSubclassProc, IDC_SET_COMBO_PACING_PROFILE, 0);
+
             swprintf_s(num_buf, L"%.0f", (g_settings_config.present_threshold_ms > 0.0) ? (1000.0 / g_settings_config.present_threshold_ms) : 60.0);
             state->h_edit_target_fps = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_TARGET_FPS, NULL, NULL);
             SetWindowSubclass(state->h_edit_target_fps, EditCenteredSubclassProc, IDC_SET_EDIT_TARGET_FPS, 0);
             SendMessageW(state->h_edit_target_fps, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(state->h_edit_target_fps);
 
-            swprintf_s(num_buf, L"%.1f", g_settings_config.spike_multiplier);
+            if (state->current_profile == PacingProfile::AUTO_ADAPTIVE) {
+                wcscpy_s(num_buf, L"Auto");
+            } else if (state->current_profile == PacingProfile::HIGH_REFRESH) {
+                wcscpy_s(num_buf, L"1.4");
+            } else if (state->current_profile == PacingProfile::CONSERVATIVE) {
+                wcscpy_s(num_buf, L"2.0");
+            } else {
+                swprintf_s(num_buf, L"%.1f", state->custom_spike_mult);
+            }
             state->h_edit_spike_mult = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_SPIKE_MULT, NULL, NULL);
             SetWindowSubclass(state->h_edit_spike_mult, EditCenteredSubclassProc, IDC_SET_EDIT_SPIKE_MULT, 0);
             SendMessageW(state->h_edit_spike_mult, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(state->h_edit_spike_mult);
 
-            swprintf_s(num_buf, L"%.1f", g_settings_config.min_spike_delta_ms);
+            if (state->current_profile == PacingProfile::AUTO_ADAPTIVE) {
+                wcscpy_s(num_buf, L"Auto");
+            } else if (state->current_profile == PacingProfile::HIGH_REFRESH) {
+                wcscpy_s(num_buf, L"1.5");
+            } else if (state->current_profile == PacingProfile::CONSERVATIVE) {
+                wcscpy_s(num_buf, L"4.0");
+            } else {
+                swprintf_s(num_buf, L"%.1f", state->custom_min_delta);
+            }
             state->h_edit_min_delta = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_MIN_DELTA, NULL, NULL);
             SetWindowSubclass(state->h_edit_min_delta, EditCenteredSubclassProc, IDC_SET_EDIT_MIN_DELTA, 0);
             SendMessageW(state->h_edit_min_delta, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(state->h_edit_min_delta);
+
+            state->h_lbl_profile_hint = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_LBL_PROFILE_HINT, NULL, NULL);
+            SendMessageW(state->h_lbl_profile_hint, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
+            apply_control_dark_theme(state->h_lbl_profile_hint);
 
             state->h_chk_judder = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_JUDDER, NULL, NULL);
             SendMessageW(state->h_chk_judder, BM_SETCHECK, g_settings_config.enable_judder_detection ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1592,7 +1628,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SetWindowSubclass(state->h_btn_save, DarkButtonSubclassProc, IDC_SET_BTN_SAVE, 0);
 
             if (!state->h_hotkey_edit || !state->h_chk_sound || !state->h_chk_redact ||
-                !state->h_chk_audio || !state->h_btn_save || !state->h_btn_cancel) {
+                !state->h_chk_audio || !state->h_btn_save || !state->h_btn_cancel || !state->h_combo_pacing_profile) {
                 std::cerr << "[GUI] Error: Failed to allocate essential controls for Settings dialog.\n";
                 delete state;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1601,37 +1637,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             layout_settings_controls(hwnd, state);
             update_settings_dependencies(state);
-
-            // Capture initial snapshot for dirty tracking
-            state->initial_snapshot.hotkey_str = get_ctrl_text(state->h_hotkey_edit);
-            state->initial_snapshot.sound = (SendMessageW(state->h_chk_sound, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            state->initial_snapshot.redact = (SendMessageW(state->h_chk_redact, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            state->initial_snapshot.audio = (SendMessageW(state->h_chk_audio, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            state->initial_snapshot.auto_save = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            state->initial_snapshot.auto_save_dir = get_ctrl_text(state->h_edit_auto_save);
-            state->initial_snapshot.osd = (SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            state->initial_snapshot.osd_pos = static_cast<int>(SendMessageW(state->h_combo_osd_pos, CB_GETCURSEL, 0, 0));
-            state->initial_snapshot.tier = static_cast<int>(SendMessageW(state->h_combo_tier, CB_GETCURSEL, 0, 0));
-            state->initial_snapshot.pre_win = get_ctrl_text(state->h_edit_pre_win);
-            state->initial_snapshot.post_win = get_ctrl_text(state->h_edit_post_win);
-            state->initial_snapshot.cooldown = get_ctrl_text(state->h_edit_cooldown);
-            state->initial_snapshot.buffer_sel = static_cast<int>(SendMessageW(state->h_combo_buffer, CB_GETCURSEL, 0, 0));
-            state->initial_snapshot.dpc = get_ctrl_text(state->h_edit_dpc);
-            state->initial_snapshot.isr = get_ctrl_text(state->h_edit_isr);
-            state->initial_snapshot.disk = get_ctrl_text(state->h_edit_disk);
-            state->initial_snapshot.cswitch = get_ctrl_text(state->h_edit_cswitch);
-            state->initial_snapshot.smi = get_ctrl_text(state->h_edit_smi);
-            state->initial_snapshot.mem_alloc = get_ctrl_text(state->h_edit_mem_alloc);
-            state->initial_snapshot.mem_trim = get_ctrl_text(state->h_edit_mem_trim);
-            state->initial_snapshot.mem_phys = get_ctrl_text(state->h_edit_mem_phys);
-            state->initial_snapshot.d3d12_pso = get_ctrl_text(state->h_edit_d3d12_pso);
-            state->initial_snapshot.vram_demoted = get_ctrl_text(state->h_edit_vram_demoted);
-            state->initial_snapshot.trig_mode = static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0));
-            state->initial_snapshot.target_fps = get_ctrl_text(state->h_edit_target_fps);
-            state->initial_snapshot.spike_mult = get_ctrl_text(state->h_edit_spike_mult);
-            state->initial_snapshot.min_delta = get_ctrl_text(state->h_edit_min_delta);
-            state->initial_snapshot.judder = (SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
             return 0;
         }
 
@@ -1665,11 +1670,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     update_settings_dependencies(state);
                     InvalidateRect(hwnd, NULL, TRUE);
                 } else if (PtInRect(&state->rc_lbl_adv, pt)) {
-                    BOOL cur = (SendMessageW(state->h_chk_advanced, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                    SendMessageW(state->h_chk_advanced, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
-                    state->advanced_unlocked = !cur;
-                    update_settings_dependencies(state);
-                    InvalidateRect(hwnd, NULL, TRUE);
+                    toggle_advanced_settings(hwnd, state);
                 } else if (PtInRect(&state->rc_lbl_judder, pt) && state->advanced_unlocked) {
                     BOOL cur = (SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     SendMessageW(state->h_chk_judder, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
@@ -1833,36 +1834,70 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             // Card 2 Labels (Frame Pacing & Judder Triggers)
             SelectObject(mem_dc, g_font_ui_bold);
-            SetTextColor(mem_dc, adv_lbl_color);
 
-            int p1_y = c2_y + scale_y(36);
-            RECT rc_lbl_tm = { c2_x + scale_dpi(14), p1_y, c2_x + scale_dpi(136), p1_y + ctrl_h };
+            int p1_y = c2_y + scale_y(30);
+            RECT rc_lbl_tm = { c2_x + scale_dpi(14), p1_y, c2_x + scale_dpi(130), p1_y + ctrl_h };
+            SetTextColor(mem_dc, adv_lbl_color);
             DrawTextW(mem_dc, L"Trigger Mode:", -1, &rc_lbl_tm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            int p2_y = c2_y + scale_y(68);
-            RECT rc_lbl_fps = { c2_x + scale_dpi(14), p2_y, c2_x + scale_dpi(136), p2_y + ctrl_h };
+            int tm_sel_paint = static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0));
+            FrameTriggerMode mode_paint = (tm_sel_paint == 1) ? FrameTriggerMode::DYNAMIC_ONLY : ((tm_sel_paint == 2) ? FrameTriggerMode::STATIC_ONLY : FrameTriggerMode::HYBRID);
+
+            COLORREF prof_lbl_color = (mode_paint != FrameTriggerMode::STATIC_ONLY) ? COLOR_TEXT_LABEL : COLOR_TEXT_MUTED;
+            SetTextColor(mem_dc, prof_lbl_color);
+            int p2_y = c2_y + scale_y(60);
+            RECT rc_lbl_prof = { c2_x + scale_dpi(14), p2_y, c2_x + scale_dpi(130), p2_y + ctrl_h };
+            DrawTextW(mem_dc, L"Sensitivity Profile:", -1, &rc_lbl_prof, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            SetTextColor(mem_dc, adv_lbl_color);
+            int p3_y = c2_y + scale_y(90);
+            RECT rc_lbl_fps = { c2_x + scale_dpi(14), p3_y, c2_x + scale_dpi(130), p3_y + ctrl_h };
             DrawTextW(mem_dc, L"Target FPS Floor:", -1, &rc_lbl_fps, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-            int p3_y = c2_y + scale_y(100);
-            RECT rc_lbl_sm = { c2_x + scale_dpi(14), p3_y, c2_x + scale_dpi(136), p3_y + ctrl_h };
-            DrawTextW(mem_dc, L"Spike Multiplier:", -1, &rc_lbl_sm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-            int p4_y = c2_y + scale_y(132);
-            RECT rc_lbl_md = { c2_x + scale_dpi(14), p4_y, c2_x + scale_dpi(136), p4_y + ctrl_h };
-            DrawTextW(mem_dc, L"Min Spike Delta:", -1, &rc_lbl_md, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-            DrawTextW(mem_dc, L"Enable Presentation Judder Detection", -1, &state->rc_lbl_judder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SelectObject(mem_dc, g_font_ui);
             SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_fps_unit = { c2_x + scale_dpi(204), p2_y, c2_x + c2_w - scale_dpi(14), p2_y + ctrl_h };
+            RECT rc_lbl_fps_unit = { c2_x + scale_dpi(190), p3_y, c2_x + scale_dpi(270), p3_y + ctrl_h };
             DrawTextW(mem_dc, L"10 \u2013 500 FPS", -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            RECT rc_lbl_sm_unit = { c2_x + scale_dpi(204), p3_y, c2_x + c2_w - scale_dpi(14), p3_y + ctrl_h };
-            DrawTextW(mem_dc, L"1.2x \u2013 10.0x", -1, &rc_lbl_sm_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            // Amber warning notice under h_edit_target_fps if target FPS > 83
+            wchar_t fps_chk_buf[32]{};
+            GetWindowTextW(state->h_edit_target_fps, fps_chk_buf, 32);
+            std::wstring w_fps_chk(fps_chk_buf); std::replace(w_fps_chk.begin(), w_fps_chk.end(), L',', L'.');
+            double target_fps_val = _wtof(w_fps_chk.c_str());
+            if (target_fps_val > 83.0) {
+                SelectObject(mem_dc, g_font_ui);
+                SetTextColor(mem_dc, COLOR_ACCENT_AMB);
+                RECT rc_amber = { c2_x + scale_dpi(14), c2_y + scale_y(112), c2_x + c2_w - scale_dpi(14), c2_y + scale_y(128) };
+                DrawTextW(mem_dc, L"High target FPS \u2014 ordinary frame variance above 83 FPS may trigger stutter events.", -1, &rc_amber, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
 
-            RECT rc_lbl_md_unit = { c2_x + scale_dpi(204), p4_y, c2_x + c2_w - scale_dpi(14), p4_y + ctrl_h };
-            DrawTextW(mem_dc, L"1.0 \u2013 50.0 ms", -1, &rc_lbl_md_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            int p4_y = c2_y + scale_y(132);
+            int sm_edit_x = c2_x + scale_dpi(134);
+            int sm_edit_w = scale_dpi(44);
+            int md_edit_x = c2_x + scale_dpi(354);
+            int md_edit_w = scale_dpi(44);
+
+            COLORREF spike_lbl_col = (state->advanced_unlocked && state->current_profile == PacingProfile::CUSTOM && mode_paint != FrameTriggerMode::STATIC_ONLY) ? COLOR_TEXT_LABEL : COLOR_TEXT_MUTED;
+            SelectObject(mem_dc, g_font_ui_bold);
+            SetTextColor(mem_dc, spike_lbl_col);
+
+            RECT rc_lbl_sm = { c2_x + scale_dpi(14), p4_y, sm_edit_x - scale_dpi(4), p4_y + ctrl_h };
+            DrawTextW(mem_dc, L"Spike Multiplier:", -1, &rc_lbl_sm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_md = { c2_x + scale_dpi(234), p4_y, md_edit_x - scale_dpi(4), p4_y + ctrl_h };
+            DrawTextW(mem_dc, L"Min Spike Delta:", -1, &rc_lbl_md, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, g_font_ui);
+            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+            RECT rc_lbl_sm_unit = { sm_edit_x + sm_edit_w + scale_dpi(6), p4_y, c2_x + scale_dpi(228), p4_y + ctrl_h };
+            DrawTextW(mem_dc, L"1.2\u201310x", -1, &rc_lbl_sm_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            RECT rc_lbl_md_unit = { md_edit_x + md_edit_w + scale_dpi(6), p4_y, c2_x + c2_w - scale_dpi(10), p4_y + ctrl_h };
+            DrawTextW(mem_dc, L"1\u201350ms", -1, &rc_lbl_md_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, g_font_ui_bold);
+            SetTextColor(mem_dc, adv_lbl_color);
+            DrawTextW(mem_dc, L"Enable Presentation Judder Detection", -1, &state->rc_lbl_judder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             // Card 4 Labels (Kernel & System Anomaly Thresholds)
             SelectObject(mem_dc, g_font_ui_sm_bold);
@@ -1983,6 +2018,11 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 SetTextColor(hdcStatic, state->advanced_unlocked ? COLOR_ACCENT_AMB : COLOR_TEXT_LABEL);
                 return (LRESULT)g_theme.br_bg;
             }
+            if (state && hCtl == state->h_lbl_profile_hint) {
+                SetBkColor(hdcStatic, COLOR_CARD_BG);
+                SetTextColor(hdcStatic, COLOR_ACCENT_AMB);
+                return (LRESULT)g_theme.br_card;
+            }
             SetBkColor(hdcStatic, COLOR_CARD_BG);
             SetTextColor(hdcStatic, COLOR_TEXT_PRI);
             return (LRESULT)g_theme.br_card;
@@ -2035,9 +2075,92 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             int wmId = LOWORD(wParam);
 
             if (wmId == IDC_SET_CHK_ADVANCED) {
-                state->advanced_unlocked = (SendMessageW(state->h_chk_advanced, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                toggle_advanced_settings(hwnd, state);
+                return 0;
+            }
+
+            if (wmId == IDC_SET_COMBO_TRIG_MODE && HIWORD(wParam) == CBN_SELCHANGE) {
                 update_settings_dependencies(state);
-                RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                InvalidateRect(hwnd, NULL, TRUE);
+                return 0;
+            }
+
+            if (wmId == IDC_SET_COMBO_PACING_PROFILE && HIWORD(wParam) == CBN_SELCHANGE) {
+                int sel = static_cast<int>(SendMessageW(state->h_combo_pacing_profile, CB_GETCURSEL, 0, 0));
+                PacingProfile new_profile = PacingProfile::AUTO_ADAPTIVE;
+                if (sel == 1) new_profile = PacingProfile::HIGH_REFRESH;
+                else if (sel == 2) new_profile = PacingProfile::CONSERVATIVE;
+                else if (sel == 3) new_profile = PacingProfile::CUSTOM;
+
+                if (new_profile == PacingProfile::CUSTOM) {
+                    if (!state->advanced_unlocked) {
+                        int res = MessageBoxW(hwnd,
+                            L"Custom Calibration allows modifying frame pacing multipliers and minimum spike deltas, which directly affect stutter detection sensitivity.\n\nAre you sure you want to unlock advanced settings?",
+                            L"Advanced Settings Safeguard",
+                            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+                        if (res == IDYES) {
+                            state->advanced_unlocked = true;
+                            SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_CHECKED, 0);
+                            state->current_profile = PacingProfile::CUSTOM;
+                            wchar_t sm_buf[32], md_buf[32];
+                            swprintf_s(sm_buf, L"%.1f", state->custom_spike_mult);
+                            swprintf_s(md_buf, L"%.1f", state->custom_min_delta);
+                            SetWindowTextW(state->h_edit_spike_mult, sm_buf);
+                            SetWindowTextW(state->h_edit_min_delta, md_buf);
+                        } else {
+                            // Revert to previous preset
+                            int prev_idx = 0;
+                            switch (state->previous_preset) {
+                                case PacingProfile::AUTO_ADAPTIVE: prev_idx = 0; break;
+                                case PacingProfile::HIGH_REFRESH: prev_idx = 1; break;
+                                case PacingProfile::CONSERVATIVE: prev_idx = 2; break;
+                                default: prev_idx = 0; break;
+                            }
+                            SendMessageW(state->h_combo_pacing_profile, CB_SETCURSEL, prev_idx, 0);
+                            state->current_profile = state->previous_preset;
+                        }
+                    } else {
+                        state->current_profile = PacingProfile::CUSTOM;
+                        wchar_t sm_buf[32], md_buf[32];
+                        swprintf_s(sm_buf, L"%.1f", state->custom_spike_mult);
+                        swprintf_s(md_buf, L"%.1f", state->custom_min_delta);
+                        SetWindowTextW(state->h_edit_spike_mult, sm_buf);
+                        SetWindowTextW(state->h_edit_min_delta, md_buf);
+                    }
+                } else {
+                    // Preset selected
+                    if (state->current_profile == PacingProfile::CUSTOM) {
+                        wchar_t cbuf[64]{};
+                        GetWindowTextW(state->h_edit_spike_mult, cbuf, 64);
+                        std::wstring w_sm(cbuf); std::replace(w_sm.begin(), w_sm.end(), L',', L'.');
+                        double v_sm = _wtof(w_sm.c_str());
+                        if (v_sm >= 1.2 && v_sm <= 10.0) state->custom_spike_mult = v_sm;
+
+                        GetWindowTextW(state->h_edit_min_delta, cbuf, 64);
+                        std::wstring w_md(cbuf); std::replace(w_md.begin(), w_md.end(), L',', L'.');
+                        double v_md = _wtof(w_md.c_str());
+                        if (v_md >= 1.0 && v_md <= 50.0) state->custom_min_delta = v_md;
+                    }
+                    state->previous_preset = new_profile;
+                    state->current_profile = new_profile;
+                    if (new_profile == PacingProfile::AUTO_ADAPTIVE) {
+                        SetWindowTextW(state->h_edit_spike_mult, L"Auto");
+                        SetWindowTextW(state->h_edit_min_delta, L"Auto");
+                    } else if (new_profile == PacingProfile::HIGH_REFRESH) {
+                        SetWindowTextW(state->h_edit_spike_mult, L"1.4");
+                        SetWindowTextW(state->h_edit_min_delta, L"1.5");
+                    } else if (new_profile == PacingProfile::CONSERVATIVE) {
+                        SetWindowTextW(state->h_edit_spike_mult, L"2.0");
+                        SetWindowTextW(state->h_edit_min_delta, L"4.0");
+                    }
+                }
+                update_settings_dependencies(state);
+                InvalidateRect(hwnd, NULL, TRUE);
+                return 0;
+            }
+
+            if (wmId == IDC_SET_EDIT_TARGET_FPS && HIWORD(wParam) == EN_CHANGE) {
+                InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
 
@@ -2110,11 +2233,18 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
                 SendMessageW(state->h_combo_trig_mode, CB_SETCURSEL, 0, 0);
                 SetWindowTextW(state->h_edit_target_fps, L"60");
-                SetWindowTextW(state->h_edit_spike_mult, L"2.0");
-                SetWindowTextW(state->h_edit_min_delta, L"4.0");
+
+                state->current_profile = PacingProfile::AUTO_ADAPTIVE;
+                state->previous_preset = PacingProfile::AUTO_ADAPTIVE;
+                state->custom_spike_mult = 2.0;
+                state->custom_min_delta = 4.0;
+                SendMessageW(state->h_combo_pacing_profile, CB_SETCURSEL, 0, 0);
+                SetWindowTextW(state->h_edit_spike_mult, L"Auto");
+                SetWindowTextW(state->h_edit_min_delta, L"Auto");
                 SendMessageW(state->h_chk_judder, BM_SETCHECK, BST_CHECKED, 0);
 
                 g_settings_config.present_threshold_ms = fps_to_present_threshold_ms(60.0);
+                g_settings_config.pacing_profile = PacingProfile::AUTO_ADAPTIVE;
 
                 SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_UNCHECKED, 0);
                 state->advanced_unlocked = false;
@@ -2124,14 +2254,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             }
 
             if (wmId == IDC_SET_BTN_CANCEL || wmId == IDCANCEL) {
-                if (!confirm_discard_if_dirty(hwnd, state)) {
-                    return 0;
-                }
                 dismiss_settings_dialog(hwnd);
                 return 0;
             }
 
             if (wmId == IDC_SET_BTN_SAVE) {
+                s_settings_saved = true;
                 g_hotkey_vk = state->hotkey_vk;
                 g_hotkey_mods = state->hotkey_mods;
 
@@ -2242,15 +2370,27 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 double clamped_fps = std::clamp(v_fps, 10.0, 500.0);
                 g_settings_config.present_threshold_ms = fps_to_present_threshold_ms(clamped_fps);
 
-                GetWindowTextW(state->h_edit_spike_mult, buf, 64);
-                std::wstring w_sm(buf); std::replace(w_sm.begin(), w_sm.end(), L',', L'.');
-                double v_sm = _wtof(w_sm.c_str());
-                g_settings_config.spike_multiplier = std::clamp(v_sm, 1.2, 10.0);
+                g_settings_config.pacing_profile = state->current_profile;
+                if (state->current_profile == PacingProfile::CUSTOM) {
+                    GetWindowTextW(state->h_edit_spike_mult, buf, 64);
+                    std::wstring w_sm(buf); std::replace(w_sm.begin(), w_sm.end(), L',', L'.');
+                    double v_sm = _wtof(w_sm.c_str());
+                    g_settings_config.spike_multiplier = std::clamp(v_sm, 1.2, 10.0);
 
-                GetWindowTextW(state->h_edit_min_delta, buf, 64);
-                std::wstring w_md(buf); std::replace(w_md.begin(), w_md.end(), L',', L'.');
-                double v_md = _wtof(w_md.c_str());
-                g_settings_config.min_spike_delta_ms = std::clamp(v_md, 1.0, 50.0);
+                    GetWindowTextW(state->h_edit_min_delta, buf, 64);
+                    std::wstring w_md(buf); std::replace(w_md.begin(), w_md.end(), L',', L'.');
+                    double v_md = _wtof(w_md.c_str());
+                    g_settings_config.min_spike_delta_ms = std::clamp(v_md, 1.0, 50.0);
+                } else if (state->current_profile == PacingProfile::HIGH_REFRESH) {
+                    g_settings_config.spike_multiplier = HIGH_REFRESH_SPIKE_MULTIPLIER;
+                    g_settings_config.min_spike_delta_ms = HIGH_REFRESH_MIN_DELTA_MS;
+                } else if (state->current_profile == PacingProfile::CONSERVATIVE) {
+                    g_settings_config.spike_multiplier = CONSERVATIVE_SPIKE_MULTIPLIER;
+                    g_settings_config.min_spike_delta_ms = CONSERVATIVE_MIN_DELTA_MS;
+                } else {
+                    g_settings_config.spike_multiplier = 2.0;
+                    g_settings_config.min_spike_delta_ms = 4.0;
+                }
 
                 g_settings_config.enable_judder_detection = (SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
@@ -2286,7 +2426,11 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 }
 
 static void ShowSettingsDialog(HWND hParent) {
-    if (!hParent) return;
+    if (!hParent || !IsWindow(hParent)) return;
+
+    // Temporarily unregister global hotkey while settings dialog is active to allow re-assignment
+    UnregisterHotKey(hParent, ID_HOTKEY_TOGGLE_CAPTURE);
+    s_settings_saved = false;
 
     HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtrW(hParent, GWLP_HINSTANCE);
 
@@ -2363,9 +2507,22 @@ static void ShowSettingsDialog(HWND hParent) {
         if (!IsWindow(hSettingsDlg)) break;
     }
 
-    EnableWindow(hParent, TRUE);
-    SetForegroundWindow(hParent);
-    SetFocus(hParent);
+    if (hParent && IsWindow(hParent)) {
+        EnableWindow(hParent, TRUE);
+        SetForegroundWindow(hParent);
+        SetFocus(hParent);
+
+        if (!s_settings_saved) {
+            UnregisterHotKey(hParent, ID_HOTKEY_TOGGLE_CAPTURE);
+            if (!RegisterHotKey(hParent, ID_HOTKEY_TOGGLE_CAPTURE, g_hotkey_mods | MOD_NOREPEAT, g_hotkey_vk)) {
+                g_status_text = L"Hotkey Warning: " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is in use by another app";
+                append_engine_log(L"[WARN] Hotkey " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is in use by another application.");
+            }
+            update_metrics_text();
+            if (g_h_list_stutters) InvalidateRect(g_h_list_stutters, NULL, TRUE);
+            InvalidateRect(hParent, NULL, TRUE);
+        }
+    }
 
     if (msg.message == WM_QUIT) {
         PostQuitMessage(static_cast<int>(msg.wParam));
@@ -2995,7 +3152,7 @@ static void draw_custom_button(LPDRAWITEMSTRUCT pdis) {
                 if (is_pressed) {
                     br = g_theme.br_btn_emerald_pressed;
                     pen = g_theme.pen_btn_emerald_pressed;
-                    text_color = RGB(255, 255, 255); // Crisp white on dark emerald pressed (4.7:1 WCAG AA)
+                    text_color = RGB(10, 24, 18);   // Keep text color consistent with normal/hover
                 } else if (is_hovered) {
                     br = g_theme.br_btn_emerald_hover;
                     pen = g_theme.pen_btn_emerald_hover;
@@ -4155,13 +4312,13 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 if (g_selected_stutter_index >= 0 && g_selected_stutter_index < static_cast<int>(g_stutters.size())) {
                     const auto& rec = g_stutters[g_selected_stutter_index];
                     std::wstring tag_text = utf8_to_wstring(attribution_to_string(rec.report ? rec.report->attribution : AttributionTag::UNKNOWN));
-                    COLORREF tag_color = RGB(100, 116, 139);
+                    COLORREF tag_color = RGB(105, 115, 130);
                     if (rec.report) {
                         switch (rec.report->attribution) {
-                            case AttributionTag::GAME_ENGINE: tag_color = RGB(245, 158, 11); break;
-                            case AttributionTag::DWM_COMPOSITION: tag_color = RGB(168, 85, 247); break;
-                            case AttributionTag::EXTERNAL_CONTENTION: tag_color = RGB(239, 68, 68); break;
-                            case AttributionTag::UNKNOWN: default: tag_color = RGB(100, 116, 139); break;
+                            case AttributionTag::GAME_ENGINE: tag_color = RGB(218, 161, 66); break;
+                            case AttributionTag::DWM_COMPOSITION: tag_color = RGB(154, 100, 205); break;
+                            case AttributionTag::EXTERNAL_CONTENTION: tag_color = RGB(197, 86, 86); break;
+                            case AttributionTag::UNKNOWN: default: tag_color = RGB(105, 115, 130); break;
                         }
                     }
 
@@ -4255,7 +4412,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             switch (wmId) {
                 case IDC_BTN_SESSION_SUMMARY: {
                     if (g_controller) {
-                        ShowBenchmarkView(hwnd, g_controller->get_session_benchmark(), g_settings_config.redact);
+                        ShowBenchmarkView(hwnd, g_controller->get_session_benchmark(), g_settings_config.redact, []() {
+                            return g_controller && g_controller->is_capturing();
+                        });
                     }
                     break;
                 }

@@ -77,6 +77,7 @@ struct TriggerConfig {
 
     // Frame Pacing & Dynamic Relative Trigger configuration
     FrameTriggerMode frame_trigger_mode{FrameTriggerMode::HYBRID};
+    PacingProfile pacing_profile{PacingProfile::AUTO_ADAPTIVE};
     double spike_multiplier{2.0};
     double min_spike_delta_ms{4.0};
     bool enable_judder_detection{true};
@@ -144,6 +145,10 @@ public:
             return s.last_frame_timestamp_qpc;
         });
     }
+
+    // Test-only: returns the current rolling baseline for the specified stream key (or derived pid/tid).
+    // Returns 0.0 if the stream is not present or has <1 sample. Not used in production.
+    double current_stream_baseline_ms_for_test(uint64_t stream_key, uint32_t pid, uint32_t tid) const noexcept;
 
 private:
     inline bool should_trigger_on_process(uint32_t pid) const noexcept {

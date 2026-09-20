@@ -54,9 +54,11 @@ stutto_*.json
 Thumbs.db
 desktop.ini
 
-# Repomix & AI bundle outputs
+# Repomix & AI bundle tools & outputs
 codebase*.txt
 repomix-output.*
+repomix.config.json
+split_codebase.*
 
 # Distribution and export artifacts
 dist/

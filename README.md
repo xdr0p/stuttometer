@@ -85,6 +85,9 @@ Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Con
 
 - **Stutter Inspector:** Live report feed with ranked root-cause diagnoses, confidence score meters, and evidence timelines.
 - **Visual Stutter Card:** Export high-resolution diagnostic cards (PNG) or copy directly to clipboard (`CF_DIB` format) for seamless `Ctrl+V` pasting into Discord, Slack, Reddit, GitHub issues, and community forums.
+
+  ![Stuttometer Visual Stutter Card](assets/dummy_card_game_engine.png)
+
 - **In-Game OSD Toast:** Non-intrusive on-screen notification (`WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT`) displaying stall duration, attribution tag, culprit driver/module, and diagnosis summary when a stutter occurs, without stealing game focus or input. *Note: OSD notifications are suppressed by hardware fullscreen-exclusive presentations; use borderless-windowed mode to receive in-game notifications.*
 - **Process Picker:** Discovers running graphical games and applications via `EnumWindows`.
 - **Live Activity Feed:** Visualizes real-time frametimes, DPC/ISR spikes, disk I/O, and memory events.
@@ -94,7 +97,7 @@ Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Con
 .\build\Release\stuttometer_gui.exe
 ```
 
-### Session Benchmark Mode (v0.4.0)
+### Session Benchmark Mode
 
 Click **Session Summary** in the top header to inspect real-time, session-wide frame pacing metrics and cumulative root-cause attribution:
 

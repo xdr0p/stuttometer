@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   stuttometer
-  VERSION 0.4.0
+  VERSION 0.4.1
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )
@@ -64,6 +64,7 @@ add_library(stuttometer_core STATIC
   src/privilege_utils.cpp
   src/csv_exporter.cpp
   src/ndjson_writer.cpp
+  src/cli_parser.cpp
 )
 
 target_include_directories(stuttometer_core
@@ -79,6 +80,7 @@ target_link_libraries(stuttometer_core
     psapi
   PRIVATE
     tdh
+    CLI11::CLI11
 )
 
 target_compile_features(stuttometer_core PUBLIC cxx_std_20)
@@ -266,6 +268,13 @@ add_executable(test_session_benchmark
 target_link_libraries(test_session_benchmark PRIVATE stuttometer_core)
 add_test(NAME test_session_benchmark COMMAND test_session_benchmark)
 set_tests_properties(test_session_benchmark PROPERTIES TIMEOUT 30)
+
+add_executable(test_cli_args
+  tests/test_cli_args.cpp
+)
+target_link_libraries(test_cli_args PRIVATE stuttometer_core)
+add_test(NAME test_cli_args COMMAND test_cli_args)
+set_tests_properties(test_cli_args PROPERTIES TIMEOUT 30)
 
 
 

@@ -39,6 +39,7 @@ struct BenchmarkViewState {
     // WM_TIMER, WM_COMMAND, and (one-shot) WM_PAINT. No synchronization required.
     BenchmarkSummary cached_summary{};
     bool summary_valid{false};
+    std::function<bool()> is_capturing_fn{nullptr};
 };
 
 static std::wstring to_wide(std::string_view utf8) {
@@ -50,10 +51,19 @@ static std::wstring to_wide(std::string_view utf8) {
     return result;
 }
 
+static void update_button_states(BenchmarkViewState* state) {
+    if (!state) return;
+    bool has_data = (state->cached_summary.total_frames > 0);
+    if (state->h_btn_copy)   EnableWindow(state->h_btn_copy, has_data ? TRUE : FALSE);
+    if (state->h_btn_export) EnableWindow(state->h_btn_export, has_data ? TRUE : FALSE);
+    if (state->h_btn_reset)  EnableWindow(state->h_btn_reset, has_data ? TRUE : FALSE);
+}
+
 static void refresh_cached_summary(BenchmarkViewState* state) {
     if (!state || !state->benchmark) return;
     state->cached_summary = state->benchmark->get_summary(state->redact);
     state->summary_valid = true;
+    update_button_states(state);
 }
 
 static void apply_window_dark_titlebar(HWND hwnd) {
@@ -111,6 +121,7 @@ static void draw_rounded_card(HDC hdc, const RECT& rc, COLORREF bg_color, COLORR
 struct BenchmarkInitParams {
     std::shared_ptr<SessionBenchmark> benchmark;
     bool redact{false};
+    std::function<bool()> is_capturing_fn{nullptr};
 };
 
 static LRESULT CALLBACK BenchmarkButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
@@ -137,14 +148,36 @@ static LRESULT CALLBACK BenchmarkButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM
             InvalidateRect(hwnd, NULL, FALSE);
             break;
         }
+        case WM_ENABLE: {
+            if (!wParam) {
+                RemovePropW(hwnd, L"Hovered");
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            break;
+        }
     }
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+}
+
+static void dismiss_benchmark_view(HWND hDlg) {
+    HWND hParent = GetWindow(hDlg, GW_OWNER);
+    if (hParent && IsWindow(hParent)) {
+        EnableWindow(hParent, TRUE);
+        SetForegroundWindow(hParent);
+        SetFocus(hParent);
+    }
+    DestroyWindow(hDlg);
 }
 
 static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<BenchmarkViewState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (uMsg) {
+        case WM_CLOSE: {
+            dismiss_benchmark_view(hwnd);
+            return 0;
+        }
+
         case WM_CREATE: {
             auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
             auto* params = reinterpret_cast<BenchmarkInitParams*>(cs->lpCreateParams);
@@ -152,6 +185,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             if (params) {
                 state->benchmark = params->benchmark;
                 state->redact = params->redact;
+                state->is_capturing_fn = params->is_capturing_fn;
             }
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
 
@@ -160,13 +194,13 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             update_fonts(state, dpi);
 
             HINSTANCE hInst = cs->hInstance;
-            state->h_btn_copy = CreateWindowExW(0, L"BUTTON", L"Copy Summary", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            state->h_btn_copy = CreateWindowExW(0, L"BUTTON", L"Copy Summary", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                                 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BENCH_COPY_SUMMARY, hInst, NULL);
-            state->h_btn_export = CreateWindowExW(0, L"BUTTON", L"Export JSON", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            state->h_btn_export = CreateWindowExW(0, L"BUTTON", L"Export JSON", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                                   0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BENCH_EXPORT_JSON, hInst, NULL);
-            state->h_btn_reset = CreateWindowExW(0, L"BUTTON", L"Reset Session", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            state->h_btn_reset = CreateWindowExW(0, L"BUTTON", L"Reset", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                                  0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BENCH_RESET_SESSION, hInst, NULL);
-            state->h_btn_close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            state->h_btn_close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                                  0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BENCH_CLOSE, hInst, NULL);
 
             SetWindowSubclass(state->h_btn_copy, BenchmarkButtonSubclassProc, IDC_BENCH_COPY_SUMMARY, 0);
@@ -192,7 +226,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
             int btn_copy_w = scale(130);
             int btn_export_w = scale(120);
-            int btn_reset_w = scale(125);
+            int btn_reset_w = scale(95);
             int btn_close_w = scale(95);
             int gap = scale(10);
 
@@ -249,15 +283,23 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             DeleteObject(bg_parent);
 
             // Match main_gui.cpp BtnStyle palettes
-            COLORREF bg = is_pressed ? RGB(22, 26, 36) : (is_hovered ? RGB(38, 45, 62) : RGB(28, 33, 46));
-            COLORREF border = is_pressed ? RGB(44, 52, 72) : (is_hovered ? RGB(65, 78, 105) : RGB(50, 60, 82));
-            COLORREF text_color = is_disabled ? RGB(100, 116, 139) : (is_hovered ? RGB(241, 245, 249) : RGB(226, 232, 240));
+            COLORREF bg;
+            COLORREF border;
+            COLORREF text_color;
 
-            if (pDIS->CtlID == IDC_BENCH_RESET_SESSION) {
-                // DangerRed palette matching main_gui.cpp
-                bg = is_pressed ? RGB(35, 18, 18) : (is_hovered ? RGB(70, 30, 30) : RGB(45, 25, 25));
-                border = is_pressed ? RGB(80, 35, 35) : (is_hovered ? RGB(120, 50, 50) : RGB(90, 40, 40));
-                text_color = is_hovered ? RGB(254, 202, 202) : RGB(248, 113, 113);
+            if (is_disabled) {
+                bg = RGB(22, 25, 33);
+                border = RGB(38, 46, 62);
+                text_color = RGB(100, 116, 139);
+            } else if (pDIS->CtlID == IDC_BENCH_RESET_SESSION) {
+                // DangerRed palette matching main_gui.cpp BtnStyle::DangerRed
+                bg = is_pressed ? RGB(153, 27, 27) : (is_hovered ? RGB(220, 38, 38) : RGB(185, 28, 28));
+                border = is_pressed ? RGB(185, 28, 28) : (is_hovered ? RGB(239, 68, 68) : RGB(220, 38, 38));
+                text_color = RGB(255, 255, 255);
+            } else {
+                bg = is_pressed ? RGB(22, 26, 36) : (is_hovered ? RGB(38, 45, 62) : RGB(28, 33, 46));
+                border = is_pressed ? RGB(44, 52, 72) : (is_hovered ? RGB(65, 78, 105) : RGB(50, 60, 82));
+                text_color = is_hovered ? RGB(241, 245, 249) : RGB(226, 232, 240);
             }
 
             int dpi = state->dpi;
@@ -271,7 +313,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             std::wstring text;
             if (pDIS->CtlID == IDC_BENCH_COPY_SUMMARY) text = state->copy_btn_text;
             else if (pDIS->CtlID == IDC_BENCH_EXPORT_JSON) text = state->export_btn_text;
-            else if (pDIS->CtlID == IDC_BENCH_RESET_SESSION) text = L"Reset Session";
+            else if (pDIS->CtlID == IDC_BENCH_RESET_SESSION) text = L"Reset";
             else if (pDIS->CtlID == IDC_BENCH_CLOSE) text = L"Close";
 
             // Tactile 1px vertical offset when pressed, matching main_gui.cpp
@@ -290,8 +332,9 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             int id = LOWORD(wParam);
             if (!state || !state->benchmark) break;
 
-            if (id == IDC_BENCH_CLOSE) {
-                DestroyWindow(hwnd);
+            if (id == IDC_BENCH_CLOSE || id == IDCANCEL) {
+                dismiss_benchmark_view(hwnd);
+                return 0;
             } else if (id == IDC_BENCH_RESET_SESSION) {
                 state->copy_btn_text = L"Copy Summary";
                 state->export_btn_text = L"Export JSON";
@@ -300,6 +343,8 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 InvalidateRect(hwnd, NULL, TRUE);
                 InvalidateRect(state->h_btn_copy, NULL, TRUE);
                 InvalidateRect(state->h_btn_export, NULL, TRUE);
+                InvalidateRect(state->h_btn_reset, NULL, TRUE);
+                if (state->h_btn_close) SetFocus(state->h_btn_close);
             } else if (id == IDC_BENCH_COPY_SUMMARY) {
                 auto summary = state->benchmark->get_summary(state->redact);
                 std::string md = summary.to_markdown();
@@ -379,18 +424,21 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 refresh_cached_summary(state);
             }
             const auto& summary = state->cached_summary;
+            bool is_capturing = state->is_capturing_fn ? state->is_capturing_fn() : false;
 
             // 1. Top Banner Card (Y: margin, H: scale(72))
             int banner_y = margin;
             int banner_h = scale(72);
             RECT banner_rc = { margin, banner_y, width - margin, banner_y + banner_h };
-            draw_rounded_card(mem_dc, banner_rc, RGB(24, 28, 38), RGB(42, 50, 68), 8);
+            draw_rounded_card(mem_dc, banner_rc, RGB(28, 33, 44), RGB(40, 48, 66), 8);
 
             SetBkMode(mem_dc, TRANSPARENT);
 
             // Target Process & PID
             std::wstring w_proc = L"All Processes (Monitor All)";
-            if (!summary.target_process.empty()) {
+            if (!is_capturing && summary.total_frames == 0 && summary.target_process.empty() && summary.target_pid == 0) {
+                w_proc = L"No Active Capture Session";
+            } else if (!summary.target_process.empty()) {
                 w_proc = to_wide(summary.target_process);
                 if (summary.target_pid != 0) {
                     w_proc += L" (PID: " + std::to_wstring(summary.target_pid) + L")";
@@ -404,13 +452,25 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             RECT title_rc = { banner_rc.left + scale(16), banner_rc.top + scale(12), banner_rc.right - scale(200), banner_rc.top + scale(36) };
             DrawTextW(mem_dc, w_proc.c_str(), -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-            // Duration (MM:SS), Frames, Stutters Detected
-            const unsigned total_sec = static_cast<unsigned>(summary.duration_ms / 1000.0);
-            const unsigned mins = total_sec / 60;
-            const unsigned secs = total_sec % 60;
+            // Duration (MM:SS), Frames, Stutters Detected / Session state
             wchar_t sub_buf[256];
-            swprintf_s(sub_buf, L"Duration: %02u:%02u  |  Total Frames: %llu  |  Stutters Detected: %llu",
-                       mins, secs, summary.total_frames, summary.stutters_detected);
+            if (summary.total_frames == 0) {
+                if (is_capturing) {
+                    if (summary.is_monitor_all) {
+                        wcscpy_s(sub_buf, L"Session active \u2014 monitoring system-wide");
+                    } else {
+                        wcscpy_s(sub_buf, L"Session active \u2014 waiting for frames...");
+                    }
+                } else {
+                    wcscpy_s(sub_buf, L"Session idle \u2014 click Start to begin monitoring");
+                }
+            } else {
+                const unsigned total_sec = static_cast<unsigned>(summary.duration_ms / 1000.0);
+                const unsigned mins = total_sec / 60;
+                const unsigned secs = total_sec % 60;
+                swprintf_s(sub_buf, L"Duration: %02u:%02u  |  Total Frames: %llu  |  Stutters Detected: %llu",
+                           mins, secs, summary.total_frames, summary.stutters_detected);
+            }
 
             SelectObject(mem_dc, state->font_regular);
             SetTextColor(mem_dc, RGB(148, 163, 184));
@@ -433,42 +493,69 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
             std::wstring avg_fps_str = (summary.frametimes.avg_fps > 0.0)
                 ? std::to_wstring(static_cast<int>(std::round(summary.frametimes.avg_fps))) + L" FPS"
-                : L"N/A";
+                : L"\u2014";
+            COLORREF avg_color = (summary.frametimes.avg_fps > 0.0) ? RGB(56, 189, 248) : RGB(148, 163, 184);
+
             std::wstring low_1_str = (summary.frametimes.low_1pct_fps > 0.0)
                 ? std::to_wstring(static_cast<int>(std::round(summary.frametimes.low_1pct_fps))) + L" FPS"
-                : L"N/A";
-            std::wstring low_01_str = (summary.frametimes.low_01pct_fps > 0.0)
-                ? std::to_wstring(static_cast<int>(std::round(summary.frametimes.low_01pct_fps))) + L" FPS"
-                : L"N/A";
+                : L"\u2014";
+            COLORREF low_1_color = (summary.frametimes.low_1pct_fps > 0.0) ? RGB(16, 185, 129) : RGB(148, 163, 184);
 
-            wchar_t stall_buf[64];
-            swprintf_s(stall_buf, L"%.1f ms", summary.net_stall_ms);
-
-            wchar_t worst_buf[64];
-            if (summary.worst_stutter_ms > 0.0) {
-                swprintf_s(worst_buf, L"%.1f ms", summary.worst_stutter_ms);
+            std::wstring low_01_str;
+            COLORREF low_01_color;
+            if (summary.frametimes.low_01pct_fps <= 0.0) {
+                low_01_str = L"\u2014";
+                low_01_color = RGB(148, 163, 184);
             } else {
-                wcscpy_s(worst_buf, L"None");
+                low_01_str = std::to_wstring(static_cast<int>(std::round(summary.frametimes.low_01pct_fps))) + L" FPS";
+                if (summary.frametimes.low_01pct_fps < 30.0) {
+                    low_01_color = RGB(239, 68, 68);
+                } else if (summary.frametimes.low_01pct_fps < 60.0) {
+                    low_01_color = RGB(245, 158, 11);
+                } else {
+                    low_01_color = RGB(16, 185, 129);
+                }
             }
 
-            COLORREF avg_color = (summary.frametimes.avg_fps > 0.0) ? RGB(56, 189, 248) : RGB(148, 163, 184);
-            COLORREF low_1_color = (summary.frametimes.low_1pct_fps > 0.0) ? RGB(16, 185, 129) : RGB(148, 163, 184);
-            COLORREF low_01_color = (summary.frametimes.low_01pct_fps <= 0.0)
-                ? RGB(148, 163, 184)
-                : ((summary.frametimes.low_01pct_fps < 30.0) ? RGB(239, 68, 68) : RGB(245, 158, 11));
+            std::wstring stall_str;
+            COLORREF stall_color;
+            if (summary.total_frames == 0) {
+                stall_str = L"\u2014";
+                stall_color = RGB(148, 163, 184);
+            } else {
+                wchar_t stall_buf[64];
+                swprintf_s(stall_buf, L"%.1f ms", summary.net_stall_ms);
+                stall_str = stall_buf;
+                stall_color = (summary.net_stall_ms > 100.0) ? RGB(239, 68, 68) : RGB(203, 213, 225);
+            }
+
+            std::wstring worst_str;
+            COLORREF worst_color;
+            if (summary.total_frames == 0) {
+                worst_str = L"\u2014";
+                worst_color = RGB(148, 163, 184);
+            } else if (summary.worst_stutter_ms > 0.0) {
+                wchar_t worst_buf[64];
+                swprintf_s(worst_buf, L"%.1f ms", summary.worst_stutter_ms);
+                worst_str = worst_buf;
+                worst_color = (summary.worst_stutter_ms > 50.0) ? RGB(239, 68, 68) : RGB(203, 213, 225);
+            } else {
+                worst_str = L"None";
+                worst_color = RGB(203, 213, 225);
+            }
 
             MetricCardData cards[5] = {
-                { L"Average FPS", avg_fps_str, avg_color },
+                { L"Avg FPS", avg_fps_str, avg_color },
                 { L"1% Low FPS", low_1_str, low_1_color },
                 { L"0.1% Low FPS", low_01_str, low_01_color },
-                { L"Net Stall Time", stall_buf, (summary.net_stall_ms > 100.0) ? RGB(239, 68, 68) : RGB(203, 213, 225) },
-                { L"Worst Stutter", worst_buf, (summary.worst_stutter_ms > 50.0) ? RGB(239, 68, 68) : RGB(203, 213, 225) }
+                { L"Net Stall", stall_str, stall_color },
+                { L"Worst Stutter", worst_str, worst_color }
             };
 
             for (int i = 0; i < num_cards; ++i) {
                 int cx = margin + i * (card_w + card_gap);
                 RECT c_rc = { cx, grid_y, cx + card_w, grid_y + grid_h };
-                draw_rounded_card(mem_dc, c_rc, RGB(24, 28, 38), RGB(40, 48, 66), 6);
+                draw_rounded_card(mem_dc, c_rc, RGB(28, 33, 44), RGB(40, 48, 66), 6);
 
                 SelectObject(mem_dc, state->font_small);
                 SetTextColor(mem_dc, RGB(148, 163, 184));
@@ -481,136 +568,239 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 DrawTextW(mem_dc, cards[i].value.c_str(), -1, &val_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
 
-            // 3. Culprit Attribution Card (Top 5 + Other)
-            int table_y = grid_y + grid_h + scale(12);
+            // 3. Presentation Cadence Card
+            int cadence_y = grid_y + grid_h + scale(12);
+            int cadence_h = scale(82);
+            RECT cadence_rc = { margin, cadence_y, width - margin, cadence_y + cadence_h };
+            draw_rounded_card(mem_dc, cadence_rc, RGB(28, 33, 44), RGB(40, 48, 66), 8);
+
+            SelectObject(mem_dc, state->font_bold);
+            SetTextColor(mem_dc, RGB(241, 245, 249));
+            RECT cad_title_rc = { cadence_rc.left + scale(16), cadence_rc.top + scale(10), cadence_rc.right - scale(16), cadence_rc.top + scale(28) };
+            DrawTextW(mem_dc, L"Presentation Cadence", -1, &cad_title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            if (summary.total_frames == 0 && !is_capturing) {
+                // Intentionally covers both never-started and zero-frame sessions
+                SelectObject(mem_dc, state->font_regular);
+                SetTextColor(mem_dc, RGB(148, 163, 184));
+                RECT msg_rc = { cadence_rc.left + scale(16), cadence_rc.top + scale(36), cadence_rc.right - scale(16), cadence_rc.top + scale(62) };
+                DrawTextW(mem_dc, L"Select a target process on the main dashboard to track presentation cadence.", -1, &msg_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            } else if (summary.is_monitor_all) {
+                SelectObject(mem_dc, state->font_regular);
+                SetTextColor(mem_dc, RGB(148, 163, 184));
+                RECT msg_rc = { cadence_rc.left + scale(16), cadence_rc.top + scale(36), cadence_rc.right - scale(16), cadence_rc.top + scale(62) };
+                DrawTextW(mem_dc, L"Cadence telemetry is tracked per-process (select a target process for pacing analysis).", -1, &msg_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            } else if (summary.binding_floor_source == BindingFloorSource::NONE && summary.total_frames == 0) {
+                SelectObject(mem_dc, state->font_regular);
+                SetTextColor(mem_dc, RGB(148, 163, 184));
+                RECT msg_rc = { cadence_rc.left + scale(16), cadence_rc.top + scale(36), cadence_rc.right - scale(16), cadence_rc.top + scale(62) };
+                DrawTextW(mem_dc, L"Waiting for frame telemetry (\u22658 frames required for baseline)...", -1, &msg_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                std::wstring profile_name;
+                switch (summary.pacing_profile) {
+                    case PacingProfile::AUTO_ADAPTIVE: profile_name = L"Auto-Adaptive"; break;
+                    case PacingProfile::HIGH_REFRESH:  profile_name = L"High-Refresh / Low-Latency"; break;
+                    case PacingProfile::CONSERVATIVE:  profile_name = L"Standard Presentation (Console Parity)"; break;
+                    case PacingProfile::CUSTOM:        profile_name = L"Custom Calibration"; break;
+                    default:                           profile_name = L"Auto-Adaptive"; break;
+                }
+
+                std::wstring baseline_str;
+                std::wstring dyn_trig_str;
+                std::wstring bind_floor_str;
+
+                if (summary.binding_floor_source == BindingFloorSource::NONE) {
+                    baseline_str = L"Pending warmup (\u22658 frames)";
+                    dyn_trig_str = L"Pending warmup (\u22658 frames)";
+                    bind_floor_str = L"Pending warmup (\u22658 frames)";
+                } else {
+                    wchar_t b_buf[128];
+                    swprintf_s(b_buf, L"%.1f ms (%.1f FPS)", summary.rolling_baseline_ms, summary.rolling_fps);
+                    baseline_str = b_buf;
+
+                    wchar_t d_buf[128];
+                    if (summary.rolling_baseline_ms > 0.0) {
+                        double ratio = summary.estimated_dynamic_floor_ms / summary.rolling_baseline_ms;
+                        swprintf_s(d_buf, L"\u2265 %.1f ms (%.2f\u00D7)", summary.estimated_dynamic_floor_ms, ratio);
+                    } else {
+                        swprintf_s(d_buf, L"\u2265 %.1f ms", summary.estimated_dynamic_floor_ms);
+                    }
+                    dyn_trig_str = d_buf;
+
+                    wchar_t bf_buf[128];
+                    swprintf_s(bf_buf, L"\u2265 %.1f ms (%s)", summary.estimated_binding_floor_ms,
+                               (summary.binding_floor_source == BindingFloorSource::DYNAMIC ? L"Dynamic" : L"Static"));
+                    bind_floor_str = bf_buf;
+                }
+
+                double base_thresh = (summary.static_floor_ms > 0.0)
+                    ? ((summary.static_floor_ms <= 10.5) ? std::max(0.0, summary.static_floor_ms - 0.5) : (summary.static_floor_ms / 1.05))
+                    : 0.0;
+                wchar_t sf_buf[128];
+                swprintf_s(sf_buf, L"\u2265 %.1f ms (%.1f ms + 5%% margin)", summary.static_floor_ms, base_thresh);
+                std::wstring static_thresh_str = sf_buf;
+
+                int col_w_cad = (cadence_rc.right - cadence_rc.left - scale(32)) / 3;
+                int r1_y = cadence_rc.top + scale(32);
+                int r2_y = cadence_rc.top + scale(55);
+
+                SelectObject(mem_dc, state->font_regular);
+                SetTextColor(mem_dc, RGB(226, 232, 240));
+
+                RECT rc_c1_r1 = { cadence_rc.left + scale(16), r1_y, cadence_rc.left + scale(16) + col_w_cad, r1_y + scale(20) };
+                std::wstring c1_r1 = L"Baseline Cadence: " + baseline_str;
+                DrawTextW(mem_dc, c1_r1.c_str(), -1, &rc_c1_r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                RECT rc_c2_r1 = { cadence_rc.left + scale(16) + col_w_cad, r1_y, cadence_rc.left + scale(16) + 2 * col_w_cad, r1_y + scale(20) };
+                std::wstring c2_r1 = L"Active Profile: " + profile_name;
+                DrawTextW(mem_dc, c2_r1.c_str(), -1, &rc_c2_r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                RECT rc_c3_r1 = { cadence_rc.left + scale(16) + 2 * col_w_cad, r1_y, cadence_rc.right - scale(16), r1_y + scale(20) };
+                std::wstring c3_r1 = L"Binding Floor: " + bind_floor_str;
+                DrawTextW(mem_dc, c3_r1.c_str(), -1, &rc_c3_r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                RECT rc_c1_r2 = { cadence_rc.left + scale(16), r2_y, cadence_rc.left + scale(16) + col_w_cad, r2_y + scale(20) };
+                std::wstring c1_r2 = L"Dynamic Trigger: " + dyn_trig_str;
+                DrawTextW(mem_dc, c1_r2.c_str(), -1, &rc_c1_r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                RECT rc_c2_r2 = { cadence_rc.left + scale(16) + col_w_cad, r2_y, cadence_rc.right - scale(16), r2_y + scale(20) };
+                std::wstring c2_r2 = L"Static Threshold: " + static_thresh_str;
+                DrawTextW(mem_dc, c2_r2.c_str(), -1, &rc_c2_r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+
+            // 4. Culprit Attribution Card (Top 5 + Other)
+            int table_y = cadence_y + cadence_h + scale(12);
             int btn_h = scale(34); // Standard 34px dialog action button height matching Settings dialog
             int table_h = height - margin - btn_h - scale(12) - table_y;
             RECT table_rc = { margin, table_y, width - margin, table_y + table_h };
-            draw_rounded_card(mem_dc, table_rc, RGB(22, 26, 34), RGB(40, 48, 66), 8);
+            draw_rounded_card(mem_dc, table_rc, RGB(28, 33, 44), RGB(40, 48, 66), 8);
 
             // Table Title
             SelectObject(mem_dc, state->font_bold);
             SetTextColor(mem_dc, RGB(241, 245, 249));
             RECT tbl_title_rc = { table_rc.left + scale(16), table_rc.top + scale(12), table_rc.right - scale(16), table_rc.top + scale(32) };
-            DrawTextW(mem_dc, L"Root-Cause Culprit Attribution (Top 5 + Other)", -1, &tbl_title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(mem_dc, L"Top Stutter Causes", -1, &tbl_title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-            // Column Headers & Table Geometry
-            int col_hdr_y = table_rc.top + scale(38);
-            int pad = scale(10);
+                // Column Headers & Table Geometry
+                int col_hdr_y = table_rc.top + scale(38);
+                int pad = scale(10);
 
-            // Rebalanced Column Geometry (Option A: Data-Matched Alignment Standard)
-            int col_w_driver = scale(180); // TOP DRIVER (fits single modules; compound pairs >23 chars cleanly ellipsize)
-            int col_w_count  = scale(80);  // COUNT (small integer)
-            int col_w_stall  = scale(115); // TOTAL STALL (e.g., "1245.8 ms")
-            int col_w_pct    = scale(75);  // STALL % ("100.0%" is ~42px, fits with 33px margin)
-            int right_fixed_total = col_w_driver + col_w_count + col_w_stall + col_w_pct;
+                // Rebalanced Column Geometry (Option A: Data-Matched Alignment Standard)
+                int col_w_driver = scale(180); // TOP DRIVER (fits single modules; compound pairs >23 chars cleanly ellipsize)
+                int col_w_count  = scale(80);  // COUNT (small integer)
+                int col_w_stall  = scale(115); // TOTAL STALL (e.g., "1245.8 ms")
+                int col_w_pct    = scale(75);  // STALL % ("100.0%" is ~42px, fits with 33px margin)
+                int right_fixed_total = col_w_driver + col_w_count + col_w_stall + col_w_pct;
 
-            int col0_left  = table_rc.left + scale(16);
-            int table_inner_right = table_rc.right - scale(16);
-            int available_table_w = table_inner_right - col0_left;
+                int col0_left  = table_rc.left + scale(16);
+                int table_inner_right = table_rc.right - scale(16);
+                int available_table_w = table_inner_right - col0_left;
 
-            // Note: dialog is fixed-size (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 840px base client width);
-            // col0_w is ~326px in practice at 96 DPI.
-            // The scale(150) lower bound is a defensive floor for col0 only — if a future refactor
-            // shrinks the dialog enough to trigger it, columns to the right will overflow the card
-            // border and the layout will require a proportional-scaling rework.
-            int col0_w     = std::max(scale(150), available_table_w - right_fixed_total);
-            int col0_right = col0_left + col0_w;
+                // Note: dialog is fixed-size (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 840px base client width);
+                // col0_w is ~326px in practice at 96 DPI.
+                // The scale(150) lower bound is a defensive floor for col0 only — if a future refactor
+                // shrinks the dialog enough to trigger it, columns to the right will overflow the card
+                // border and the layout will require a proportional-scaling rework.
+                int col0_w     = std::max(scale(150), available_table_w - right_fixed_total);
+                int col0_right = col0_left + col0_w;
 
-            int col1_left  = col0_right;
-            int col1_right = col1_left + col_w_driver;
+                int col1_left  = col0_right;
+                int col1_right = col1_left + col_w_driver;
 
-            int col2_left  = col1_right;
-            int col2_right = col2_left + col_w_count;
+                int col2_left  = col1_right;
+                int col2_right = col2_left + col_w_count;
 
-            int col3_left  = col2_right;
-            int col3_right = col3_left + col_w_stall;
+                int col3_left  = col2_right;
+                int col3_right = col3_left + col_w_stall;
 
-            int col4_left  = col3_right;
-            int col4_right = col4_left + col_w_pct; // In the non-clamped case, this equals table_inner_right.
+                int col4_left  = col3_right;
+                int col4_right = col4_left + col_w_pct; // In the non-clamped case, this equals table_inner_right.
 
-            SelectObject(mem_dc, state->font_small);
-            SetTextColor(mem_dc, RGB(100, 116, 139));
+                SelectObject(mem_dc, state->font_small);
+                SetTextColor(mem_dc, RGB(100, 116, 139));
 
-            RECT h0 = { col0_left + pad, col_hdr_y, col0_right - pad, col_hdr_y + scale(20) };
-            RECT h1 = { col1_left + pad, col_hdr_y, col1_right - pad, col_hdr_y + scale(20) };
-            RECT h2 = { col2_left + pad, col_hdr_y, col2_right - pad, col_hdr_y + scale(20) };
-            RECT h3 = { col3_left + pad, col_hdr_y, col3_right - pad, col_hdr_y + scale(20) };
-            RECT h4 = { col4_left + pad, col_hdr_y, col4_right - pad, col_hdr_y + scale(20) };
+                RECT h0 = { col0_left + pad, col_hdr_y, col0_right - pad, col_hdr_y + scale(20) };
+                RECT h1 = { col1_left + pad, col_hdr_y, col1_right - pad, col_hdr_y + scale(20) };
+                RECT h2 = { col2_left + pad, col_hdr_y, col2_right - pad, col_hdr_y + scale(20) };
+                RECT h3 = { col3_left + pad, col_hdr_y, col3_right - pad, col_hdr_y + scale(20) };
+                RECT h4 = { col4_left + pad, col_hdr_y, col4_right - pad, col_hdr_y + scale(20) };
 
-            DrawTextW(mem_dc, L"HYPOTHESIS", -1, &h0, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            DrawTextW(mem_dc, L"TOP DRIVER", -1, &h1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            DrawTextW(mem_dc, L"COUNT", -1, &h2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            DrawTextW(mem_dc, L"TOTAL STALL", -1, &h3, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            DrawTextW(mem_dc, L"STALL %", -1, &h4, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(mem_dc, L"HYPOTHESIS", -1, &h0, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(mem_dc, L"TOP DRIVER", -1, &h1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(mem_dc, L"COUNT", -1, &h2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(mem_dc, L"TOTAL STALL", -1, &h3, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(mem_dc, L"STALL %", -1, &h4, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-            // Subtle vertical column dividers in header
-            HPEN pen_div = CreatePen(PS_SOLID, 1, RGB(42, 50, 68));
-            HGDIOBJ old_pen = SelectObject(mem_dc, pen_div);
+                // Subtle vertical column dividers in header
+                HPEN pen_div = CreatePen(PS_SOLID, 1, RGB(40, 48, 66));
+                HGDIOBJ old_pen = SelectObject(mem_dc, pen_div);
 
-            int v_top = col_hdr_y + scale(2);
-            int v_bot = col_hdr_y + scale(18);
-            int divs[] = { col0_right, col1_right, col2_right, col3_right };
-            for (int dx : divs) {
-                MoveToEx(mem_dc, dx, v_top, NULL);
-                LineTo(mem_dc, dx, v_bot);
-            }
-
-            // Horizontal dividing line below header
-            int sep_y = col_hdr_y + scale(22);
-            MoveToEx(mem_dc, table_rc.left + scale(12), sep_y, NULL);
-            LineTo(mem_dc, table_rc.right - scale(12), sep_y);
-
-            SelectObject(mem_dc, old_pen);
-            DeleteObject(pen_div);
-
-            // Table Rows
-            int row_y = col_hdr_y + scale(26);
-            int row_h = scale(26);
-
-            if (summary.culprits.empty()) {
-                SelectObject(mem_dc, state->font_regular);
-                SetTextColor(mem_dc, RGB(148, 163, 184));
-                RECT empty_rc = { table_rc.left + scale(16), col_hdr_y + scale(28), table_rc.right - scale(16), table_rc.bottom - scale(16) };
-                DrawTextW(mem_dc, L"No stutters recorded in current session. Frame pacing is smooth.", -1, &empty_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            } else {
-                for (size_t i = 0; i < summary.culprits.size() && row_y + row_h <= table_rc.bottom - scale(8); ++i) {
-                    const auto& c = summary.culprits[i];
-
-                    if (i % 2 == 1) {
-                        RECT row_rc = { table_rc.left + scale(8), row_y, table_rc.right - scale(8), row_y + row_h };
-                        HBRUSH r_br = CreateSolidBrush(RGB(28, 33, 44));
-                        FillRect(mem_dc, &row_rc, r_br);
-                        DeleteObject(r_br);
-                    }
-
-                    SelectObject(mem_dc, state->font_regular);
-                    SetTextColor(mem_dc, RGB(226, 232, 240));
-
-                    std::wstring w_hyp = to_wide(c.hypothesis);
-                    std::wstring w_drv = c.top_driver_module.empty() ? L"-" : to_wide(c.top_driver_module);
-                    std::wstring w_cnt = std::to_wstring(c.count);
-
-                    wchar_t stl_buf[64];
-                    swprintf_s(stl_buf, L"%.1f ms", c.total_stall_ms);
-                    wchar_t pct_buf[64];
-                    swprintf_s(pct_buf, L"%.1f%%", c.stall_pct);
-
-                    RECT r0 = { col0_left + pad, row_y, col0_right - pad, row_y + row_h };
-                    RECT r1 = { col1_left + pad, row_y, col1_right - pad, row_y + row_h };
-                    RECT r2 = { col2_left + pad, row_y, col2_right - pad, row_y + row_h };
-                    RECT r3 = { col3_left + pad, row_y, col3_right - pad, row_y + row_h };
-                    RECT r4 = { col4_left + pad, row_y, col4_right - pad, row_y + row_h };
-
-                    DrawTextW(mem_dc, w_hyp.c_str(), -1, &r0, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    DrawTextW(mem_dc, w_drv.c_str(), -1, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    DrawTextW(mem_dc, w_cnt.c_str(), -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                    DrawTextW(mem_dc, stl_buf, -1, &r3, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-                    DrawTextW(mem_dc, pct_buf, -1, &r4, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
-                    row_y += row_h;
+                int v_top = col_hdr_y + scale(2);
+                int v_bot = col_hdr_y + scale(18);
+                int divs[] = { col0_right, col1_right, col2_right, col3_right };
+                for (int dx : divs) {
+                    MoveToEx(mem_dc, dx, v_top, NULL);
+                    LineTo(mem_dc, dx, v_bot);
                 }
-            }
+
+                // Horizontal dividing line below header
+                int sep_y = col_hdr_y + scale(22);
+                MoveToEx(mem_dc, table_rc.left + scale(12), sep_y, NULL);
+                LineTo(mem_dc, table_rc.right - scale(12), sep_y);
+
+                SelectObject(mem_dc, old_pen);
+                DeleteObject(pen_div);
+
+                // Table Rows
+                int row_y = col_hdr_y + scale(26);
+                int row_h = scale(26);
+
+                if (summary.culprits.empty()) {
+                    SelectObject(mem_dc, state->font_regular);
+                    SetTextColor(mem_dc, RGB(148, 163, 184));
+                    RECT empty_rc = { table_rc.left + scale(16), col_hdr_y + scale(28), table_rc.right - scale(16), table_rc.bottom - scale(16) };
+                    const wchar_t* empty_msg = (summary.total_frames == 0)
+                        ? L"No session telemetry recorded yet."
+                        : L"No stutters recorded in current session. Frame pacing is smooth.";
+                    DrawTextW(mem_dc, empty_msg, -1, &empty_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                } else {
+                    for (size_t i = 0; i < summary.culprits.size() && row_y + row_h <= table_rc.bottom - scale(8); ++i) {
+                        const auto& c = summary.culprits[i];
+
+                        if (i % 2 == 1) {
+                            RECT row_rc = { table_rc.left + scale(8), row_y, table_rc.right - scale(8), row_y + row_h };
+                            HBRUSH r_br = CreateSolidBrush(RGB(34, 40, 54));
+                            FillRect(mem_dc, &row_rc, r_br);
+                            DeleteObject(r_br);
+                        }
+
+                        SelectObject(mem_dc, state->font_regular);
+                        SetTextColor(mem_dc, RGB(226, 232, 240));
+
+                        std::wstring w_hyp = to_wide(c.hypothesis);
+                        std::wstring w_drv = c.top_driver_module.empty() ? L"-" : to_wide(c.top_driver_module);
+                        std::wstring w_cnt = std::to_wstring(c.count);
+
+                        wchar_t stl_buf[64];
+                        swprintf_s(stl_buf, L"%.1f ms", c.total_stall_ms);
+                        wchar_t pct_buf[64];
+                        swprintf_s(pct_buf, L"%.1f%%", c.stall_pct);
+
+                        RECT r0 = { col0_left + pad, row_y, col0_right - pad, row_y + row_h };
+                        RECT r1 = { col1_left + pad, row_y, col1_right - pad, row_y + row_h };
+                        RECT r2 = { col2_left + pad, row_y, col2_right - pad, row_y + row_h };
+                        RECT r3 = { col3_left + pad, row_y, col3_right - pad, row_y + row_h };
+                        RECT r4 = { col4_left + pad, row_y, col4_right - pad, row_y + row_h };
+
+                        DrawTextW(mem_dc, w_hyp.c_str(), -1, &r0, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                        DrawTextW(mem_dc, w_drv.c_str(), -1, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                        DrawTextW(mem_dc, w_cnt.c_str(), -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                        DrawTextW(mem_dc, stl_buf, -1, &r3, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                        DrawTextW(mem_dc, pct_buf, -1, &r4, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+                        row_y += row_h;
+                    }
+                }
 
             // Blit buffer to screen
             BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
@@ -619,6 +809,16 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             DeleteObject(mem_bm);
             DeleteDC(mem_dc);
             EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        case WM_DESTROY: {
+            HWND hParent = GetWindow(hwnd, GW_OWNER);
+            if (hParent && IsWindow(hParent) && !IsWindowEnabled(hParent)) {
+                EnableWindow(hParent, TRUE);
+                SetForegroundWindow(hParent);
+                SetFocus(hParent);
+            }
             return 0;
         }
 
@@ -643,7 +843,12 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
     return 0;
 }
 
-void ShowBenchmarkView(HWND parent_hwnd, std::shared_ptr<SessionBenchmark> benchmark, bool redact) {
+void ShowBenchmarkView(
+    HWND parent_hwnd,
+    std::shared_ptr<SessionBenchmark> benchmark,
+    bool redact,
+    std::function<bool()> is_capturing_fn
+) {
     if (!benchmark) return;
 
     bool expected = false;
@@ -672,7 +877,7 @@ void ShowBenchmarkView(HWND parent_hwnd, std::shared_ptr<SessionBenchmark> bench
     if (dpi == 0) dpi = 96;
 
     int client_w = MulDiv(840, dpi, 96);
-    int client_h = MulDiv(600, dpi, 96);
+    int client_h = MulDiv(670, dpi, 96);
 
     DWORD dwStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
     RECT rc = { 0, 0, client_w, client_h };
@@ -698,7 +903,7 @@ void ShowBenchmarkView(HWND parent_hwnd, std::shared_ptr<SessionBenchmark> bench
         pos_y = rc_parent.top + ((rc_parent.bottom - rc_parent.top) - outer_h) / 2;
     }
 
-    BenchmarkInitParams params{ benchmark, redact };
+    BenchmarkInitParams params{ benchmark, redact, is_capturing_fn };
 
     HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
@@ -739,6 +944,7 @@ void ShowBenchmarkView(HWND parent_hwnd, std::shared_ptr<SessionBenchmark> bench
     if (parent_hwnd && IsWindow(parent_hwnd)) {
         EnableWindow(parent_hwnd, TRUE);
         SetForegroundWindow(parent_hwnd);
+        SetFocus(parent_hwnd);
     }
     s_benchmark_dialog_open.store(false, std::memory_order_release);
 

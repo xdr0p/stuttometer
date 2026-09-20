@@ -11,10 +11,15 @@
 #include <windows.h>
 #include <objidl.h>
 #include <vector>
+#include <string>
 #include <cstdint>
 #include <filesystem>
 
 namespace stuttometer::gui {
+
+namespace detail {
+    [[nodiscard]] std::wstring format_offset(double ms);
+}
 
 struct CardRenderOptions {
     int base_width{1200};

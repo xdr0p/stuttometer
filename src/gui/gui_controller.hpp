@@ -67,6 +67,7 @@ struct GuiConfig {
 
     // Frame Pacing & Dynamic Relative Trigger configuration
     FrameTriggerMode frame_trigger_mode{FrameTriggerMode::HYBRID};
+    PacingProfile pacing_profile{PacingProfile::AUTO_ADAPTIVE};
     double spike_multiplier{2.0};
     double min_spike_delta_ms{4.0};
     bool enable_judder_detection{true};

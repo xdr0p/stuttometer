@@ -1,5 +1,7 @@
 #include "test_common.hpp"
 #include "stuttometer/json_reporter.hpp"
+#include "stuttometer/session_benchmark.hpp"
+#include "stuttometer/frame_pacing_tracker.hpp"
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <fstream>
@@ -206,12 +208,123 @@ static void test_file_save_and_load() {
     std::cout << "  -> JSON file save and reload PASSED.\n";
 }
 
+static void test_schema_1_2_benchmark_summary_serialization() {
+    std::cout << "[TEST] Validating Schema 1.2 JSON Serialization (BenchmarkSummary)...\n";
+
+    stuttometer::BenchmarkSummary summary;
+    summary.target_process = "Cyberpunk2077.exe";
+    summary.target_pid = 4321;
+    summary.duration_ms = 60000.0;
+    summary.total_frames = 3600;
+    summary.stutters_detected = 2;
+    summary.dropped_pause_frames = 0;
+    summary.redacted = false;
+    summary.frametimes.avg_fps = 60.0;
+    summary.frametimes.p99_frametime_ms = 18.2;
+    summary.frametimes.low_1pct_fps = 54.9;
+    summary.frametimes.p999_frametime_ms = 25.0;
+    summary.frametimes.low_01pct_fps = 40.0;
+    summary.frametimes.max_frametime_ms = 45.5;
+    summary.net_stall_ms = 35.0;
+    summary.worst_stutter_ms = 45.5;
+    summary.worst_stutter_hypothesis = "dpc_isr_spike";
+
+    // Cadence fields for State 1 / State 2
+    summary.pacing_profile = stuttometer::PacingProfile::HIGH_REFRESH;
+    summary.binding_floor_source = stuttometer::BindingFloorSource::DYNAMIC;
+    summary.rolling_baseline_ms = 7.14;
+    summary.rolling_fps = 140.0;
+    summary.estimated_dynamic_floor_ms = 11.0;
+    summary.static_floor_ms = 17.5;
+    summary.estimated_binding_floor_ms = 11.0;
+
+    std::string json_str = summary.to_json();
+    STUTTO_ASSERT(!json_str.empty());
+
+    auto root = nlohmann::json::parse(json_str);
+
+    STUTTO_ASSERT(root["schema_version"] == "1.2");
+    STUTTO_ASSERT(root["target_process"] == "Cyberpunk2077.exe");
+    STUTTO_ASSERT(root["target_pid"] == 4321);
+    STUTTO_ASSERT(root["total_frames"] == 3600);
+
+    // Presentation cadence validation
+    STUTTO_ASSERT(root.contains("presentation_cadence"));
+    const auto& cad = root["presentation_cadence"];
+    STUTTO_ASSERT(cad["pacing_profile"] == "high_refresh");
+    STUTTO_ASSERT(cad["binding_floor_source"] == "dynamic");
+    STUTTO_ASSERT(std::abs(cad["rolling_baseline_ms"].get<double>() - 7.14) < 1e-4);
+    STUTTO_ASSERT(std::abs(cad["rolling_fps"].get<double>() - 140.0) < 1e-4);
+    STUTTO_ASSERT(std::abs(cad["estimated_dynamic_floor_ms"].get<double>() - 11.0) < 1e-4);
+    STUTTO_ASSERT(std::abs(cad["static_floor_ms"].get<double>() - 17.5) < 1e-4);
+    STUTTO_ASSERT(std::abs(cad["estimated_binding_floor_ms"].get<double>() - 11.0) < 1e-4);
+
+    // State 3 (Warmup / Empty Session / NONE) cadence validation
+    summary.binding_floor_source = stuttometer::BindingFloorSource::NONE;
+    std::string s3_json_str = summary.to_json();
+    auto s3_root = nlohmann::json::parse(s3_json_str);
+    const auto& s3_cad = s3_root["presentation_cadence"];
+    STUTTO_ASSERT(s3_cad["pacing_profile"] == "high_refresh");
+    STUTTO_ASSERT(s3_cad["binding_floor_source"] == "none");
+    STUTTO_ASSERT(s3_cad["estimated_dynamic_floor_ms"].is_null());
+    STUTTO_ASSERT(s3_cad["estimated_binding_floor_ms"].is_null());
+    STUTTO_ASSERT(s3_cad["rolling_baseline_ms"].is_null());
+    STUTTO_ASSERT(s3_cad["rolling_fps"].is_null());
+    STUTTO_ASSERT(std::abs(s3_cad["static_floor_ms"].get<double>() - 17.5) < 1e-4);
+
+    std::cout << "  -> Schema 1.2 BenchmarkSummary JSON serialization PASSED.\n";
+}
+
+static void test_cli_to_json_profile_string_mapping() {
+    std::cout << "[TEST] Validating CLI String -> PacingProfile Enum -> JSON String Mapping...\n";
+
+    // "high-refresh" -> HIGH_REFRESH -> "high_refresh"
+    auto opt_hr = stuttometer::pacing_profile_from_cli_string("high-refresh");
+    STUTTO_ASSERT(opt_hr.has_value());
+    STUTTO_ASSERT(*opt_hr == stuttometer::PacingProfile::HIGH_REFRESH);
+    STUTTO_ASSERT(stuttometer::pacing_profile_to_string(*opt_hr) == "high_refresh");
+
+    // "auto" -> AUTO_ADAPTIVE -> "auto_adaptive"
+    auto opt_auto = stuttometer::pacing_profile_from_cli_string("auto");
+    STUTTO_ASSERT(opt_auto.has_value());
+    STUTTO_ASSERT(*opt_auto == stuttometer::PacingProfile::AUTO_ADAPTIVE);
+    STUTTO_ASSERT(stuttometer::pacing_profile_to_string(*opt_auto) == "auto_adaptive");
+
+    // "conservative" -> CONSERVATIVE -> "conservative"
+    auto opt_cons = stuttometer::pacing_profile_from_cli_string("conservative");
+    STUTTO_ASSERT(opt_cons.has_value());
+    STUTTO_ASSERT(*opt_cons == stuttometer::PacingProfile::CONSERVATIVE);
+    STUTTO_ASSERT(stuttometer::pacing_profile_to_string(*opt_cons) == "conservative");
+
+    // "custom" is rejected on CLI
+    auto opt_custom = stuttometer::pacing_profile_from_cli_string("custom");
+    STUTTO_ASSERT(!opt_custom.has_value());
+
+    // But "custom" enum serializes to "custom" in JSON
+    STUTTO_ASSERT(stuttometer::pacing_profile_to_string(stuttometer::PacingProfile::CUSTOM) == "custom");
+
+    // Deserialization via pacing_profile_from_string (used for JSON & settings.json)
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("high_refresh") == stuttometer::PacingProfile::HIGH_REFRESH);
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("high-refresh") == stuttometer::PacingProfile::HIGH_REFRESH);
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("auto_adaptive") == stuttometer::PacingProfile::AUTO_ADAPTIVE);
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("auto-adaptive") == stuttometer::PacingProfile::AUTO_ADAPTIVE);
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("auto") == stuttometer::PacingProfile::AUTO_ADAPTIVE);
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("conservative") == stuttometer::PacingProfile::CONSERVATIVE);
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("custom") == stuttometer::PacingProfile::CUSTOM);
+    // Unrecognized strings default to AUTO_ADAPTIVE
+    STUTTO_ASSERT(stuttometer::pacing_profile_from_string("unknown_future_profile") == stuttometer::PacingProfile::AUTO_ADAPTIVE);
+
+    std::cout << "  -> CLI String -> Enum -> JSON String Mapping PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Report Serialization Consistency Tests ===\n";
     try {
         test_schema_1_1_roundtrip_unredacted();
         test_schema_1_1_roundtrip_redacted();
         test_file_save_and_load();
+        test_schema_1_2_benchmark_summary_serialization();
+        test_cli_to_json_profile_string_mapping();
         std::cout << ">>> All Report Serialization Consistency tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

@@ -7,7 +7,7 @@
 #include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/csv_exporter.hpp"
 
-#include <CLI/CLI.hpp>
+#include "stuttometer/cli_parser.hpp"
 #include <iostream>
 #include <atomic>
 #include <thread>
@@ -43,199 +43,61 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
 }
 
 int main(int argc, char** argv) {
-    CLI::App app{"Stuttometer - Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"};
-
-    double window_pre_ms = 250.0;
-    double window_post_ms = 30.0;
-    double present_threshold_ms = 16.67;
-    bool enable_audio = true;
-    double cooldown_ms = 1000.0;
-    uint32_t dpc_threshold_us = 1000;
-    uint32_t isr_threshold_us = 500;
-    uint32_t disk_threshold_ms = 20;
-    uint32_t cswitch_preempt_ms = 5;
-    double smi_severity_threshold_ms = 33.3;
-    uint32_t d3d12_pso_threshold_ms = 5;
-    uint32_t vram_demoted_threshold_mb = 8;
-    uint32_t mem_alloc_threshold_mb = 16;
-    uint32_t mem_trim_threshold_mb = 4;
-    uint32_t mem_physical_latency_us = 1000;
-    uint32_t buffer_slots = 262144;
-    uint32_t target_pid = 0;
-    std::string target_process_name;
-    std::string output_file;
-    std::string output_dir;
-    uint32_t max_reports = 0;
-    std::string provider_tier = "standard";
-    bool redact = false;
-    bool verbose = false;
-    bool print_version = false;
-    std::string trigger_mode_str = "hybrid";
-    double spike_multiplier = 2.0;
-    double min_spike_delta_ms = 4.0;
-    bool enable_judder = true;
-    double judder_swing_ratio = 0.35;
-
-    app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (50-1000, default: 250)");
-    app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (0-200, default: 30)");
-    app.add_option("--present-threshold-ms", present_threshold_ms, "DXGI Present stutter threshold in ms (2.0-200.0, default: 16.67)");
-    app.add_option("--trigger-mode", trigger_mode_str, "Frame trigger mode: hybrid, dynamic, static (default: hybrid)");
-    app.add_option("--spike-multiplier", spike_multiplier, "Relative stutter spike multiplier (1.2-10.0, default: 2.0)");
-    app.add_option("--min-spike-delta-ms", min_spike_delta_ms, "Minimum absolute spike delta in ms (1.0-50.0, default: 4.0)");
-    app.add_flag("--judder-detection,!--no-judder", enable_judder, "Enable/disable cadence judder detection (default: enabled)");
-    app.add_option("--judder-swing-ratio", judder_swing_ratio, "Judder cadence swing threshold ratio (0.1-0.9, default: 0.35)");
-    app.add_flag("--audio-trigger,!--no-audio", enable_audio, "Enable/disable AudioGlitch Event ID 11 trigger");
-    app.add_option("--cooldown-ms", cooldown_ms, "Minimum cooldown between reports in ms (100-10000, default: 1000)");
-    app.add_option("--dpc-threshold-us", dpc_threshold_us, "DPC anomaly threshold in microseconds (100-50000, default: 1000)");
-    app.add_option("--isr-threshold-us", isr_threshold_us, "ISR anomaly threshold in microseconds (50-50000, default: 500)");
-    app.add_option("--disk-threshold-ms", disk_threshold_ms, "Disk latency anomaly threshold in ms (1-1000, default: 20)");
-    app.add_option("--cswitch-threshold-ms", cswitch_preempt_ms, "Context switch preemption threshold in ms (1-500, default: 5)");
-    app.add_option("--smi-threshold-ms", smi_severity_threshold_ms, "Hardware SMI stall threshold in ms (10-100, default: 33.3)");
-    app.add_option("--d3d12-pso-threshold-ms", d3d12_pso_threshold_ms, "D3D12 PSO compilation threshold in ms (1-500, default: 5)");
-    app.add_option("--vram-threshold-mb", vram_demoted_threshold_mb, "GPU VRAM demotion anomaly threshold in MB (1-1024, default: 8)");
-    app.add_option("--mem-alloc-threshold-mb", mem_alloc_threshold_mb, "VirtualAlloc commit stall threshold in MB (1-1024, default: 16)");
-    app.add_option("--mem-trim-threshold-mb", mem_trim_threshold_mb, "Working set out-swap trim threshold in MB (1-1024, default: 4)");
-    app.add_option("--mem-physical-latency-us", mem_physical_latency_us, "Physical memory / MDL allocation latency threshold in us (50-50000, default: 1000)");
-    app.add_option("--buffer-slots", buffer_slots, "Ring buffer capacity in slots (65536-1048576, default: 262144)");
-    app.add_option("--target-pid", target_pid, "Target Process ID to monitor (default: 0 = monitor all)");
-    app.add_option("--target-process", target_process_name, "Target process name substring (e.g. Game.exe)");
-    app.add_option("--output", output_file, "Output file path for JSON reports (overwritten on each trigger if max-reports != 1; use --output-dir to save all reports)");
-    app.add_option("--output-dir", output_dir, "Directory to save individual trigger reports");
-    app.add_option("--max-reports", max_reports, "Maximum number of reports before exiting (0 = continuous)");
-    app.add_option("--tier", provider_tier, "Provider tier: minimal, standard, full (default: standard)");
-    std::string dump_events_path;
-    size_t dump_max_mb = 100;
-    size_t dump_max_files = 3;
-    std::string export_csv_path;
-
-    app.add_option("--dump-events", dump_events_path, "Stream real-time ETW events to NDJSON file (or - for stdout)");
-    app.add_option("--dump-max-mb", dump_max_mb, "Maximum size per NDJSON file before rotation in MB (10-1024, default: 100; ignored when --dump-events is '-')")
-       ->check(CLI::Range(10ull, 1024ull))
-       ->needs("--dump-events");
-    app.add_option("--dump-max-files", dump_max_files, "Maximum number of rotated NDJSON files to retain (1-10, default: 3; ignored when --dump-events is '-')")
-       ->check(CLI::Range(1ull, 10ull))
-       ->needs("--dump-events");
-    app.add_option("--export-csv", export_csv_path, "Export frame pacing timeline to CSV (overwritten on each trigger; use --output-dir for per-trigger files)");
-    app.add_flag("--redact", redact, "Redact process names, file paths, and user identifiers");
-    app.add_flag("--verbose", verbose, "Print detailed event stream metrics to console");
-    app.add_flag("--version", print_version, "Print version information and exit");
-    bool run_self_check = false;
-    app.add_flag("--self-check", run_self_check, "Run non-destructive environment diagnostics & ETW provider checks, then exit");
-
-    CLI11_PARSE(app, argc, argv);
-
-    if (dump_events_path == "-" && (print_version || run_self_check)) {
-        std::cerr << "[STUTTOMETER] Error: --dump-events - cannot be combined with --version or --self-check.\n";
-        return 1;
-    }
-
-    if (print_version) {
-        std::cout << "Stuttometer v0.4.0\n";
+    stuttometer::CliConfig config;
+    auto parse_res = stuttometer::parse_cli_args(argc, argv, config, std::cout, std::cerr);
+    if (parse_res == stuttometer::CliParseResult::EXIT_OK) {
         return 0;
     }
-
-    if (run_self_check) {
-        bool ok = stuttometer::run_environment_self_check(std::cout);
-        return ok ? 0 : 1;
-    }
-    if (dump_events_path == "-" && (app.count("--dump-max-mb") > 0 || app.count("--dump-max-files") > 0)) {
-        std::cerr << "[STUTTOMETER] Notice: --dump-max-mb and --dump-max-files are ignored when streaming to stdout ('-').\n";
-    }
-    if (export_csv_path == "-") {
-        std::cerr << "[STUTTOMETER] Error: --export-csv does not support stdout ('-'); must specify a file path.\n";
+    if (parse_res == stuttometer::CliParseResult::EXIT_ERROR) {
         return 1;
     }
 
-    // CLI Range and Option Validation
-    if (window_pre_ms < 50.0 || window_pre_ms > 1000.0) {
-        std::cerr << "[STUTTOMETER] Error: --window-ms must be between 50.0 and 1000.0 ms.\n";
-        return 1;
-    }
-    if (window_post_ms < 0.0 || window_post_ms > 200.0) {
-        std::cerr << "[STUTTOMETER] Error: --post-trigger-ms must be between 0.0 and 200.0 ms.\n";
-        return 1;
-    }
-    if (present_threshold_ms < 2.0 || present_threshold_ms > 200.0) {
-        std::cerr << "[STUTTOMETER] Error: --present-threshold-ms must be between 2.0 and 200.0 ms.\n";
-        return 1;
-    }
-    if (cooldown_ms < 100.0 || cooldown_ms > 10000.0) {
-        std::cerr << "[STUTTOMETER] Error: --cooldown-ms must be between 100.0 and 10000.0 ms.\n";
-        return 1;
-    }
-    if (dpc_threshold_us < 100 || dpc_threshold_us > 50000) {
-        std::cerr << "[STUTTOMETER] Error: --dpc-threshold-us must be between 100 and 50000 us.\n";
-        return 1;
-    }
-    if (isr_threshold_us < 50 || isr_threshold_us > 50000) {
-        std::cerr << "[STUTTOMETER] Error: --isr-threshold-us must be between 50 and 50000 us.\n";
-        return 1;
-    }
-    if (disk_threshold_ms < 1 || disk_threshold_ms > 1000) {
-        std::cerr << "[STUTTOMETER] Error: --disk-threshold-ms must be between 1 and 1000 ms.\n";
-        return 1;
-    }
-    if (cswitch_preempt_ms < 1 || cswitch_preempt_ms > 500) {
-        std::cerr << "[STUTTOMETER] Error: --cswitch-threshold-ms must be between 1 and 500 ms.\n";
-        return 1;
-    }
-    if (smi_severity_threshold_ms < 10.0 || smi_severity_threshold_ms > 100.0) {
-        std::cerr << "[STUTTOMETER] Error: --smi-threshold-ms must be between 10.0 and 100.0 ms.\n";
-        return 1;
-    }
-    if (d3d12_pso_threshold_ms < 1 || d3d12_pso_threshold_ms > 500) {
-        std::cerr << "[STUTTOMETER] Error: --d3d12-pso-threshold-ms must be between 1 and 500 ms.\n";
-        return 1;
-    }
-    if (vram_demoted_threshold_mb < 1 || vram_demoted_threshold_mb > 1024) {
-        std::cerr << "[STUTTOMETER] Error: --vram-threshold-mb must be between 1 and 1024 MB.\n";
-        return 1;
-    }
-    if (mem_alloc_threshold_mb < 1 || mem_alloc_threshold_mb > 1024) {
-        std::cerr << "[STUTTOMETER] Error: --mem-alloc-threshold-mb must be between 1 and 1024 MB.\n";
-        return 1;
-    }
-    if (mem_trim_threshold_mb < 1 || mem_trim_threshold_mb > 1024) {
-        std::cerr << "[STUTTOMETER] Error: --mem-trim-threshold-mb must be between 1 and 1024 MB.\n";
-        return 1;
-    }
-    if (mem_physical_latency_us < 50 || mem_physical_latency_us > 50000) {
-        std::cerr << "[STUTTOMETER] Error: --mem-physical-latency-us must be between 50 and 50000 us.\n";
-        return 1;
-    }
-    if (buffer_slots < 65536 || buffer_slots > 1048576) {
-        std::cerr << "[STUTTOMETER] Error: --buffer-slots must be between 65536 and 1048576.\n";
-        return 1;
+    if (config.run_self_check) {
+        if (config.dump_events_path == "-") {
+            std::cerr << "[STUTTOMETER] Self-check output redirected to stderr because --dump-events - is active\n";
+            bool ok = stuttometer::run_environment_self_check(std::cerr);
+            return ok ? 0 : 1;
+        } else {
+            bool ok = stuttometer::run_environment_self_check(std::cout);
+            return ok ? 0 : 1;
+        }
     }
 
-    if (spike_multiplier < 1.2 || spike_multiplier > 10.0) {
-        std::cerr << "[STUTTOMETER] Error: --spike-multiplier must be between 1.2 and 10.0.\n";
-        return 1;
-    }
-    if (min_spike_delta_ms < 1.0 || min_spike_delta_ms > 50.0) {
-        std::cerr << "[STUTTOMETER] Error: --min-spike-delta-ms must be between 1.0 and 50.0 ms.\n";
-        return 1;
-    }
-    if (judder_swing_ratio < 0.1 || judder_swing_ratio > 0.9) {
-        std::cerr << "[STUTTOMETER] Error: --judder-swing-ratio must be between 0.1 and 0.9.\n";
-        return 1;
-    }
-
-    const std::set<std::string> valid_trigger_modes = { "hybrid", "dynamic", "static" };
-    if (valid_trigger_modes.find(trigger_mode_str) == valid_trigger_modes.end()) {
-        std::cerr << "[STUTTOMETER] Error: Invalid --trigger-mode '" << trigger_mode_str << "'. Must be 'hybrid', 'dynamic', or 'static'.\n";
-        return 1;
-    }
-
-    const std::set<std::string> valid_tiers = { "minimal", "standard", "full" };
-    if (valid_tiers.find(provider_tier) == valid_tiers.end()) {
-        std::cerr << "[STUTTOMETER] Error: Invalid --tier '" << provider_tier << "'. Must be 'minimal', 'standard', or 'full'.\n";
-        return 1;
-    }
-    if (target_process_name.size() > 260) {
-        std::cerr << "[STUTTOMETER] Error: --target-process name exceeds maximum length (260 characters).\n";
-        return 1;
-    }
+    double window_pre_ms = config.window_pre_ms;
+    double window_post_ms = config.window_post_ms;
+    double present_threshold_ms = config.present_threshold_ms;
+    bool enable_audio = config.enable_audio;
+    double cooldown_ms = config.cooldown_ms;
+    uint32_t dpc_threshold_us = config.dpc_threshold_us;
+    uint32_t isr_threshold_us = config.isr_threshold_us;
+    uint32_t disk_threshold_ms = config.disk_threshold_ms;
+    uint32_t cswitch_preempt_ms = config.cswitch_preempt_ms;
+    double smi_severity_threshold_ms = config.smi_severity_threshold_ms;
+    uint32_t d3d12_pso_threshold_ms = config.d3d12_pso_threshold_ms;
+    uint32_t vram_demoted_threshold_mb = config.vram_demoted_threshold_mb;
+    uint32_t mem_alloc_threshold_mb = config.mem_alloc_threshold_mb;
+    uint32_t mem_trim_threshold_mb = config.mem_trim_threshold_mb;
+    uint32_t mem_physical_latency_us = config.mem_physical_latency_us;
+    uint32_t buffer_slots = config.buffer_slots;
+    uint32_t target_pid = config.target_pid;
+    std::string target_process_name = config.target_process_name;
+    std::string output_file = config.output_file;
+    std::string output_dir = config.output_dir;
+    uint32_t max_reports = config.max_reports;
+    std::string provider_tier = config.provider_tier;
+    bool redact = config.redact;
+    bool verbose = config.verbose;
+    std::string trigger_mode_str = config.trigger_mode_str;
+    stuttometer::PacingProfile pacing_profile = config.pacing_profile;
+    double spike_multiplier = config.spike_multiplier;
+    double min_spike_delta_ms = config.min_spike_delta_ms;
+    bool enable_judder = config.enable_judder;
+    double judder_swing_ratio = config.judder_swing_ratio;
+    std::string dump_events_path = config.dump_events_path;
+    size_t dump_max_mb = config.dump_max_mb;
+    size_t dump_max_files = config.dump_max_files;
+    std::string export_csv_path = config.export_csv_path;
+    const bool target_pid_manual = config.target_pid_manual;
 
     if (!output_dir.empty()) {
         std::error_code ec;
@@ -299,7 +161,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const bool target_pid_manual = (app.count("--target-pid") > 0 && target_pid != 0);
     if (!target_pid_manual && !target_process_name.empty()) {
         target_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
         if (target_pid != 0) {
@@ -313,7 +174,7 @@ int main(int argc, char** argv) {
         std::cerr << "[STUTTOMETER] Warning: Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
     }
 
-    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.4.0 (Elevated Mode)...\n";
+    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.4.1 (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
     stuttometer::EtwSessionConfig etw_config;
@@ -354,6 +215,7 @@ int main(int argc, char** argv) {
     trig_config.target_pid = target_pid;
     trig_config.target_process_name = target_process_name;
     trig_config.frame_trigger_mode = frame_trig_mode;
+    trig_config.pacing_profile = pacing_profile;
     trig_config.spike_multiplier = spike_multiplier;
     trig_config.min_spike_delta_ms = min_spike_delta_ms;
     trig_config.enable_judder_detection = enable_judder;

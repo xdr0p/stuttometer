@@ -1411,6 +1411,102 @@ static void test_monitor_all_glitch_attribution() {
     std::cout << "  -> Monitor-all glitch attribution verification PASSED.\n";
 }
 
+static void test_gpu_pipeline_stall_dxgi_relative_spike() {
+    std::cout << "[TEST] Validating gpu_pipeline_stall on DXGI & Kernel relative spikes...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    // 1. Positive case: DXGI_PRESENT_STUTTER with RELATIVE_SPIKE (below static ceiling)
+    {
+        stuttometer::TriggerInfo trigger{};
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trigger.duration_ms = 12.3;
+        trigger.baseline_fps = 120.0;
+        trigger.baseline_avg_ms = 8.33;
+        trigger.spike_ratio = 1.48;
+        trigger.target_pid = 1234;
+        trigger.target_tid = 5678;
+        trigger.cpu_index = 2;
+        trigger.trigger_timestamp_qpc = stuttometer::get_current_qpc();
+
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::ProviderContext p_ctx;
+
+        auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+
+        STUTTO_ASSERT(!report.diagnoses.empty());
+        STUTTO_ASSERT(report.diagnoses[0].hypothesis == "gpu_pipeline_stall");
+        STUTTO_ASSERT(report.diagnoses[0].confidence >= 0.50 && report.diagnoses[0].confidence <= 0.81);
+        STUTTO_ASSERT(report.diagnoses[0].summary.find("DXGI Present relative spike") != std::string::npos);
+        STUTTO_ASSERT(report.diagnoses[0].summary.find("static threshold") == std::string::npos);
+        STUTTO_ASSERT(report.diagnoses[0].summary.find("kernel DxgKrnl") == std::string::npos);
+        STUTTO_ASSERT(report.diagnoses[0].summary.find("1.5x spike") != std::string::npos);
+        STUTTO_ASSERT(!report.diagnoses[0].evidence.empty());
+        STUTTO_ASSERT(report.diagnoses[0].evidence[0].extra_info.find("DirectStorage") != std::string::npos);
+    }
+
+    // 2. Negative case: Same trigger with DPC candidate -> suppressed
+    {
+        stuttometer::TriggerInfo trigger{};
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trigger.duration_ms = 12.3;
+        trigger.baseline_fps = 120.0;
+        trigger.baseline_avg_ms = 8.33;
+        trigger.spike_ratio = 1.48;
+        trigger.target_pid = 1234;
+        trigger.target_tid = 5678;
+        trigger.cpu_index = 2;
+        trigger.trigger_timestamp_qpc = stuttometer::get_current_qpc();
+
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::EtwEventRecord dpc{};
+        dpc.category = static_cast<uint16_t>(stuttometer::EventCategory::DPC);
+        dpc.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(2.0, qpc_freq);
+        dpc.duration_us = 3500;
+        snapshot.push_back(dpc);
+
+        stuttometer::ProviderContext p_ctx;
+        p_ctx.kernel_dpc_active = true;
+
+        auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+        STUTTO_ASSERT(!report.diagnoses.empty());
+        STUTTO_ASSERT(report.diagnoses[0].hypothesis != "gpu_pipeline_stall");
+    }
+
+    // 3. Boundary case: KERNEL_FRAME_STALL with RELATIVE_SPIKE -> unpenalized confidence
+    {
+        stuttometer::TriggerInfo trigger{};
+        trigger.source = stuttometer::TriggerSource::KERNEL_FRAME_STALL;
+        trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trigger.duration_ms = 12.3;
+        trigger.baseline_fps = 120.0;
+        trigger.baseline_avg_ms = 8.33;
+        trigger.spike_ratio = 1.48;
+        trigger.target_pid = 1234;
+        trigger.target_tid = 5678;
+        trigger.cpu_index = 2;
+        trigger.trigger_timestamp_qpc = stuttometer::get_current_qpc();
+
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::ProviderContext p_ctx;
+
+        auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+
+        STUTTO_ASSERT(!report.diagnoses.empty());
+        STUTTO_ASSERT(report.diagnoses[0].hypothesis == "gpu_pipeline_stall");
+        const double raw_conf = 0.60 + std::min(12.3 / 100.0, 0.30);
+        STUTTO_ASSERT(std::abs(report.diagnoses[0].confidence - raw_conf) < 1e-6);
+        STUTTO_ASSERT(report.diagnoses[0].summary.find("kernel DxgKrnl Flip delta") != std::string::npos);
+        STUTTO_ASSERT(report.diagnoses[0].summary.find("1.5x spike") != std::string::npos);
+    }
+
+    std::cout << "  -> gpu_pipeline_stall DXGI & Kernel relative spike test PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -1445,6 +1541,7 @@ int main() {
         test_audio_glitch_smi_gap_correlation();
         test_smi_gap_with_benign_dpcs();
         test_correlator_attribution_pipeline_wiring();
+        test_gpu_pipeline_stall_dxgi_relative_spike();
         std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

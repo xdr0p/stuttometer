@@ -29,13 +29,14 @@ constexpr uint8_t KERNEL_OPCODE_HARDFAULT         = 32;
 // Named ETW Provider Keywords
 constexpr uint64_t ETW_KEYWORD_DXGI_DEFAULT             = 0x0000000000000003ULL;
 constexpr uint64_t ETW_KEYWORD_AUDIO_GLITCH             = 0x4000000000000000ULL;
-constexpr uint64_t ETW_KEYWORD_DXGKRNL_DEFAULT          = 0x00000000000004A7ULL;
+constexpr uint64_t ETW_KEYWORD_DXGKRNL_DEFAULT          = 0x00000000000004A7ULL | 0x0000000008000000ULL; // 0x080004A7: DriverEvents | Memory | Cdd | References | Profiler | Base | Present (bit 27)
 constexpr uint64_t ETW_KEYWORD_DWM_CORE_GLITCH          = 0x0000000000000001ULL;
 constexpr uint64_t ETW_KEYWORD_KERNEL_PROCESSOR_POWER   = 0x0000000000000085ULL;
 constexpr uint64_t ETW_KEYWORD_ANTIMALWARE_ALL          = 0x00000000FFFFFFFFULL;
 constexpr uint64_t ETW_KEYWORD_D3D12_DEFAULT            = 0x0000000000000C80ULL; // ObjectLifetime (0x80) | APIs (0x400) | SODB (0x800)
 constexpr uint64_t ETW_KEYWORD_KERNEL_MEMORY_DEFAULT    = 0x0000000000000280ULL; // WS_SWAP (0x80) | PHYSICAL_ALLOC (0x200)
 constexpr uint64_t ETW_KEYWORD_KERNEL_PROCESS_DEFAULT   = 0x0000000000000010ULL; // WINEVENT_KEYWORD_PROCESS (0x10)
+
 
 // Converts a 128-bit ActivityId GUID into a non-zero 64-bit key with SplitMix64/Murmur3 finalizer
 [[nodiscard]] static inline uint64_t activity_id_to_key(const GUID& guid) noexcept {
@@ -86,6 +87,7 @@ SessionStartResult EtwSessionManager::start() {
     uli.HighPart = ft.dwHighDateTime;
     sync_time_utc_.store(uli.QuadPart, std::memory_order_relaxed);
     sync_time_qpc_.store(get_current_qpc(), std::memory_order_relaxed);
+    cached_dwm_pid_.store(resolve_process_name_to_pid("dwm.exe"), std::memory_order_relaxed);
 
     const size_t prop_size = sizeof(EVENT_TRACE_PROPERTIES) + 1024;
     bool user_started = false;
@@ -563,38 +565,50 @@ void EtwSessionManager::kernel_trace_consumer_loop() {
 void EtwSessionManager::handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
     rec.category = static_cast<uint16_t>(EventCategory::DXGI);
 
-    uint64_t swapchain_ptr = 0;
-    if (p_event->UserDataLength >= 8 && p_event->UserData) {
-        std::memcpy(&swapchain_ptr, p_event->UserData, sizeof(uint64_t));
-    }
-    rec.auxiliary_data = swapchain_ptr;
-    uint64_t present_key = make_present_key(ctx.tid, swapchain_ptr);
+    uint64_t thread_key = make_thread_key(ctx.pid, ctx.tid);
 
     if (ctx.event_id == 42 || ctx.event_id == 55) { // Present Start / PresentMultiplaneOverlay Start
-        in_flight_present_.insert(present_key, { ctx.timestamp, ctx.pid, ctx.tid });
+        uint64_t swapchain_ptr = 0;
+        if (p_event->UserDataLength >= 8 && p_event->UserData) {
+            std::memcpy(&swapchain_ptr, p_event->UserData, sizeof(uint64_t));
+        }
+        rec.auxiliary_data = swapchain_ptr;
+        in_flight_present_.insert(thread_key, { ctx.timestamp, swapchain_ptr, ctx.pid, ctx.tid });
     } else if (ctx.event_id == 43 || ctx.event_id == 56) { // Present Stop / PresentMultiplaneOverlay Stop
+        rec.auxiliary_data = 0; // Preserve NDJSON schema v1 contract for Present Stop
+
         PresentInFlight present_data{};
-        bool has_in_flight = in_flight_present_.find_and_erase(present_key, present_data);
-        uint64_t start_qpc = (has_in_flight && present_data.pid == ctx.pid) ? present_data.start_qpc : 0;
+        bool has_in_flight = in_flight_present_.find_and_erase(thread_key, present_data);
 
-        LastPresentEntry last_entry{};
-        bool has_prev = last_present_table_.lookup(present_key, last_entry);
-        uint64_t prev_qpc = has_prev ? last_entry.last_present_qpc : 0;
+        // Always push Event 43 to flight recorder and ndjson writer (N-2)
+        // If orphaned (no matching Event 42), fallback skips inter-frame calculation to prevent baseline pollution
+        if (has_in_flight && present_data.pid == ctx.pid) {
+            uint64_t start_qpc = present_data.start_qpc;
+            uint64_t swapchain_ptr = present_data.swapchain_ptr;
+            uint64_t swapchain_key = make_swapchain_key(ctx.pid, swapchain_ptr);
 
-        PresentDeltaResult delta_res = calculate_effective_present_duration(
-            ctx.timestamp, prev_qpc, start_qpc, qpc_freq_, 10000000ULL
-        );
+            LastPresentEntry last_entry{};
+            bool has_prev = last_present_table_.lookup(swapchain_key, last_entry);
+            uint64_t prev_qpc = has_prev ? last_entry.last_present_qpc : 0;
 
-        last_present_table_.insert(present_key, { ctx.timestamp, ctx.pid, ctx.tid });
+            PresentDeltaResult delta_res = calculate_effective_present_duration(
+                ctx.timestamp, prev_qpc, start_qpc, qpc_freq_, 10000000ULL
+            );
 
-        uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, 10000000ULL));
-        rec.duration_us = clamped_dur_us;
+            last_present_table_.insert(swapchain_key, { ctx.timestamp, ctx.pid, ctx.tid });
 
-        flight_recorder_.push(rec);
+            uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, 10000000ULL));
+            rec.duration_us = clamped_dur_us;
 
-        if (!delta_res.is_baseline_reset && delta_res.effective_dur_us > 0) {
-            double dur_ms = delta_res.effective_dur_us / 1000.0;
-            trigger_engine_.on_dxgi_present(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, present_key, ctx.cpu);
+            flight_recorder_.push(rec);
+
+            if (!delta_res.is_baseline_reset && delta_res.effective_dur_us > 0) {
+                double dur_ms = delta_res.effective_dur_us / 1000.0;
+                trigger_engine_.on_dxgi_present(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, swapchain_key, ctx.cpu);
+            }
+        } else {
+            // Orphaned Event 43 (session started mid-frame or Event 42 dropped by ETW)
+            flight_recorder_.push(rec);
         }
     }
 
@@ -631,23 +645,26 @@ void EtwSessionManager::handle_audio_event(PEVENT_RECORD p_event, EtwEventRecord
 void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
     rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_MMIOFLIP);
 
-    uint64_t flip_fence_id = 0;
     uint32_t vidpn_source_id = 0;
-    uint64_t swapchain_ptr = 0;
-    if (p_event->UserDataLength >= 12 && p_event->UserData) {
+    uint64_t allocation_ptr = 0;
+    uint32_t flip_present_id = 0;
+
+    // Verified offsets for Task 17 (Event 116: MMIOFlip):
+    // Offset 8 (4B): VidPnSourceId, Offset 16 (8B): FlipToDriverAllocation, Offset 36 (4B): FlipPresentId
+    if (p_event->UserDataLength >= 24 && p_event->UserData) {
         const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-        std::memcpy(&flip_fence_id, raw + 0, sizeof(uint64_t));
         std::memcpy(&vidpn_source_id, raw + 8, sizeof(uint32_t));
-        if (p_event->UserDataLength >= 24) {
-            std::memcpy(&swapchain_ptr, raw + 16, sizeof(uint64_t));
+        std::memcpy(&allocation_ptr, raw + 16, sizeof(uint64_t));
+        if (p_event->UserDataLength >= 40) {
+            std::memcpy(&flip_present_id, raw + 36, sizeof(uint32_t));
         }
     }
 
-    rec.auxiliary_data = swapchain_ptr;
+    rec.auxiliary_data = allocation_ptr;
     rec.payload.dxgi.present_flags = vidpn_source_id;
-    rec.payload.dxgi.frame_index = static_cast<uint32_t>(flip_fence_id & 0xFFFFFFFF);
+    rec.payload.dxgi.frame_index = flip_present_id;
 
-    const uint64_t flip_key = make_flip_key(vidpn_source_id, swapchain_ptr);
+    const uint64_t flip_key = make_flip_key(vidpn_source_id, allocation_ptr);
     LastFlipEntry last_entry{};
     bool has_prev = last_flip_table_.lookup(flip_key, last_entry);
     uint64_t prev_qpc = has_prev ? last_entry.last_flip_qpc : 0;
@@ -665,12 +682,20 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
         }
     }
 
-    last_flip_table_.insert(flip_key, { ctx.timestamp, static_cast<uint32_t>(swapchain_ptr & 0xFFFFFFFF), ctx.pid, ctx.tid });
+    last_flip_table_.insert(flip_key, { ctx.timestamp, static_cast<uint32_t>(allocation_ptr & 0xFFFFFFFF), ctx.pid, ctx.tid });
 
     flight_recorder_.push(rec);
 
     NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
     if (writer) writer->push(rec);
+
+    // DWM/System Filtering (S1, N-3):
+    // In DWM-composed borderless mode, flips originate from DWM/System (PID 4) and are filtered here;
+    // DXGI_PRESENT_STUTTER and DWM_GLITCH handle composed presentation.
+    const uint32_t dwm_pid = cached_dwm_pid_.load(std::memory_order_relaxed);
+    if (ctx.pid == 4 || (dwm_pid != 0 && ctx.pid == dwm_pid)) {
+        return;
+    }
 
     if (!is_baseline && delivery_ms > 0.0) {
         trigger_engine_.on_kernel_frame_stall(ctx.pid, ctx.tid, delivery_ms, ctx.timestamp, flip_key, ctx.cpu);
@@ -1342,7 +1367,7 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         mgr->handle_audio_event(p_event, rec, ctx);
     } else if (IsEqualGUID(prov_guid, DXGKRNL_PROVIDER_GUID)) {
         const uint16_t task = p_event->EventHeader.EventDescriptor.Task;
-        if ((task == 5 && (opcode == 11 || opcode == 0)) || (task == 24 && opcode == 1) || (task == 25 && opcode == 1)) {
+        if (task == 17) { // Task 17 = MMIOFlip (Event 116) - WDDM authoritative flip
             mgr->handle_dxgkrnl_flip_event(p_event, rec, ctx);
         } else if (task == 4 && (opcode == 17 || opcode == 1)) {
             mgr->handle_dxgkrnl_vsync_event(p_event, rec, ctx);

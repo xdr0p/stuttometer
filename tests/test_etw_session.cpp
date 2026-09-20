@@ -39,30 +39,183 @@ static void test_session_manager_initial_state() {
     std::cout << "  -> Initial state assertions PASSED.\n";
 }
 
-static void test_present_key_hash_uniqueness() {
-    std::cout << "[TEST] Validating DXGI Present Key Hash injectivity and uniqueness...\n";
+static void test_swapchain_key_and_thread_key_uniqueness() {
+    std::cout << "[TEST] Validating DXGI swapchain key & thread key injectivity and uniqueness...\n";
 
-    std::unordered_set<uint64_t> hashes;
-    const size_t num_tids = 100;
+    // 1. Swapchain key injectivity across (pid, ptr)
+    std::unordered_set<uint64_t> swapchain_hashes;
+    const size_t num_pids = 100;
     const size_t num_ptrs = 100;
 
-    for (uint32_t tid = 1; tid <= num_tids; ++tid) {
+    for (uint32_t pid = 1; pid <= num_pids; ++pid) {
         for (uint64_t ptr_idx = 0; ptr_idx < num_ptrs; ++ptr_idx) {
             uint64_t ptr = (ptr_idx == 0) ? 0 : (0x00007FF700000000ULL + (ptr_idx * 0x1000));
-            uint64_t h = stuttometer::make_present_key(tid, ptr);
+            uint64_t h = stuttometer::make_swapchain_key(pid, ptr);
 
             STUTTO_ASSERT(h != 0);
-            auto [it, inserted] = hashes.insert(h);
-            STUTTO_ASSERT(inserted); // Must have zero collisions across all combinations
+            auto [it, inserted] = swapchain_hashes.insert(h);
+            STUTTO_ASSERT(inserted); // Zero collisions
         }
     }
 
     // Explicit test for null swapchain and 0x1ULL sentinel fallback
-    uint64_t h_null = stuttometer::make_present_key(1234, 0);
-    uint64_t h_sentinel = stuttometer::make_present_key(1234, 0x1ULL);
+    uint64_t h_null = stuttometer::make_swapchain_key(1234, 0);
+    uint64_t h_sentinel = stuttometer::make_swapchain_key(1234, 0x1ULL);
     STUTTO_ASSERT(h_null == h_sentinel);
 
-    std::cout << "  -> Generated " << hashes.size() << " unique hashes with 0 collisions. PASSED.\n";
+    // 2. Thread key injectivity across (pid, tid)
+    std::unordered_set<uint64_t> thread_hashes;
+    for (uint32_t pid = 1; pid <= num_pids; ++pid) {
+        for (uint32_t tid = 1; tid <= 100; ++tid) {
+            uint64_t tk = stuttometer::make_thread_key(pid, tid);
+            STUTTO_ASSERT(tk != 0);
+            auto [it, inserted] = thread_hashes.insert(tk);
+            STUTTO_ASSERT(inserted);
+        }
+    }
+
+    STUTTO_ASSERT(stuttometer::make_thread_key(0x12345678, 0x9ABCDEF0) != 0);
+    STUTTO_ASSERT(stuttometer::make_thread_key(0x12345678, 0x9ABCDEF0) != stuttometer::make_thread_key(0x9ABCDEF0, 0x12345678));
+
+    std::cout << "  -> Generated " << swapchain_hashes.size() << " unique swapchain keys and "
+              << thread_hashes.size() << " thread keys with 0 collisions. PASSED.\n";
+}
+
+static void test_multithreaded_dxgi_present_pacing() {
+    std::cout << "[TEST] Validating multi-threaded DXGI present pacing across worker threads...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    trig_cfg.target_pid = 5000;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+
+    EtwSessionConfig cfg;
+    cfg.enable_dxgi = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    const uint64_t swapchain_ptr = 0x00007FF7ABCD0000ULL;
+    const uint32_t pid = 5000;
+
+    const uint64_t t1_start = 10000000ULL;
+    const uint64_t t1_stop  = t1_start + ms_to_qpc_delta(0.5, qpc_freq);
+    const uint64_t t2_start = t1_stop + ms_to_qpc_delta(16.0, qpc_freq);
+    const uint64_t t2_stop  = t2_start + ms_to_qpc_delta(0.666, qpc_freq);
+
+    // Frame 1 presented from Worker Thread 100
+    // Event 42 (Present_Start) on Thread 100 at T=t1_start
+    EVENT_RECORD ev42_t1{};
+    ev42_t1.UserContext = &mgr;
+    ev42_t1.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
+    ev42_t1.EventHeader.EventDescriptor.Id = 42;
+    ev42_t1.EventHeader.ProcessId = pid;
+    ev42_t1.EventHeader.ThreadId = 100;
+    ev42_t1.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t1_start);
+    ev42_t1.UserData = const_cast<uint64_t*>(&swapchain_ptr);
+    ev42_t1.UserDataLength = sizeof(swapchain_ptr);
+    EtwSessionManager::on_event_record(&ev42_t1);
+
+    // Event 43 (Present_Stop) on Thread 100 at T=t1_stop (0.5ms API duration)
+    EVENT_RECORD ev43_t1{};
+    ev43_t1.UserContext = &mgr;
+    ev43_t1.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
+    ev43_t1.EventHeader.EventDescriptor.Id = 43;
+    ev43_t1.EventHeader.ProcessId = pid;
+    ev43_t1.EventHeader.ThreadId = 100;
+    ev43_t1.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t1_stop);
+    uint32_t result_ok = 0;
+    ev43_t1.UserData = &result_ok;
+    ev43_t1.UserDataLength = sizeof(result_ok);
+    EtwSessionManager::on_event_record(&ev43_t1);
+
+    // Frame 2 presented from Worker Thread 200 (different thread, SAME swapchain)
+    // Event 42 (Present_Start) on Thread 200 at T=t2_start
+    EVENT_RECORD ev42_t2{};
+    ev42_t2.UserContext = &mgr;
+    ev42_t2.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
+    ev42_t2.EventHeader.EventDescriptor.Id = 42;
+    ev42_t2.EventHeader.ProcessId = pid;
+    ev42_t2.EventHeader.ThreadId = 200;
+    ev42_t2.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t2_start);
+    ev42_t2.UserData = const_cast<uint64_t*>(&swapchain_ptr);
+    ev42_t2.UserDataLength = sizeof(swapchain_ptr);
+    EtwSessionManager::on_event_record(&ev42_t2);
+
+    // Event 43 (Present_Stop) on Thread 200 at T=t2_stop
+    EVENT_RECORD ev43_t2{};
+    ev43_t2.UserContext = &mgr;
+    ev43_t2.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
+    ev43_t2.EventHeader.EventDescriptor.Id = 43;
+    ev43_t2.EventHeader.ProcessId = pid;
+    ev43_t2.EventHeader.ThreadId = 200;
+    ev43_t2.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t2_stop);
+    ev43_t2.UserData = &result_ok;
+    ev43_t2.UserDataLength = sizeof(result_ok);
+    EtwSessionManager::on_event_record(&ev43_t2);
+
+    // Verify flight recorder has both Present_Stop completion events recorded
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(t1_start, t2_stop, &drops);
+    STUTTO_ASSERT(drops == 0);
+    STUTTO_ASSERT(snap.size() == 2);
+
+    // Verify Event 43 completion on Thread 100 has auxiliary_data == 0 and API duration (~500us)
+    STUTTO_ASSERT(snap[0].auxiliary_data == 0);
+    STUTTO_ASSERT(snap[0].tid == 100);
+    STUTTO_ASSERT(snap[0].duration_us >= 450 && snap[0].duration_us <= 550);
+
+    // Verify Event 43 completion on Thread 200 has auxiliary_data == 0 and true inter-frame duration (~16666us = ~16.67ms)
+    STUTTO_ASSERT(snap[1].auxiliary_data == 0);
+    STUTTO_ASSERT(snap[1].tid == 200);
+    STUTTO_ASSERT(snap[1].duration_us >= 16000 && snap[1].duration_us <= 17500);
+
+    mgr.set_running_for_test(false);
+    std::cout << "  -> Multi-threaded DXGI present pacing across worker threads PASSED.\n";
+}
+
+static void test_orphaned_present_stop_fallback() {
+    std::cout << "[TEST] Validating orphaned Event 43 (Present_Stop without Start) fallback...\n";
+
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    trig_cfg.target_pid = 5000;
+    TriggerEngine engine(trig_cfg, 10000000);
+
+    EtwSessionConfig cfg;
+    cfg.enable_dxgi = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    // Orphaned Event 43 on Thread 300 with no prior Event 42
+    EVENT_RECORD ev43{};
+    ev43.UserContext = &mgr;
+    ev43.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
+    ev43.EventHeader.EventDescriptor.Id = 43;
+    ev43.EventHeader.ProcessId = 5000;
+    ev43.EventHeader.ThreadId = 300;
+    ev43.EventHeader.TimeStamp.QuadPart = 10000000;
+    uint32_t result_ok = 0;
+    ev43.UserData = &result_ok;
+    ev43.UserDataLength = sizeof(result_ok);
+    EtwSessionManager::on_event_record(&ev43);
+
+    // Verify Event 43 is pushed to flight recorder with auxiliary_data == 0
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(10000000, 10000000, &drops);
+    STUTTO_ASSERT(drops == 0);
+    STUTTO_ASSERT(snap.size() == 1);
+    STUTTO_ASSERT(snap[0].auxiliary_data == 0);
+    STUTTO_ASSERT(snap[0].category == static_cast<uint16_t>(EventCategory::DXGI));
+
+    // Verify engine was NOT triggered and baseline was NOT polluted
+    STUTTO_ASSERT(engine.current_state() == TriggerState::ARMED);
+    STUTTO_ASSERT(engine.suppressed_trigger_count() == 0);
+
+    mgr.set_running_for_test(false);
+    std::cout << "  -> Orphaned Present_Stop fallback PASSED.\n";
 }
 
 static void test_session_manager_lifecycle_stop() {
@@ -797,7 +950,7 @@ static void test_etw_session_ndjson_streaming() {
     STUTTO_ASSERT(lines[2].find("\"cat\":\"DXGI\"") != std::string::npos);
     STUTTO_ASSERT(lines[2].find("\"id\":43") != std::string::npos);
     STUTTO_ASSERT(lines[2].find("\"dur_us\":16600") != std::string::npos); // Duration accurately populated!
-    STUTTO_ASSERT(lines[2].find("\"aux\":" + std::to_string(swapchain)) != std::string::npos);
+    STUTTO_ASSERT(lines[2].find("\"aux\":0") != std::string::npos); // NDJSON schema v1 contract: Event 43 aux is 0
 
     // Check Disk Init line: aux must be 0 (KVA address protection, raw IRP stripped)
     STUTTO_ASSERT(lines[3].find("\"cat\":\"DISK\"") != std::string::npos);
@@ -1016,7 +1169,9 @@ int main() {
     std::cout << "=== Stuttometer ETW Session Manager Tests ===\n";
     try {
         test_session_manager_initial_state();
-        test_present_key_hash_uniqueness();
+        test_swapchain_key_and_thread_key_uniqueness();
+        test_multithreaded_dxgi_present_pacing();
+        test_orphaned_present_stop_fallback();
         test_session_manager_lifecycle_stop();
         test_granular_session_teardown();
         test_resolve_process_name_caching();

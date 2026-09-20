@@ -210,6 +210,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         trig_config.target_pid = config.target_pid;
         trig_config.target_process_name = config.target_process_name;
         trig_config.frame_trigger_mode = config.frame_trigger_mode;
+        trig_config.pacing_profile = config.pacing_profile;
         trig_config.spike_multiplier = config.spike_multiplier;
         trig_config.min_spike_delta_ms = config.min_spike_delta_ms;
         trig_config.enable_judder_detection = config.enable_judder_detection;
@@ -217,6 +218,12 @@ void GuiController::session_worker_loop(GuiConfig config) {
 
         auto trigger_engine = std::make_unique<TriggerEngine>(trig_config, qpc_freq);
         if (session_benchmark_) {
+            session_benchmark_->set_pacing_context(
+                config.pacing_profile,
+                config.present_threshold_ms,
+                config.spike_multiplier,
+                config.min_spike_delta_ms
+            );
             if (config.target_pid != 0 || !config.target_process_name.empty()) {
                 // Attach sink if target PID is set OR if waiting for a target process by name (Resolves S-10-2)
                 trigger_engine->set_benchmark_sink(session_benchmark_.get());

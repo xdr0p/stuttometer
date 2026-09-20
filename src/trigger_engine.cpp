@@ -109,8 +109,7 @@ bool TriggerEngine::evaluate_frame_pacing_common(
         return false;
     }
 
-    const double jitter_guard = std::max(0.5, config_.present_threshold_ms * 0.05);
-    const double effective_static_threshold = config_.present_threshold_ms + jitter_guard;
+    const double effective_static_threshold = calculate_effective_static_threshold(config_.present_threshold_ms);
 
     const uint64_t key = (stream_key != 0) ? stream_key : (static_cast<uint64_t>(pid) << 32 | tid);
     out_pacing_res = FramePacingResult{};
@@ -119,18 +118,40 @@ bool TriggerEngine::evaluate_frame_pacing_common(
     reset_frame_stats(default_stats, timestamp_qpc);
 
     bool upsert_ok = pacing_table_.upsert(key, default_stats, [&](RollingFrameStats& stats) {
+        double eff_mult = config_.spike_multiplier;
+        double eff_delta = config_.min_spike_delta_ms;
+        if (config_.pacing_profile == PacingProfile::AUTO_ADAPTIVE) {
+            const double current_mean = calculate_mean_ms(stats);
+            auto params = compute_adaptive_pacing_params(current_mean);
+            eff_mult = params.spike_multiplier;
+            eff_delta = params.min_spike_delta_ms;
+        } else if (config_.pacing_profile == PacingProfile::HIGH_REFRESH) {
+            eff_mult = HIGH_REFRESH_SPIKE_MULTIPLIER;
+            eff_delta = HIGH_REFRESH_MIN_DELTA_MS;
+        } else if (config_.pacing_profile == PacingProfile::CONSERVATIVE) {
+            eff_mult = CONSERVATIVE_SPIKE_MULTIPLIER;
+            eff_delta = CONSERVATIVE_MIN_DELTA_MS;
+        }
+
         out_pacing_res = evaluate_frame_pacing(
             stats,
             duration_ms,
             timestamp_qpc,
             qpc_freq_,
             config_.frame_trigger_mode,
-            config_.spike_multiplier,
-            config_.min_spike_delta_ms,
+            eff_mult,
+            eff_delta,
             config_.enable_judder_detection,
             config_.judder_swing_ratio,
-            effective_static_threshold
+            effective_static_threshold,
+            config_.pacing_profile
         );
+
+        SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
+        if (sink && active_target_pid() != 0 && pid == active_target_pid() && stats.sample_count >= 8) {
+            const double pushed_baseline = out_pacing_res.is_stutter ? out_pacing_res.baseline_avg_ms : calculate_mean_ms(stats);
+            sink->update_pacing_telemetry(pushed_baseline, eff_mult, eff_delta);
+        }
     });
 
     if (!upsert_ok) {
@@ -456,6 +477,15 @@ bool TriggerEngine::on_process_launched(uint32_t pid, std::string_view process_n
 
 void TriggerEngine::on_process_terminated(uint32_t pid) noexcept {
     try_detach_pid(pid);
+}
+
+double TriggerEngine::current_stream_baseline_ms_for_test(uint64_t stream_key, uint32_t pid, uint32_t tid) const noexcept {
+    const uint64_t key = (stream_key != 0) ? stream_key : (static_cast<uint64_t>(pid) << 32 | tid);
+    RollingFrameStats stats{};
+    if (pacing_table_.lookup(key, stats)) {
+        return calculate_mean_ms(stats);
+    }
+    return 0.0;
 }
 
 } // namespace stuttometer

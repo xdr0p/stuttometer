@@ -17,7 +17,7 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
     nlohmann::json root;
 
     root["schema_version"] = report.schema_version.empty() ? "1.1" : report.schema_version;
-    root["tool_version"]   = report.tool_version.empty() ? "0.4.0" : report.tool_version;
+    root["tool_version"]   = report.tool_version.empty() ? "0.4.1" : report.tool_version;
     root["timestamp_utc"]  = report.timestamp_utc;
 
     const std::vector<uint32_t> ids_to_redact = redact ? collect_report_ids(report) : std::vector<uint32_t>{};

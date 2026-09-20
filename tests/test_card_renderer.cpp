@@ -1,3 +1,7 @@
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include "test_common.hpp"
 #include "card_renderer.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
@@ -8,13 +12,15 @@
 #include <vector>
 #include <cstdint>
 #include <cmath>
+#include <cstdlib>
+#include <string_view>
 
 using namespace stuttometer;
 using namespace stuttometer::gui;
 
 static DiagnosticReport create_dummy_report() {
     DiagnosticReport report;
-    report.tool_version = "0.3.2";
+    report.tool_version = "0.4.1";
     report.timestamp_utc = "2026-09-15 01:00:00 UTC";
     report.target_process = "Cyberpunk2077.exe";
     report.trigger.source = TriggerSource::DXGI_PRESENT_STUTTER;
@@ -45,6 +51,7 @@ static DiagnosticReport create_dummy_report() {
         pt.frame_index = static_cast<uint32_t>(i + 512);
         pt.relative_index = i;
         pt.duration_ms = (i == 0) ? 45.5 : (16.67 + (std::sin(i * 0.1) * 2.0));
+        pt.offset_from_trigger_ms = static_cast<double>(i) * 16.67;
         pt.is_trigger_frame = (i == 0);
         pt.is_pacing_stall = (pt.duration_ms >= 25.0);
         report.frame_timeline.push_back(pt);
@@ -82,6 +89,18 @@ static void test_initialization() {
 // Test 2: PNG Encoding & Header Validation (with Nit 1 fix)
 static void test_png_encoding_and_sampling() {
     std::cout << "[TEST 2] Testing PNG encoding, IHDR chunk validation, and pixel sampling...\n";
+
+    // Unit assertions for detail::format_offset
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(-83.0) == L"-83 ms");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(83.0) == L"+83 ms");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(-1500.0) == L"-1.5 s");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(1500.0) == L"+1.5 s");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(0.0) == L"+0 ms");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(-1000.0) == L"-1.0 s");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(1000.0) == L"+1.0 s");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(-999.0) == L"-999 ms");
+    STUTTO_ASSERT(stuttometer::gui::detail::format_offset(999.0) == L"+999 ms");
+
     auto report = create_dummy_report();
 
     CardRenderOptions opts;
@@ -149,6 +168,35 @@ static void test_png_encoding_and_sampling() {
                       std::abs(static_cast<int>(border_px.GetG()) - 0x15) +
                       std::abs(static_cast<int>(border_px.GetB()) - 0x1F);
         STUTTO_ASSERT(dist_border < dist_bg && "Border pixel at (1, 0) must be distinctly closer to border accent (#2a354b) than canvas bg (#11151f)");
+
+        // Regression Assertion: Scan plot area to ensure Emerald (#10B981) dominates over Sky Blue (#38BDF8)
+        // Plot area geometry matching draw_card() at 1200x675
+        int plot_x = 24 + 60; // side_margin (24) + 60 = 84
+        int plot_y = 232 + 36; // graph_y (232) + 36 = 268
+        int plot_w = (1200 - 48) - 76; // 1076
+        int plot_h = 398 - 60; // 338
+
+        size_t emerald_dominant = 0;
+        size_t sky_dominant = 0;
+        for (int y = plot_y; y < plot_y + plot_h; y += 4) {
+            for (int x = plot_x; x < plot_x + plot_w; x += 4) {
+                Gdiplus::Color px;
+                loaded_bmp.GetPixel(x, y, &px);
+                int g = static_cast<int>(px.GetG());
+                int b = static_cast<int>(px.GetB());
+                // Emerald fill/curve has g > b and elevated green (g > 30)
+                if (g > b && g > 30) {
+                    ++emerald_dominant;
+                }
+                // Sky blue (#38BDF8) has high blue brightness (b > 100 && b - g > 20),
+                // distinguishing it from dark slate gridlines (b=59, g=41)
+                if (b > 100 && (b - g) > 20) {
+                    ++sky_dominant;
+                }
+            }
+        }
+        STUTTO_ASSERT(emerald_dominant > 50 && "Must detect emerald curve/fill pixels in plot area");
+        STUTTO_ASSERT(sky_dominant == 0 && "Sky blue must be completely eliminated from plot area");
     }
     pStream->Release();
 
@@ -168,6 +216,8 @@ static void test_png_encoding_and_sampling() {
 // Test 3: Clipboard CF_DIB Direct Paste
 static void test_clipboard_roundtrip() {
     std::cout << "[TEST 3] Testing clipboard CF_DIB direct paste format...\n";
+
+
     auto report = create_dummy_report();
 
     // Test OpenClipboard defensively
@@ -387,6 +437,47 @@ static void test_file_export_and_errors() {
     STUTTO_ASSERT(save_ok && "Saving to valid temp path must succeed");
     STUTTO_ASSERT(std::filesystem::exists(valid_path));
     std::filesystem::remove(valid_path);
+
+    // Check if user requested dumping dummy cards for visual inspection
+    const char* dump_dir_env = std::getenv("STUTTO_DUMP_CARD_DIR");
+    if (dump_dir_env && dump_dir_env[0] != '\0') {
+        std::filesystem::path dump_dir(dump_dir_env);
+        std::filesystem::create_directories(dump_dir);
+
+        // 1. Game Engine Stutter
+        bool ok_ge = CardRenderer::save_card_to_png(report, dump_dir / "dummy_card_game_engine.png");
+        STUTTO_ASSERT(ok_ge && "Must succeed saving game engine card");
+
+        // 2. DWM Composition
+        auto dwm_report = report;
+        dwm_report.attribution = AttributionTag::DWM_COMPOSITION;
+        dwm_report.attribution_process = "dwm.exe";
+        dwm_report.diagnoses[0].summary = "Desktop Window Manager compositing queue delay";
+        bool ok_dwm = CardRenderer::save_card_to_png(dwm_report, dump_dir / "dummy_card_dwm.png");
+        STUTTO_ASSERT(ok_dwm && "Must succeed saving DWM card");
+
+        // 3. External Contention
+        auto ext_report = report;
+        ext_report.attribution = AttributionTag::EXTERNAL_CONTENTION;
+        ext_report.attribution_process = "AntivirusScan.exe";
+        ext_report.diagnoses[0].summary = "High CPU contention from background process on Core 4";
+        bool ok_ext = CardRenderer::save_card_to_png(ext_report, dump_dir / "dummy_card_contention.png");
+        STUTTO_ASSERT(ok_ext && "Must succeed saving contention card");
+
+        // 4. Audio Glitch
+        auto audio_report = report;
+        audio_report.trigger.source = TriggerSource::AUDIO_GLITCH;
+        audio_report.trigger.reason = TriggerReason::AUDIO_BUFFER_UNDERRUN;
+        audio_report.trigger.duration_ms = 0.0;
+        audio_report.trigger.glitch_count = 3;
+        audio_report.attribution = AttributionTag::EXTERNAL_CONTENTION;
+        audio_report.attribution_process = "audiodg.exe";
+        audio_report.diagnoses[0].summary = "Audio buffer underrun detected in audio engine worker";
+        bool ok_aud = CardRenderer::save_card_to_png(audio_report, dump_dir / "dummy_card_audio_glitch.png");
+        STUTTO_ASSERT(ok_aud && "Must succeed saving audio glitch card");
+
+        std::cout << "  -> Dumped dummy card images to: " << dump_dir.string() << "\n";
+    }
 
     // Invalid / illegal path
     std::filesystem::path invalid_path = "Z:\\nonexistent_dir_0987654321\\illegal.png";

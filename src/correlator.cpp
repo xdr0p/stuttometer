@@ -553,8 +553,13 @@ DiagnosticReport CorrelationEngine::correlate(
         hypotheses.push_back(std::move(diag));
     }
 
-    // 5. GPU-Side Pipeline Stall Hypothesis (when triggered via KERNEL_FRAME_STALL and no software DPC/Disk/VRAM/Memory/PSO/AV anomalies)
-    if (trigger.source == TriggerSource::KERNEL_FRAME_STALL && 
+    // 5. GPU-Side Pipeline Stall Hypothesis (evaluates KERNEL flips and DXGI static ceiling / relative spikes when software queues are idle)
+    const bool is_gpu_candidate = (trigger.source == TriggerSource::KERNEL_FRAME_STALL) ||
+                                  (trigger.source == TriggerSource::DXGI_PRESENT_STUTTER && 
+                                   (trigger.reason == TriggerReason::STATIC_THRESHOLD ||
+                                    trigger.reason == TriggerReason::RELATIVE_SPIKE));
+
+    if (is_gpu_candidate && 
         dpc_candidates.empty() && 
         disk_candidates.empty() && 
         cswitch_candidates.empty() &&
@@ -568,19 +573,47 @@ DiagnosticReport CorrelationEngine::correlate(
         pagefault_candidates.empty()) {
         Diagnosis diag;
         diag.hypothesis = "gpu_pipeline_stall";
-        diag.confidence = std::clamp(0.60 + std::min(trigger.duration_ms / 100.0, 0.30), 0.60, 0.90);
+
+        const double raw_conf = 0.60 + std::min(trigger.duration_ms / 100.0, 0.30);
+        const bool is_dxgi_relative_spike =
+            (trigger.source == TriggerSource::DXGI_PRESENT_STUTTER &&
+             trigger.reason == TriggerReason::RELATIVE_SPIKE);
+        diag.confidence = std::clamp(is_dxgi_relative_spike ? raw_conf * 0.90 : raw_conf, 0.50, 0.90);
         diag.factors = { std::min(trigger.duration_ms / 50.0, 1.0), 0.5, 1.0 };
+
         std::stringstream ss;
-        ss << "Display frame delivery stall detected via kernel DxgKrnl Flip delta ("
-           << std::fixed << std::setprecision(1) << trigger.duration_ms << "ms";
-        if (trigger.baseline_fps > 0.0) {
+        ss << "Display frame delivery stall detected via ";
+        if (trigger.source == TriggerSource::KERNEL_FRAME_STALL) {
+            ss << "kernel DxgKrnl Flip delta (" << std::fixed << std::setprecision(1) << trigger.duration_ms << "ms";
+            if (trigger.reason == TriggerReason::RELATIVE_SPIKE && trigger.spike_ratio > 0.0) {
+                ss << ", " << std::setprecision(1) << trigger.spike_ratio << "x spike";
+            }
+        } else if (trigger.reason == TriggerReason::RELATIVE_SPIKE) {
+            ss << "DXGI Present relative spike (" << std::fixed << std::setprecision(1) << trigger.duration_ms << "ms, "
+               << std::setprecision(1) << trigger.spike_ratio << "x spike";
+        } else {
+            ss << "DXGI Present execution latency (" << std::fixed << std::setprecision(1) << trigger.duration_ms << "ms";
+        }
+
+        if (trigger.baseline_fps > 0.0 && trigger.reason != TriggerReason::RELATIVE_SPIKE) {
             ss << ", " << std::setprecision(1) << trigger.spike_ratio << "x spike from "
                << trigger.baseline_fps << " FPS / " << trigger.baseline_avg_ms << "ms baseline";
+        } else if (trigger.baseline_fps > 0.0 && trigger.reason == TriggerReason::RELATIVE_SPIKE) {
+            ss << " from " << trigger.baseline_fps << " FPS / " << trigger.baseline_avg_ms << "ms baseline";
         }
-        ss << "). "
-           << "No software driver DPC/ISR or disk I/O freezes were observed in the kernel window. "
-           << "Suspected GPU-side pipeline stall (shader compilation, rasterization overload, or VRAM pressure).";
+        ss << "). No software driver DPC/ISR or thread preemption freezes were observed. "
+           << "Suspected GPU-side pipeline stall (GPU decompression/DirectStorage contention, shader compilation, or rasterization bottleneck).";
         diag.summary = ss.str();
+
+        EvidenceItem ev;
+        ev.event_type = "GPU_PIPELINE_STALL";
+        ev.duration_us = static_cast<uint32_t>(trigger.duration_ms * 1000.0);
+        ev.cpu_core = trigger.cpu_index;
+        ev.offset_from_trigger_ms = 0.0;
+        ev.pid = trigger.target_pid;
+        ev.extra_info = "In titles utilizing GPU DirectStorage (e.g. Marvel's Spider-Man 2), GPU decompression compute shaders share execution queues with graphics rendering. If permitted by the game build/anti-cheat, test temporarily renaming dstorage.dll and dstoragecore.dll to isolate.";
+        diag.evidence.push_back(std::move(ev));
+
         hypotheses.push_back(std::move(diag));
     }
 

@@ -568,6 +568,130 @@ static void test_hybrid_warmup_static_suppression_below_200ms() {
     std::cout << "  -> HYBRID warmup static suppression for frames 0..3 verified.\n";
 }
 
+static void test_adaptive_pacing_math() {
+    std::cout << "[TEST] Running test_adaptive_pacing_math across FPS spectrum...\n";
+
+    // 500 FPS (2.0 ms) -> saturates at 1.4x / 1.5 ms
+    auto p1 = stuttometer::compute_adaptive_pacing_params(2.0);
+    STUTTO_ASSERT(std::abs(p1.spike_multiplier - 1.4) < 1e-6);
+    STUTTO_ASSERT(std::abs(p1.min_spike_delta_ms - 1.5) < 1e-6);
+
+    // 200 FPS (5.0 ms) -> 1.44x / 1.5 ms
+    auto p2 = stuttometer::compute_adaptive_pacing_params(5.0);
+    STUTTO_ASSERT(std::abs(p2.spike_multiplier - 1.44) < 1e-3);
+    STUTTO_ASSERT(std::abs(p2.min_spike_delta_ms - 1.5) < 1e-6);
+
+    // 140 FPS (7.14 ms) -> 1.54x / 2.14 ms
+    auto p3 = stuttometer::compute_adaptive_pacing_params(7.14);
+    STUTTO_ASSERT(std::abs(p3.spike_multiplier - 1.542) < 0.01);
+    STUTTO_ASSERT(std::abs(p3.min_spike_delta_ms - 2.142) < 0.01);
+
+    // 60 FPS (16.67 ms) -> saturates at 2.0x / 4.0 ms
+    auto p4 = stuttometer::compute_adaptive_pacing_params(16.67);
+    STUTTO_ASSERT(std::abs(p4.spike_multiplier - 2.0) < 1e-6);
+    STUTTO_ASSERT(std::abs(p4.min_spike_delta_ms - 4.0) < 1e-6);
+
+    // 30 FPS (33.3 ms) -> saturates at 2.0x / 4.0 ms
+    auto p5 = stuttometer::compute_adaptive_pacing_params(33.3);
+    STUTTO_ASSERT(std::abs(p5.spike_multiplier - 2.0) < 1e-6);
+    STUTTO_ASSERT(std::abs(p5.min_spike_delta_ms - 4.0) < 1e-6);
+
+    std::cout << "  -> Adaptive pacing scaling math verified across 500, 200, 140, 60, and 30 FPS.\n";
+}
+
+static void test_adaptive_trigger_140fps() {
+    std::cout << "[TEST] Running test_adaptive_trigger_140fps...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    uint64_t qpc = 1000000ULL;
+
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, qpc);
+
+    // Seed 20 warmup frames at 7.14 ms (140 FPS)
+    for (int i = 0; i < 20; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(7.14, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 7.14, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 16.67,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 20);
+
+    // Frame at 12.0 ms should trigger RELATIVE_SPIKE (threshold ~11.0 ms)
+    qpc += stuttometer::ms_to_qpc_delta(12.0, qpc_freq);
+    auto res_spike = stuttometer::evaluate_frame_pacing(
+        stats, 12.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 16.67,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(res_spike.is_stutter);
+    STUTTO_ASSERT(res_spike.reason == stuttometer::TriggerReason::RELATIVE_SPIKE);
+    STUTTO_ASSERT(stats.sample_count == 20); // Excluded from baseline
+
+    std::cout << "  -> 140 FPS adaptive trigger verified (12.0ms triggered RELATIVE_SPIKE).\n";
+}
+
+static void test_adaptive_trigger_60fps() {
+    std::cout << "[TEST] Running test_adaptive_trigger_60fps...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    uint64_t qpc = 1000000ULL;
+
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, qpc);
+    const double static_threshold = stuttometer::calculate_effective_static_threshold(16.67);
+
+    // Seed 20 warmup frames at 16.67 ms (60 FPS)
+    for (int i = 0; i < 20; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 16.67, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, static_threshold,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 20);
+
+    // 17.0 ms frame: below static floor (17.5ms) and below dynamic spike (33.3ms) -> NO trigger
+    qpc += stuttometer::ms_to_qpc_delta(17.0, qpc_freq);
+    auto res_clean = stuttometer::evaluate_frame_pacing(
+        stats, 17.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, static_threshold,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(!res_clean.is_stutter);
+
+    // 20.0 ms frame: exceeds static floor (17.5ms), below dynamic spike (33.3ms) -> STATIC_THRESHOLD trigger
+    qpc += stuttometer::ms_to_qpc_delta(20.0, qpc_freq);
+    auto res_static = stuttometer::evaluate_frame_pacing(
+        stats, 20.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, static_threshold,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(res_static.is_stutter);
+    STUTTO_ASSERT(res_static.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
+
+    // 35.0 ms frame: exceeds dynamic spike (33.3ms) -> RELATIVE_SPIKE trigger
+    qpc += stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    auto res_rel = stuttometer::evaluate_frame_pacing(
+        stats, 35.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, static_threshold,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(res_rel.is_stutter);
+    STUTTO_ASSERT(res_rel.reason == stuttometer::TriggerReason::RELATIVE_SPIKE);
+
+    std::cout << "  -> 60 FPS adaptive trigger verified (17.0ms clean, 20.0ms static, 35.0ms spike).\n";
+}
+
 int main() {
     std::cout << "================================================================\n";
     std::cout << " STUTTOMETER FRAME PACING & STATISTICAL TRIGGER TEST SUITE\n";
@@ -588,11 +712,15 @@ int main() {
         test_hybrid_warmup_reject_then_recover();
         test_hybrid_steady_slow_game_baseline_establishment();
         test_hybrid_warmup_static_suppression_below_200ms();
+        test_adaptive_pacing_math();
+        test_adaptive_trigger_140fps();
+        test_adaptive_trigger_60fps();
 
-        std::cout << "\n>>> ALL 14 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
+        std::cout << "\n>>> ALL 17 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n[TEST FAILED] Exception: " << e.what() << "\n";
         return 1;
     }
 }
+

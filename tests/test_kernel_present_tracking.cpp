@@ -369,6 +369,84 @@ static void test_static_trigger_on_pacing_table_exhaustion() {
     std::cout << "  -> Static threshold trigger fallback PASSED.\n";
 }
 
+static void test_dxgkrnl_task17_flip_parsing_and_dwm_filtering() {
+    std::cout << "[TEST] Validating DxgKrnl Task 17 (Event 116) offset parsing & DWM filtering...\n";
+
+    stuttometer::FlightRecorder recorder(1024);
+    stuttometer::TriggerConfig trig_cfg;
+    trig_cfg.target_pid = 5555;
+    stuttometer::TriggerEngine engine(trig_cfg, 10000000);
+
+    stuttometer::EtwSessionConfig cfg;
+    cfg.enable_dxgkrnl = true;
+
+    stuttometer::EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    // Event 116 (Task 17 MMIOFlip) layout:
+    // Offset 0:  pDxgAdapter (8 bytes)
+    // Offset 8:  VidPnSourceId (4 bytes)
+    // Offset 12: FlipSubmitSequence (4 bytes)
+    // Offset 16: FlipToDriverAllocation (8 bytes)
+    // Offset 24: FlipToPhysicalAddress (8 bytes)
+    // Offset 32: FlipToSegmentId (4 bytes)
+    // Offset 36: FlipPresentId (4 bytes)
+    // Total min length: 40 bytes
+    uint8_t payload[48]{};
+    const uint32_t expected_vidpn = 2;
+    const uint64_t expected_alloc = 0xABCD1234DEADBEEFULL;
+    const uint32_t expected_present_id = 4242;
+
+    std::memcpy(payload + 8, &expected_vidpn, 4);
+    std::memcpy(payload + 16, &expected_alloc, 8);
+    std::memcpy(payload + 36, &expected_present_id, 4);
+
+    // 1. Normal game flip (PID 5555)
+    EVENT_RECORD ev_game{};
+    ev_game.UserContext = &mgr;
+    ev_game.EventHeader.ProviderId = stuttometer::DXGKRNL_PROVIDER_GUID;
+    ev_game.EventHeader.EventDescriptor.Task = 17;
+    ev_game.EventHeader.EventDescriptor.Id = 116;
+    ev_game.EventHeader.ProcessId = 5555;
+    ev_game.EventHeader.ThreadId = 1234;
+    ev_game.EventHeader.TimeStamp.QuadPart = 10000000;
+    ev_game.UserData = payload;
+    ev_game.UserDataLength = sizeof(payload);
+
+    stuttometer::EtwSessionManager::on_event_record(&ev_game);
+
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(10000000, 10000000, &drops);
+    STUTTO_ASSERT(drops == 0);
+    STUTTO_ASSERT(snap.size() == 1);
+    STUTTO_ASSERT(snap[0].category == static_cast<uint16_t>(stuttometer::EventCategory::DXGKRNL_MMIOFLIP));
+    STUTTO_ASSERT(snap[0].auxiliary_data == expected_alloc);
+    STUTTO_ASSERT(snap[0].payload.dxgi.present_flags == expected_vidpn);
+    STUTTO_ASSERT(snap[0].payload.dxgi.frame_index == expected_present_id);
+
+    // 2. DWM / System flip (PID 4)
+    EVENT_RECORD ev_system{};
+    ev_system.UserContext = &mgr;
+    ev_system.EventHeader.ProviderId = stuttometer::DXGKRNL_PROVIDER_GUID;
+    ev_system.EventHeader.EventDescriptor.Task = 17;
+    ev_system.EventHeader.EventDescriptor.Id = 116;
+    ev_system.EventHeader.ProcessId = 4; // System / DWM
+    ev_system.EventHeader.ThreadId = 5678;
+    ev_system.EventHeader.TimeStamp.QuadPart = 10500000; // 50ms later
+    ev_system.UserData = payload;
+    ev_system.UserDataLength = sizeof(payload);
+
+    stuttometer::EtwSessionManager::on_event_record(&ev_system);
+
+    auto snap2 = recorder.snapshot(10000000, 10500000, &drops);
+    STUTTO_ASSERT(snap2.size() == 2); // Pushed to flight recorder
+    STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::ARMED); // Filtered from engine
+    STUTTO_ASSERT(engine.suppressed_trigger_count() == 0);
+
+    mgr.set_running_for_test(false);
+    std::cout << "  -> DxgKrnl Task 17 offset parsing & DWM filtering PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Kernel Present & GPU Tracking Tests ===\n";
     try {
@@ -380,6 +458,7 @@ int main() {
         test_dwm_glitch_trigger_attribution();
         test_trigger_engine_single_emission_guarantee();
         test_static_trigger_on_pacing_table_exhaustion();
+        test_dxgkrnl_task17_flip_parsing_and_dwm_filtering();
         std::cout << ">>> All Kernel Present & GPU Tracking tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

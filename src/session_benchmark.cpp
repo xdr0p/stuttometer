@@ -46,6 +46,28 @@ std::string BenchmarkSummary::to_markdown() const {
         oss << "| Max Frametime | N/A |\n\n";
     }
 
+    oss << "## Observed Presentation Cadence\n\n";
+    oss << "| Metric | Value |\n";
+    oss << "| :--- | :--- |\n";
+    if (is_monitor_all) {
+        oss << "| Active Profile | N/A (Monitor-All) |\n";
+        oss << "| Status | Cadence telemetry unavailable in Monitor-All mode (select a target process) |\n\n";
+    } else if (binding_floor_source == BindingFloorSource::NONE) {
+        oss << "| Active Profile | " << pacing_profile_to_string(pacing_profile) << " |\n";
+        oss << "| Baseline Cadence | Pending warmup (\u22658 frames) |\n";
+        oss << "| Dynamic Trigger | Pending warmup (\u22658 frames) |\n";
+        oss << "| Static Threshold | \u2265 " << std::fixed << std::setprecision(1) << static_floor_ms << " ms |\n";
+        oss << "| Estimated Stall Floor | Pending warmup (\u22658 frames) |\n\n";
+    } else {
+        oss << "| Active Profile | " << pacing_profile_to_string(pacing_profile) << " |\n";
+        oss << "| Baseline Cadence | " << std::fixed << std::setprecision(1) << rolling_baseline_ms << " ms ("
+            << std::fixed << std::setprecision(1) << rolling_fps << " FPS) |\n";
+        oss << "| Dynamic Trigger | \u2265 " << std::fixed << std::setprecision(1) << estimated_dynamic_floor_ms << " ms |\n";
+        oss << "| Static Threshold | \u2265 " << std::fixed << std::setprecision(1) << static_floor_ms << " ms |\n";
+        oss << "| Estimated Stall Floor | \u2265 " << std::fixed << std::setprecision(1) << estimated_binding_floor_ms << " ms ("
+            << (binding_floor_source == BindingFloorSource::DYNAMIC ? "Dynamic" : "Static") << ") |\n\n";
+    }
+
     oss << "## Culprit Attribution (Top Stutter Causes)\n\n";
     oss << "| Hypothesis | Top Driver | Count | Total Stall | Stall % |\n";
     oss << "| :--- | :--- | :--- | :--- | :--- |\n";
@@ -65,7 +87,7 @@ std::string BenchmarkSummary::to_markdown() const {
 
 std::string BenchmarkSummary::to_json() const {
     nlohmann::json j;
-    j["schema_version"] = "1.0";
+    j["schema_version"] = "1.2";
     j["target_process"] = target_process;
     j["target_pid"] = target_pid;
     j["duration_ms"] = duration_ms;
@@ -84,6 +106,23 @@ std::string BenchmarkSummary::to_json() const {
     j["net_stall_ms"] = net_stall_ms;
     j["worst_stutter_ms"] = worst_stutter_ms;
     j["worst_stutter_hypothesis"] = worst_stutter_hypothesis;
+
+    nlohmann::json cadence;
+    cadence["pacing_profile"] = pacing_profile_to_string(pacing_profile);
+    cadence["binding_floor_source"] = binding_floor_source_to_string(binding_floor_source);
+    if (binding_floor_source == BindingFloorSource::NONE) {
+        cadence["estimated_dynamic_floor_ms"] = nullptr;
+        cadence["estimated_binding_floor_ms"] = nullptr;
+        cadence["rolling_baseline_ms"] = nullptr;
+        cadence["rolling_fps"] = nullptr;
+    } else {
+        cadence["estimated_dynamic_floor_ms"] = estimated_dynamic_floor_ms;
+        cadence["estimated_binding_floor_ms"] = estimated_binding_floor_ms;
+        cadence["rolling_baseline_ms"] = rolling_baseline_ms;
+        cadence["rolling_fps"] = rolling_fps;
+    }
+    cadence["static_floor_ms"] = static_floor_ms;
+    j["presentation_cadence"] = cadence;
 
     nlohmann::json culprits_arr = nlohmann::json::array();
     for (const auto& c : culprits) {
@@ -220,6 +259,20 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
     BenchmarkSummary summary{};
     summary.redacted = redact;
 
+    const PacingProfile snap_profile = pacing_profile_.load(std::memory_order_relaxed);
+    const double snap_present_threshold = present_threshold_ms_.load(std::memory_order_relaxed);
+    const double snap_spike_mult = spike_multiplier_.load(std::memory_order_relaxed);
+    const double snap_min_delta = min_spike_delta_ms_.load(std::memory_order_relaxed);
+    const bool snap_has_telemetry = has_live_telemetry_.load(std::memory_order_acquire);
+    double snap_live_baseline = 0.0;
+    double snap_live_mult = 2.0;
+    double snap_live_delta = 4.0;
+    if (snap_has_telemetry) {
+        snap_live_baseline = live_baseline_ms_.load(std::memory_order_relaxed);
+        snap_live_mult = live_effective_mult_.load(std::memory_order_relaxed);
+        snap_live_delta = live_effective_delta_.load(std::memory_order_relaxed);
+    }
+
     uint64_t start_head = epoch_start_head_.load(std::memory_order_acquire);
     uint64_t current_head = head_.load(std::memory_order_acquire);
 
@@ -227,8 +280,14 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
         start_head = epoch_start_head_.load(std::memory_order_acquire);
         current_head = head_.load(std::memory_order_acquire);
         if (current_head < start_head) {
+            const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
+            const uint32_t snap_pid = static_cast<uint32_t>(cur_state >> 32);
             BenchmarkSummary empty_summary{};
             empty_summary.redacted = redact;
+            empty_summary.is_monitor_all = (snap_pid == 0);
+            empty_summary.target_pid = redact ? 0 : snap_pid;
+            empty_summary.pacing_profile = snap_profile;
+            empty_summary.static_floor_ms = calculate_effective_static_threshold(snap_present_threshold);
             return empty_summary;
         }
     }
@@ -262,8 +321,106 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
     }
 
     summary.total_frames = valid_count;
+    summary.is_monitor_all = (snap_pid == 0);
     summary.target_pid = redact ? 0 : snap_pid;
+    summary.pacing_profile = snap_profile;
+    summary.static_floor_ms = calculate_effective_static_threshold(snap_present_threshold);
     summary.dropped_pause_frames = dropped_pause_frames_.load(std::memory_order_relaxed);
+
+    // Presentation Cadence State Machine (strictly prior to std::sort)
+    if (snap_has_telemetry) {
+        // State 1: Live Pacing Telemetry Active
+        summary.rolling_baseline_ms = snap_live_baseline;
+        summary.rolling_fps = (snap_live_baseline > 0.0) ? (1000.0 / snap_live_baseline) : 0.0;
+        summary.estimated_dynamic_floor_ms = std::max(
+            snap_live_baseline * snap_live_mult,
+            snap_live_baseline + snap_live_delta
+        );
+        if (summary.estimated_dynamic_floor_ms <= summary.static_floor_ms) {
+            summary.estimated_binding_floor_ms = summary.estimated_dynamic_floor_ms;
+            summary.binding_floor_source = BindingFloorSource::DYNAMIC;
+        } else {
+            summary.estimated_binding_floor_ms = summary.static_floor_ms;
+            summary.binding_floor_source = BindingFloorSource::STATIC;
+        }
+    } else if (valid_count >= 8) {
+        // State 2: Standalone Fallback (valid_count >= 8)
+        const size_t N = std::min<size_t>(valid_count, 64);
+        const size_t start_idx = valid_count - N;
+
+        // Pass 1: Sanity Filter (< 100.0 ms)
+        std::vector<double> pass1;
+        pass1.reserve(N);
+        for (size_t i = start_idx; i < valid_count; ++i) {
+            if (scratch_buffer_[i] < 100.0) {
+                pass1.push_back(scratch_buffer_[i]);
+            }
+        }
+
+        if (pass1.size() < 8) {
+            summary.rolling_baseline_ms = sum_dur_ms / valid_count;
+        } else {
+            std::sort(pass1.begin(), pass1.end());
+            const double median_t1 = (pass1.size() % 2 == 1)
+                ? pass1[pass1.size() / 2]
+                : (pass1[pass1.size() / 2 - 1] + pass1[pass1.size() / 2]) / 2.0;
+
+            // Pass 2: Median-Referenced Clean Baseline (exclude > 1.4 * median_t1)
+            std::vector<double> pass2;
+            pass2.reserve(pass1.size());
+            const double threshold_pass2 = 1.4 * median_t1;
+            for (double d : pass1) {
+                if (d <= threshold_pass2) {
+                    pass2.push_back(d);
+                }
+            }
+
+            if (pass2.size() < 8) {
+                summary.rolling_baseline_ms = median_t1;
+            } else {
+                std::sort(pass2.begin(), pass2.end());
+                const double median_t2 = (pass2.size() % 2 == 1)
+                    ? pass2[pass2.size() / 2]
+                    : (pass2[pass2.size() / 2 - 1] + pass2[pass2.size() / 2]) / 2.0;
+                summary.rolling_baseline_ms = median_t2;
+            }
+        }
+
+        summary.rolling_fps = (summary.rolling_baseline_ms > 0.0) ? (1000.0 / summary.rolling_baseline_ms) : 0.0;
+
+        double eff_mult = snap_spike_mult;
+        double eff_delta = snap_min_delta;
+        if (snap_profile == PacingProfile::AUTO_ADAPTIVE) {
+            auto params = compute_adaptive_pacing_params(summary.rolling_baseline_ms);
+            eff_mult = params.spike_multiplier;
+            eff_delta = params.min_spike_delta_ms;
+        } else if (snap_profile == PacingProfile::HIGH_REFRESH) {
+            eff_mult = HIGH_REFRESH_SPIKE_MULTIPLIER;
+            eff_delta = HIGH_REFRESH_MIN_DELTA_MS;
+        } else if (snap_profile == PacingProfile::CONSERVATIVE) {
+            eff_mult = CONSERVATIVE_SPIKE_MULTIPLIER;
+            eff_delta = CONSERVATIVE_MIN_DELTA_MS;
+        }
+
+        summary.estimated_dynamic_floor_ms = std::max(
+            summary.rolling_baseline_ms * eff_mult,
+            summary.rolling_baseline_ms + eff_delta
+        );
+        if (summary.estimated_dynamic_floor_ms <= summary.static_floor_ms) {
+            summary.estimated_binding_floor_ms = summary.estimated_dynamic_floor_ms;
+            summary.binding_floor_source = BindingFloorSource::DYNAMIC;
+        } else {
+            summary.estimated_binding_floor_ms = summary.static_floor_ms;
+            summary.binding_floor_source = BindingFloorSource::STATIC;
+        }
+    } else {
+        // State 3: Warmup / Empty Session / Monitor-All
+        summary.rolling_baseline_ms = 0.0;
+        summary.rolling_fps = 0.0;
+        summary.estimated_dynamic_floor_ms = 0.0;
+        summary.estimated_binding_floor_ms = 0.0;
+        summary.binding_floor_source = BindingFloorSource::NONE;
+    }
 
     const uint64_t start_tick = session_start_tick_ms_.load(std::memory_order_acquire);
     if (start_tick == 0 || valid_count == 0) {
@@ -400,6 +557,29 @@ void SessionBenchmark::clear_attribution_locked() {
     target_process_.clear();
 }
 
+void SessionBenchmark::set_pacing_context(
+    PacingProfile profile,
+    double present_threshold_ms,
+    double spike_multiplier,
+    double min_spike_delta_ms
+) noexcept {
+    pacing_profile_.store(profile, std::memory_order_relaxed);
+    present_threshold_ms_.store(present_threshold_ms, std::memory_order_relaxed);
+    spike_multiplier_.store(spike_multiplier, std::memory_order_relaxed);
+    min_spike_delta_ms_.store(min_spike_delta_ms, std::memory_order_relaxed);
+}
+
+void SessionBenchmark::update_pacing_telemetry(
+    double baseline_ms,
+    double effective_mult,
+    double effective_delta
+) noexcept {
+    live_baseline_ms_.store(baseline_ms, std::memory_order_relaxed);
+    live_effective_mult_.store(effective_mult, std::memory_order_relaxed);
+    live_effective_delta_.store(effective_delta, std::memory_order_relaxed);
+    has_live_telemetry_.store(true, std::memory_order_release);
+}
+
 void SessionBenchmark::retarget(uint32_t new_pid) {
     std::lock_guard<std::mutex> sum_lock(summary_mutex_);
     std::lock_guard<std::mutex> attr_lock(attribution_mutex_);
@@ -410,6 +590,7 @@ void SessionBenchmark::retarget(uint32_t new_pid) {
     const uint64_t new_state = (static_cast<uint64_t>(new_pid) << 32) | next_epoch;
 
     clear_attribution_locked();
+    has_live_telemetry_.store(false, std::memory_order_release);
     dropped_pause_frames_.store(0, std::memory_order_relaxed);
     epoch_start_head_.store(head_.load(std::memory_order_acquire), std::memory_order_release);
     target_state_.store(new_state, std::memory_order_release);
@@ -427,6 +608,7 @@ void SessionBenchmark::reset() {
     const uint64_t new_state = (static_cast<uint64_t>(cur_pid) << 32) | next_epoch;
 
     clear_attribution_locked();
+    has_live_telemetry_.store(false, std::memory_order_release);
     dropped_pause_frames_.store(0, std::memory_order_relaxed);
     // D-2: Updating epoch_start_head_ before target_state_ guarantees that any producer
     // reading the old epoch and claiming a ticket >= epoch_start_head_ publishes with the old
