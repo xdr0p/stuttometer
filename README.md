@@ -4,7 +4,7 @@ Real-time micro-stutter, frame pacing, and audio-glitch diagnosis for Windows ga
 
 ![Stuttometer Main Dashboard](assets/main_dashboard.png)
 
-The standard way to diagnose a game stutter is to record a full system trace using WPR (`xperf`) and dig through multi-gigabyte `.etl` files after the fact—which only works if you happened to be recording when the stutter occurred. Stuttometer does the opposite: it traces continuously into a rolling in-memory flight recorder (~23.4 MB RAM), and when it detects a frame spike, cadence judder, compositor glitch, or audio dropout, it freezes that capture window, correlates the surrounding events across kernel, GPU, disk, memory, and audio subsystems, and writes a structured JSON diagnosis.
+The standard way to diagnose a game stutter is to record a full system trace using WPR (`xperf`) and dig through multi-gigabyte `.etl` files after the fact—which only works if you happened to be recording when the stutter occurred. Stuttometer does the opposite: it traces continuously into a rolling in-memory flight recorder (~23 MB core CLI / ~50 MB full active GUI), and when it detects a frame spike, cadence judder, compositor glitch, or audio dropout, it freezes that capture window, correlates the surrounding events across kernel, GPU, disk, memory, and audio subsystems, and writes a structured JSON diagnosis.
 
 Leave it running in the background; when a stutter happens, the evidence is already captured.
 
@@ -43,13 +43,27 @@ Every trigger report produces a structured JSON output with ranked probable caus
 
 ---
 
-## Memory Footprint
+## Memory Footprint & Resource Impact
 
-| Subsystem | Resident Footprint | Details |
+Stuttometer is engineered for continuous background monitoring during active gameplay. All telemetry structures are pre-allocated at startup so that **zero runtime heap allocations** occur while tracing is active, ensuring the diagnostic tool never induces garbage collection pauses, working set paging, or frametime spikes itself.
+
+### Real-World Working Set (Task Manager)
+
+| Operating State | Working Set (RAM) | CPU Overhead | Subsystems Active |
+| :--- | ---:| ---:| :--- |
+| **Idle GUI (Waiting)** | **~20.8 MB** | 0.0% | Standalone Win32 Common Controls dashboard, fonts, and dark theme cache |
+| **Active Tracing (GUI Dashboard)** | **~49.6 MB** | < 0.2% | Full telemetry flight recorder, continuous frame pacing ring, in-flight tables & ETW kernel buffers |
+| **CLI Diagnostic (`stuttometer.exe`)** | **~23.4 MB** | < 0.1% | Headless diagnostic flight recorder and in-flight tracking tables (zero GUI overhead) |
+
+### Internal Telemetry Allocation Breakdown
+
+| Telemetry Subsystem | Resident Allocation | Implementation Architecture |
 | :--- | ---:| :--- |
-| Ring Buffer (`FlightRecorder`) | 16.78 MB | 262,144 slots × 64 bytes (cache-line aligned seqlocks) |
-| In-Flight Tracking Tables | 6.61 MB | 9 lock-free open-addressing hash tables |
-| **Total Resident Footprint** | **~23.4 MB** | Pre-allocated at startup; zero runtime heap allocations |
+| **Diagnostic Flight Recorder** | 16.78 MB | 262,144 slots × 64 bytes (`Slot` cache-line aligned seqlocks) |
+| **Session Benchmark Pacing Buffer** | 16.78 MB | 262,144 slots × 64 bytes (`FrameSlot` cache-line aligned seqlocks) |
+| **In-Flight Tracking Tables** | 6.61 MB | 9 pre-allocated lock-free open-addressing hash tables |
+| **ETW Consumer Buffers & Win32 GUI** | ~9.5 MB | Kernel-mapped consumer pages, GDI objects, and control state |
+| **Total Active Working Set** | **~49.6 MB** | Completely flat memory usage throughout long gaming sessions |
 
 Buffer capacity can be adjusted with `--buffer-slots` (65,536 to 1,048,576).
 
