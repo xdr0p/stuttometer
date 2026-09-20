@@ -111,7 +111,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     // Precedence: --version beats --self-check
     if (print_version) {
-        out << "Stuttometer v0.4.1\n";
+        out << "Stuttometer v0.4.2\n";
         return CliParseResult::EXIT_OK;
     }
 

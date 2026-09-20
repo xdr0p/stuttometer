@@ -140,7 +140,7 @@ struct AttributionResult {
 
 struct DiagnosticReport {
     std::string schema_version{"1.1"};
-    std::string tool_version{"0.4.1"};
+    std::string tool_version{"0.4.2"};
     std::string timestamp_utc;
     TriggerInfo trigger;
     std::string target_process;

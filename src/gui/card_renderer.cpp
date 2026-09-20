@@ -66,6 +66,173 @@ std::wstring format_offset(double ms) {
     }
     return ss.str();
 }
+
+BannerRects compute_banner_rects(
+    int width, float side_margin, float banner_row1_top_y, float s,
+    Gdiplus::Graphics& g, const Gdiplus::FontFamily* pSans, const Gdiplus::Font& font_tag,
+    const std::wstring& conf_str
+) {
+    if (!pSans) {
+        pSans = Gdiplus::FontFamily::GenericSansSerif();
+    }
+
+    float em_h = static_cast<float>(pSans->GetEmHeight(Gdiplus::FontStyleBold));
+    if (em_h <= 0.0f) {
+        em_h = 2048.0f;
+    }
+
+    const float ascent_10 = (static_cast<float>(pSans->GetCellAscent(Gdiplus::FontStyleBold)) / em_h) * 10.0f * s;
+    const float line_spacing_10 = (static_cast<float>(pSans->GetLineSpacing(Gdiplus::FontStyleBold)) / em_h) * 10.0f * s;
+    const float ascent_18 = (static_cast<float>(pSans->GetCellAscent(Gdiplus::FontStyleBold)) / em_h) * 18.0f * s;
+
+    Gdiplus::RectF rc_pill(side_margin + 16.0f * s, banner_row1_top_y, 160.0f * s, 24.0f * s);
+    Gdiplus::RectF rc_pill_text(rc_pill.X + 22.0f * s, rc_pill.Y, rc_pill.Width - 26.0f * s, rc_pill.Height);
+
+    Gdiplus::StringFormat fmt_center;
+    fmt_center.SetAlignment(Gdiplus::StringAlignmentCenter);
+    fmt_center.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    fmt_center.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+    Gdiplus::RectF text_bounds;
+    g.MeasureString(conf_str.c_str(), -1, &font_tag, Gdiplus::PointF(0.0f, 0.0f), &fmt_center, &text_bounds);
+
+    const float pill_w = std::max(130.0f * s, text_bounds.Width + 24.0f * s);
+    const float pill_x = static_cast<float>(width) - side_margin - 16.0f * s - pill_w;
+    Gdiplus::RectF rc_conf(pill_x, banner_row1_top_y, pill_w, 24.0f * s);
+
+    const float pill_baseline_y = rc_pill.Y + (rc_pill.Height - line_spacing_10) * 0.5f + ascent_10;
+    const float culprit_y = pill_baseline_y - ascent_18;
+    const float culprit_x = rc_pill.GetRight() + 14.0f * s;
+    const float culprit_max_w = (rc_conf.X - 16.0f * s) - culprit_x;
+
+    Gdiplus::RectF rc_culprit(culprit_x, culprit_y, culprit_max_w, 24.0f * s);
+
+    return BannerRects{
+        rc_pill,
+        rc_pill_text,
+        rc_culprit,
+        rc_conf
+    };
+}
+
+Gdiplus::PointF compute_peak_pixel(
+    const DiagnosticReport& report, int width, int height, float s
+) {
+    (void)height; // Base height is fixed; vertical scaling derived via s
+    if (report.frame_timeline.empty()) {
+        return Gdiplus::PointF(0.0f, 0.0f);
+    }
+
+    const float side_margin = 24.0f * s;
+    const float content_w   = static_cast<float>(width) - (side_margin * 2.0f);
+    const float graph_y     = 232.0f * s;
+    const float graph_h     = 398.0f * s;
+    const float plot_x      = side_margin + 60.0f * s;
+    const float plot_y      = graph_y + 36.0f * s;
+    const float plot_w      = content_w - 76.0f * s;
+    const float plot_h      = graph_h - 60.0f * s;
+
+    double max_ms = 50.0;
+    if (report.present_threshold_ms * 1.5 > max_ms) {
+        max_ms = report.present_threshold_ms * 1.5;
+    }
+    if (report.trigger.duration_ms * 1.2 > max_ms) {
+        max_ms = report.trigger.duration_ms * 1.2;
+    }
+    for (const auto& pt : report.frame_timeline) {
+        if (pt.duration_ms * 1.15 > max_ms) {
+            max_ms = pt.duration_ms * 1.15;
+        }
+    }
+    if (max_ms > 5000.0) max_ms = 5000.0;
+
+    const size_t pt_count = report.frame_timeline.size();
+
+    // Anchor / trigger frame
+    size_t trig_idx = pt_count / 2;
+    bool found_trig = false;
+    for (size_t i = 0; i < pt_count; ++i) {
+        if (report.frame_timeline[i].relative_index == 0) {
+            trig_idx = i;
+            found_trig = true;
+            break;
+        }
+    }
+    if (!found_trig) {
+        for (size_t i = 0; i < pt_count; ++i) {
+            if (report.frame_timeline[i].is_trigger_frame) {
+                trig_idx = i;
+                break;
+            }
+        }
+    }
+
+    auto x_at = [&](size_t i) -> float {
+        if (pt_count <= 1) return plot_x + plot_w / 2.0f;
+        return plot_x + (static_cast<float>(i) / static_cast<float>(pt_count - 1)) * plot_w;
+    };
+
+    // Find the max-duration point in the retained timeline
+    size_t peak_idx = 0;
+    double peak_dur = -1.0;
+    for (size_t i = 0; i < pt_count; ++i) {
+        if (report.frame_timeline[i].duration_ms > peak_dur) {
+            peak_dur = report.frame_timeline[i].duration_ms;
+            peak_idx = i;
+        }
+    }
+
+    // Prefer the anchor if it's the actual spike; else use the highest sample
+    if (trig_idx < pt_count && report.frame_timeline[trig_idx].duration_ms >= peak_dur) {
+        peak_idx = trig_idx;
+        peak_dur = report.frame_timeline[trig_idx].duration_ms;
+    }
+
+    float px = x_at(peak_idx);
+    double d_clamp = std::clamp(report.frame_timeline[peak_idx].duration_ms, 0.0, max_ms);
+    float py = plot_y + plot_h - static_cast<float>((d_clamp / max_ms) * plot_h);
+    return Gdiplus::PointF(px, py);
+}
+
+double compute_peak_duration(const DiagnosticReport& report) {
+    if (report.frame_timeline.empty()) {
+        return report.trigger.duration_ms;
+    }
+    const size_t pt_count = report.frame_timeline.size();
+
+    size_t trig_idx = pt_count / 2;
+    bool found_trig = false;
+    for (size_t i = 0; i < pt_count; ++i) {
+        if (report.frame_timeline[i].relative_index == 0) {
+            trig_idx = i;
+            found_trig = true;
+            break;
+        }
+    }
+    if (!found_trig) {
+        for (size_t i = 0; i < pt_count; ++i) {
+            if (report.frame_timeline[i].is_trigger_frame) {
+                trig_idx = i;
+                break;
+            }
+        }
+    }
+
+    size_t peak_idx = 0;
+    double peak_dur = -1.0;
+    for (size_t i = 0; i < pt_count; ++i) {
+        if (report.frame_timeline[i].duration_ms > peak_dur) {
+            peak_dur = report.frame_timeline[i].duration_ms;
+            peak_idx = i;
+        }
+    }
+
+    if (trig_idx < pt_count && report.frame_timeline[trig_idx].duration_ms >= peak_dur) {
+        peak_dur = report.frame_timeline[trig_idx].duration_ms;
+    }
+
+    return peak_dur;
+}
 } // namespace detail
 
 // -----------------------------------------------------------------------------
@@ -243,7 +410,7 @@ static void draw_card(
 
     // Version badge pill (rounded)
     {
-        std::string ver = report.tool_version.empty() ? "0.4.1" : report.tool_version;
+        std::string ver = report.tool_version.empty() ? "0.4.2" : report.tool_version;
         std::wstring ver_badge = L"STUTTOMETER v" + to_wide_str(ver);
         RectF rc_ver(side_margin, top_margin, 130.0f * s, 22.0f * s);
 
@@ -281,21 +448,36 @@ static void draw_card(
     RectF rc_banner(side_margin, banner_y, content_w, banner_h);
     fill_rounded_rect(g, rc_banner, card_radius, &br_card, &pen_card);
 
+    // Issue 10: Dynamic Banner Row Layout
+    uint64_t total_loss = report.dropped_events + report.producer_dropped_events + report.etw_events_lost;
+    const float row1_top_y = (total_loss > 0) ? (banner_y + 12.0f * s) : (banner_y + 16.0f * s);
+    const float row2_top_y = (total_loss > 0) ? (banner_y + 44.0f * s) : (banner_y + 54.0f * s);
+    const float row3_top_y = banner_y + 68.0f * s;
+
+    double top_confidence = report.diagnoses.empty() ? 0.0 : report.diagnoses[0].confidence;
+    std::wstringstream conf_ss;
+    conf_ss << std::fixed << std::setprecision(0)
+            << std::lround(top_confidence * 100.0) << L"% CONFIDENCE";
+    std::wstring conf_str = conf_ss.str();
+
+    auto banner_rects = detail::compute_banner_rects(
+        width, side_margin, row1_top_y, s,
+        g, pSans, font_tag, conf_str
+    );
+
     // Attribution status-dot pill
     {
-        RectF rc_pill(side_margin + 16.0f * s, banner_y + 12.0f * s, 160.0f * s, 24.0f * s);
         SolidBrush br_pill_bg(Color(255, 30, 41, 59));
         Pen pen_pill(Color(255, 51, 65, 85), 1.0f);
-        fill_rounded_rect(g, rc_pill, 6.0f * s, &br_pill_bg, &pen_pill);
+        fill_rounded_rect(g, banner_rects.rc_pill, 6.0f * s, &br_pill_bg, &pen_pill);
 
         // Status dot (6px circle filled with desaturated category color)
-        RectF rc_dot(rc_pill.X + 10.0f * s, rc_pill.Y + (rc_pill.Height - 6.0f * s) / 2.0f, 6.0f * s, 6.0f * s);
+        RectF rc_dot(banner_rects.rc_pill.X + 10.0f * s, banner_rects.rc_pill.Y + (banner_rects.rc_pill.Height - 6.0f * s) / 2.0f, 6.0f * s, 6.0f * s);
         SolidBrush br_dot(color_attr);
         g.FillEllipse(&br_dot, rc_dot);
 
         // Status text (bright white, right of dot)
-        RectF rc_pill_txt(rc_pill.X + 22.0f * s, rc_pill.Y, rc_pill.Width - 26.0f * s, rc_pill.Height);
-        g.DrawString(attr_label.c_str(), -1, &font_tag, rc_pill_txt, &fmt_left, &br_bright);
+        g.DrawString(attr_label.c_str(), -1, &font_tag, banner_rects.rc_pill_text, &fmt_left, &br_bright);
     }
 
     // Culprit process / driver
@@ -306,30 +488,24 @@ static void draw_card(
         }
         if (culprit.empty()) culprit = "Unattributed Anomaly";
         std::wstring culprit_w = to_wide_str(culprit);
-        RectF rc_culprit(
-            side_margin + 16.0f * s + 160.0f * s + 14.0f * s,
-            banner_y + 10.0f * s,
-            480.0f * s,
-            26.0f * s
-        );
+
+        RectF rc_culprit = banner_rects.rc_culprit;
+        // Shift down for visual vertical centering of 18px font within the 24px banner row
+        rc_culprit.Y += 3.5f * s;
+
         g.DrawString(culprit_w.c_str(), -1, &font_callout, rc_culprit, &fmt_left, &br_pri);
     }
 
     // Confidence badge (right)
     {
-        double top_confidence = report.diagnoses.empty() ? 0.0 : report.diagnoses[0].confidence;
-        std::wstringstream conf_ss;
-        conf_ss << std::fixed << std::setprecision(0)
-                << std::lround(top_confidence * 100.0) << L"% CONFIDENCE";
-        std::wstring conf_str = conf_ss.str();
-
-        RectF rc_conf(width - side_margin - 180.0f * s, banner_y + 12.0f * s, 164.0f * s, 24.0f * s);
         SolidBrush br_conf_bg(Color(255, 30, 41, 59));
         Pen pen_conf(Color(255, 51, 65, 85), 1.0f);
-        fill_rounded_rect(g, rc_conf, 6.0f * s, &br_conf_bg, &pen_conf);
+        fill_rounded_rect(g, banner_rects.rc_conf, 6.0f * s, &br_conf_bg, &pen_conf);
 
-        SolidBrush br_conf_txt(color_text_label);
-        g.DrawString(conf_str.c_str(), -1, &font_small_bold, rc_conf, &fmt_center, &br_conf_txt);
+        SolidBrush br_conf_txt(color_text_bright);
+        // Shift 1-2px down for visual vertical centering of uppercase label within pill
+        RectF rc_conf_txt(banner_rects.rc_conf.X, banner_rects.rc_conf.Y + 1.5f * s, banner_rects.rc_conf.Width, banner_rects.rc_conf.Height);
+        g.DrawString(conf_str.c_str(), -1, &font_tag, rc_conf_txt, &fmt_center, &br_conf_txt);
     }
 
     // Summary (row 2 of blame banner)
@@ -342,18 +518,17 @@ static void draw_card(
             summary = redact_text_with_ids(summary, ids);
         }
         std::wstring summary_w = to_wide_str(summary);
-        RectF rc_sum(side_margin + 16.0f * s, banner_y + 44.0f * s, content_w - 32.0f * s, 22.0f * s);
+        RectF rc_sum(side_margin + 16.0f * s, row2_top_y, content_w - 32.0f * s, 22.0f * s);
         g.DrawString(summary_w.c_str(), -1, &font_regular, rc_sum, &fmt_left, &br_label);
     }
 
     // Telemetry loss warning (amber alert)
     {
-        uint64_t total_loss = report.dropped_events + report.producer_dropped_events + report.etw_events_lost;
         if (total_loss > 0) {
             std::wstringstream loss_ss;
             loss_ss << L"[!] Telemetry Loss: " << total_loss << L" event(s) dropped upstream";
             std::wstring loss_w = loss_ss.str();
-            RectF rc_loss(side_margin + 16.0f * s, banner_y + 68.0f * s, content_w - 32.0f * s, 18.0f * s);
+            RectF rc_loss(side_margin + 16.0f * s, row3_top_y, content_w - 32.0f * s, 18.0f * s);
             SolidBrush br_loss(color_accent_amb);
             g.DrawString(loss_w.c_str(), -1, &font_small_bold, rc_loss, &fmt_left, &br_loss);
         }
@@ -398,8 +573,8 @@ static void draw_card(
             uint32_t gc = report.trigger.glitch_count > 0 ? report.trigger.glitch_count : 1;
             dur_main = L"Glitch (x" + std::to_wstring(gc) + L")";
             dur_sub  = L"Audio buffer underrun";
-            // Card-local convention: highlight audio glitch underrun as critical
-            val_color = (report.trigger.glitch_count > 0) ? color_accent_danger : color_text_bright;
+            auto sev = detail::classify_stall(0.0, 0.0, 0.0, true, report.trigger.glitch_count);
+            val_color = (sev == detail::MetricSeverity::Danger) ? color_accent_danger : color_text_bright;
         } else {
             std::wstringstream dss;
             dss << std::fixed << std::setprecision(1) << report.trigger.duration_ms << L" ms";
@@ -409,7 +584,14 @@ static void draw_card(
             sss << std::fixed << std::setprecision(2) << report.trigger.spike_ratio << L"x spike ratio";
             dur_sub = sss.str();
 
-            val_color = (report.trigger.duration_ms > 50.0) ? color_accent_danger : color_text_bright;
+            auto sev = detail::classify_stall(report.trigger.duration_ms, report.trigger.spike_ratio, 0.0, false, 0);
+            if (sev == detail::MetricSeverity::Danger) {
+                val_color = color_accent_danger;
+            } else if (sev == detail::MetricSeverity::Warning) {
+                val_color = color_accent_amb;
+            } else {
+                val_color = color_text_bright;
+            }
         }
         draw_metric_tile(0, L"STALL DURATION", dur_main, dur_sub, val_color);
     }
@@ -426,7 +608,7 @@ static void draw_card(
         } else if (report.trigger.baseline_fps <= 0.0) {
             double stall_fps = 1000.0 / report.trigger.duration_ms;
             std::wstringstream fss;
-            fss << L"N/A -> " << std::fixed << std::setprecision(1) << stall_fps << L" FPS";
+            fss << L"N/A \u2192 " << std::fixed << std::setprecision(1) << stall_fps << L" FPS";
             fps_main = fss.str();
             fps_sub  = L"Baseline framerate unavailable";
             val_color = color_text_bright;
@@ -434,14 +616,15 @@ static void draw_card(
             double stall_fps = 1000.0 / report.trigger.duration_ms;
             std::wstringstream fss;
             fss << std::fixed << std::setprecision(1) << report.trigger.baseline_fps
-                << L" -> " << stall_fps << L" FPS";
+                << L" \u2192 " << stall_fps << L" FPS";
             fps_main = fss.str();
             fps_sub  = L"Framerate drop";
 
             double drop = (report.trigger.baseline_fps - stall_fps) / report.trigger.baseline_fps;
-            if (drop > 0.60) {
+            auto sev = detail::classify_stall(0.0, 0.0, drop, false, 0);
+            if (sev == detail::MetricSeverity::Danger) {
                 val_color = color_accent_danger;
-            } else if (drop >= 0.30) {
+            } else if (sev == detail::MetricSeverity::Warning) {
                 val_color = color_accent_amb;
             } else {
                 val_color = color_text_bright;
@@ -483,9 +666,15 @@ static void draw_card(
     {
         RectF rc_gh(side_margin + 14.0f * s, graph_y + 10.0f * s, 400.0f * s, 20.0f * s);
         const wchar_t* hdr = is_audio_event
-            ? L"AUDIO UNDER-RUN TIMELINE"
+            ? L"AUDIO UNDERRUN TIMELINE"
             : L"FRAME PACING TIMELINE (1,024 SAMPLES)";
-        g.DrawString(hdr, -1, &font_small_bold, rc_gh, &fmt_left, &br_muted);
+        // Issue 5: Integer font size 10.0f * s with scoped TextRenderingHintClearType to optimize kerning.
+        // Fallback 1: Draw with ExtTextOutW on g.GetHDC() using explicit lpDx array.
+        // Fallback 2: Switch header font family to Segoe UI Semibold.
+        auto old_hint = g.GetTextRenderingHint();
+        g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+        g.DrawString(hdr, -1, &font_tag, rc_gh, &fmt_left, &br_muted);
+        g.SetTextRenderingHint(old_hint);
     }
 
     // Plot area
@@ -517,8 +706,8 @@ static void draw_card(
         RectF rc_pulse(trig_x - 6.0f * s, mid_y - 60.0f * s, 12.0f * s, 120.0f * s);
         fill_rounded_rect(g, rc_pulse, 3.0f * s, &spike_br, nullptr);
 
-        // Explanatory message in muted slate
-        RectF rc_msg(plot_x + 20.0f * s, plot_y + plot_h - 46.0f * s, plot_w - 40.0f * s, 26.0f * s);
+        // Explanatory message in muted slate (positioned below the graph in the timeline card space)
+        RectF rc_msg(plot_x, plot_y + plot_h + 4.0f * s, plot_w, 16.0f * s);
         std::wstring msg = L"Audio buffer underrun captured via Microsoft-Windows-Audio (Event ID 11)";
         g.DrawString(msg.c_str(), -1, &font_regular, rc_msg, &fmt_center, &br_muted);
     } else {
@@ -611,7 +800,7 @@ static void draw_card(
 
             const float trig_x = x_at(trig_idx);
 
-            // ---- Single subtle dark gradient with soft amber trigger column glow ----
+            // ---- Single subtle dark gradient ----
             {
                 LinearGradientBrush bg_grad(
                     PointF(plot_x, plot_y),
@@ -620,10 +809,6 @@ static void draw_card(
                     Color(255, 22, 27, 36)
                 );
                 g.FillRectangle(&bg_grad, plot_x, plot_y, plot_w, plot_h);
-
-                // Soft amber column glow near the trigger
-                SolidBrush col_br(Color(15, 245, 158, 11));
-                g.FillRectangle(&col_br, trig_x - 20.0f * s, plot_y, 40.0f * s, plot_h);
             }
 
             // ---- Batch convert to PointF ----
@@ -654,84 +839,75 @@ static void draw_card(
 
             // ---- Curve (Emerald) ----
             Pen curve_pen(color_accent_emerald, 1.5f * s);
+            curve_pen.SetLineJoin(Gdiplus::LineJoinRound);
+            curve_pen.SetStartCap(Gdiplus::LineCapRound);
+            curve_pen.SetEndCap(Gdiplus::LineCapRound);
             if (pt_count > 1) {
                 g.DrawLines(&curve_pen, line_pts.data(), static_cast<INT>(line_pts.size()));
             } else {
                 g.FillEllipse(&br_pri, line_pts[0].X - 3.0f, line_pts[0].Y - 3.0f, 6.0f, 6.0f);
             }
 
-            // ---- Prominent trigger marker (amber alert) ----
+            // ---- Peak marker dot ----
+            PointF peak = detail::compute_peak_pixel(report, width, height, s);
             {
-                Pen trig_line_pen(color_accent_amb, 2.0f * s);
-                trig_line_pen.SetDashStyle(DashStyleDash);
-                g.DrawLine(&trig_line_pen, trig_x, plot_y, trig_x, plot_y + plot_h);
-
-                // Top chevron
-                PointF chevron[3] = {
-                    PointF(trig_x - 8.0f * s, plot_y),
-                    PointF(trig_x + 8.0f * s, plot_y),
-                    PointF(trig_x,            plot_y + 10.0f * s)
-                };
-                SolidBrush br_chev(color_accent_amb);
-                g.FillPolygon(&br_chev, chevron, 3);
-            }
-
-            // ---- Ring-highlighted peak circle (makes the 1-px spike unmissable) ----
-            {
-                // Find the max-duration point in the retained timeline
-                size_t peak_idx = 0;
-                double peak_dur = -1.0;
-                for (size_t i = 0; i < pt_count; ++i) {
-                    if (report.frame_timeline[i].duration_ms > peak_dur) {
-                        peak_dur = report.frame_timeline[i].duration_ms;
-                        peak_idx = i;
-                    }
-                }
-
-                // Prefer the anchor if it's the actual spike; else use the highest sample
-                if (trig_idx < pt_count && report.frame_timeline[trig_idx].duration_ms >= peak_dur) {
-                    peak_idx = trig_idx;
-                    peak_dur = report.frame_timeline[trig_idx].duration_ms;
-                }
-
-                if (peak_dur > 0.0) {
-                    const PointF& peak = line_pts[peak_idx];
-                    SolidBrush ring_fill(color_accent_amb);
-                    g.FillEllipse(&ring_fill, peak.X - 3.5f * s, peak.Y - 3.5f * s, 7.0f * s, 7.0f * s);
-
-                    Pen ring_outer(Color(200, 245, 158, 11), 1.5f * s);
-                    g.DrawEllipse(&ring_outer, peak.X - 8.0f * s, peak.Y - 8.0f * s, 16.0f * s, 16.0f * s);
-                }
+                // Note: compute_peak_pixel is also used by Test 3; recomputing peak geometry here is a minor redundancy with no correctness impact.
+                SolidBrush ring_fill(color_accent_amb);
+                g.FillEllipse(&ring_fill, peak.X - 4.5f * s, peak.Y - 4.5f * s, 9.0f * s, 9.0f * s);
             }
 
             // ---- Floating peak callout badge ----
             {
+                double peak_dur = detail::compute_peak_duration(report);
                 std::wstringstream peak_ss;
-                peak_ss << std::fixed << std::setprecision(1) << report.trigger.duration_ms << L" ms";
+                peak_ss << std::fixed << std::setprecision(1) << peak_dur << L" ms";
                 std::wstring peak_str = peak_ss.str();
 
                 float callout_w = 76.0f * s;
                 float callout_h = 24.0f * s;
-                float callout_x = trig_x - (callout_w / 2.0f);
-                if (callout_x < plot_x + 4.0f) callout_x = plot_x + 4.0f;
-                if (callout_x + callout_w > plot_x + plot_w - 4.0f) {
-                    callout_x = plot_x + plot_w - callout_w - 4.0f;
+
+                // Position badge to the right of the peak dot, vertically centered.
+                // Flip logic assumes plot_w > callout_w + 14.0f * s (from callout_w + 10px offset + 4px left clamp).
+                float callout_x = peak.X + 10.0f * s;
+                float callout_y = peak.Y - (callout_h / 2.0f);
+
+                // If overflowing the right plot boundary, flip to the left of the dot
+                if (callout_x + callout_w > plot_x + plot_w - 4.0f * s) {
+                    callout_x = peak.X - callout_w - 10.0f * s;
                 }
-                float callout_y = plot_y + 14.0f * s;
+                // Clamp to left plot edge in extreme left-edge cases
+                if (callout_x < plot_x + 4.0f * s) {
+                    callout_x = plot_x + 4.0f * s;
+                }
+                // Vertical clamping: for extreme peaks near top, clamp to plot_y + 4px.
+                // Note: Badge sits +10px horizontally from dot, so dot remains fully visible.
+                if (callout_y < plot_y + 4.0f * s) {
+                    callout_y = plot_y + 4.0f * s;
+                }
+                // Bottom clamp with 8px margin to preserve breathing room above x-axis milestones
+                if (callout_y + callout_h > plot_y + plot_h - 8.0f * s) {
+                    callout_y = plot_y + plot_h - callout_h - 8.0f * s;
+                }
 
                 RectF rc_callout(callout_x, callout_y, callout_w, callout_h);
-                SolidBrush br_callout_bg(Color(240, 24, 30, 43));
-                Pen pen_callout(color_accent_amb, 1.0f);
+                SolidBrush br_callout_bg(Color(255, 24, 30, 43));
+                Pen pen_callout(Color(255, 51, 65, 85), 1.0f);
                 fill_rounded_rect(g, rc_callout, 6.0f * s, &br_callout_bg, &pen_callout);
 
                 SolidBrush br_peak_txt(color_accent_amb);
-                g.DrawString(peak_str.c_str(), -1, &font_small_bold, rc_callout, &fmt_center, &br_peak_txt);
+                // Shift 1.0px down for optical vertical centering of 11px bold text inside the 24px badge
+                RectF rc_callout_txt(callout_x, callout_y + 1.0f * s, callout_w, callout_h);
+                g.DrawString(peak_str.c_str(), -1, &font_bold, rc_callout_txt, &fmt_center, &br_peak_txt);
             }
 
             // ---- Dynamic X-axis milestone labels ----
             if (!report.frame_timeline.empty()) {
+                double max_abs_offset_ms = std::max(
+                    std::abs(report.frame_timeline.front().offset_from_trigger_ms),
+                    std::abs(report.frame_timeline.back().offset_from_trigger_ms)
+                );
                 std::wstring left_lbl   = detail::format_offset(report.frame_timeline.front().offset_from_trigger_ms);
-                std::wstring center_lbl = L"Trigger (0 ms)";
+                std::wstring center_lbl = detail::format_center_label(max_abs_offset_ms);
                 std::wstring right_lbl  = detail::format_offset(report.frame_timeline.back().offset_from_trigger_ms);
 
                 float lbl_y = plot_y + plot_h + 4.0f * s;
