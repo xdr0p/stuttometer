@@ -410,7 +410,7 @@ static void draw_card(
 
     // Version badge pill (rounded)
     {
-        std::string ver = report.tool_version.empty() ? "0.4.2" : report.tool_version;
+        std::string ver = report.tool_version.empty() ? "0.5.0" : report.tool_version;
         std::wstring ver_badge = L"STUTTOMETER v" + to_wide_str(ver);
         RectF rc_ver(side_margin, top_margin, 130.0f * s, 22.0f * s);
 

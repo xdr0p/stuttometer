@@ -71,6 +71,7 @@ struct BenchmarkSummary {
     double duration_ms{0.0};
     uint64_t total_frames{0};
     uint64_t stutters_detected{0};
+    uint64_t audio_glitches_detected{0};
     uint64_t dropped_pause_frames{0};
     FrametimePercentiles frametimes;
     std::vector<HypothesisAttributionStat> culprits; // Top 5 + "Other"
@@ -180,6 +181,7 @@ private:
     std::unordered_map<std::string, HypothesisRecord> hypothesis_stats_;
     std::unordered_map<AttributionTag, TagAttributionStat> tag_stats_;
     uint64_t stutters_detected_{0};
+    uint64_t audio_glitches_detected_{0};
     double net_stall_ms_{0.0};
     double worst_stutter_ms_{0.0};
     std::string worst_stutter_hypothesis_;

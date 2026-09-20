@@ -20,6 +20,7 @@ std::string BenchmarkSummary::to_markdown() const {
         << std::setfill('0') << std::setw(2) << secs << "\n";
     oss << "- **Total Frames:** " << total_frames << "\n";
     oss << "- **Stutters Detected:** " << stutters_detected << "\n";
+    oss << "- **Audio Glitches:** " << audio_glitches_detected << "\n";
     oss << "- **Net Stall Time:** " << std::fixed << std::setprecision(1) << net_stall_ms << " ms\n\n";
 
     oss << "## Frame Pacing\n\n";
@@ -87,12 +88,14 @@ std::string BenchmarkSummary::to_markdown() const {
 
 std::string BenchmarkSummary::to_json() const {
     nlohmann::json j;
+    // Schema 1.2: audio_glitches_detected added as backward-compatible additive field
     j["schema_version"] = "1.2";
     j["target_process"] = target_process;
     j["target_pid"] = target_pid;
     j["duration_ms"] = duration_ms;
     j["total_frames"] = total_frames;
     j["stutters_detected"] = stutters_detected;
+    j["audio_glitches_detected"] = audio_glitches_detected;
     j["dropped_pause_frames"] = dropped_pause_frames;
     j["redacted"] = redacted;
     j["frametimes"] = {
@@ -211,6 +214,11 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
 
     if (target_process_.empty() && !report.target_process.empty()) {
         target_process_ = report.target_process;
+    }
+
+    if (report.trigger.source == TriggerSource::AUDIO_GLITCH) {
+        audio_glitches_detected_++;
+        return;
     }
 
     stutters_detected_++;
@@ -459,6 +467,7 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
     {
         std::lock_guard<std::mutex> attr_lock(attribution_mutex_);
         summary.stutters_detected = stutters_detected_;
+        summary.audio_glitches_detected = audio_glitches_detected_;
         summary.net_stall_ms = net_stall_ms_;
         summary.worst_stutter_ms = worst_stutter_ms_;
         summary.worst_stutter_hypothesis = worst_stutter_hypothesis_;
@@ -551,6 +560,7 @@ void SessionBenchmark::clear_attribution_locked() {
     hypothesis_stats_.clear();
     tag_stats_.clear();
     stutters_detected_ = 0;
+    audio_glitches_detected_ = 0;
     net_stall_ms_ = 0.0;
     worst_stutter_ms_ = 0.0;
     worst_stutter_hypothesis_.clear();

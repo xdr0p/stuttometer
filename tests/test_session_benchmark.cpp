@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 #include <cmath>
+#include <nlohmann/json.hpp>
 
 static void test_glass_smooth() {
     std::cout << "[TEST 1] Glass Smooth Test...\n";
@@ -604,6 +605,73 @@ static void test_cadence_custom_context_and_session_stop() {
     std::cout << "[TEST 17] PASSED\n";
 }
 
+static void test_audio_glitch_separation() {
+    std::cout << "[TEST 18] Audio Glitch Isolation & Separate Counting Test...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    uint64_t cur_qpc = stuttometer::get_current_qpc();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(1234);
+
+    // Ingest 100 normal frames
+    for (int i = 0; i < 100; ++i) {
+        benchmark.ingest_frame(1234, 16.67, cur_qpc);
+        cur_qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+    }
+
+    // Ingest 1 frame stutter
+    stuttometer::DiagnosticReport frame_stutter_rep;
+    frame_stutter_rep.target_process = "GameTest.exe";
+    frame_stutter_rep.trigger.target_pid = 1234;
+    frame_stutter_rep.trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    frame_stutter_rep.trigger.duration_ms = 45.0;
+    frame_stutter_rep.attribution = stuttometer::AttributionTag::GAME_ENGINE;
+    stuttometer::Diagnosis d1;
+    d1.hypothesis = "gpu_pipeline_stall";
+    d1.confidence = 0.95;
+    frame_stutter_rep.diagnoses.push_back(d1);
+    benchmark.ingest_report(frame_stutter_rep);
+
+    // Ingest 1 audio glitch
+    stuttometer::DiagnosticReport audio_glitch_rep;
+    audio_glitch_rep.target_process = "GameTest.exe";
+    audio_glitch_rep.trigger.target_pid = 1234;
+    audio_glitch_rep.trigger.source = stuttometer::TriggerSource::AUDIO_GLITCH;
+    audio_glitch_rep.trigger.duration_ms = 0.0;
+    audio_glitch_rep.attribution = stuttometer::AttributionTag::EXTERNAL_CONTENTION;
+    stuttometer::Diagnosis d2;
+    d2.hypothesis = "audio_buffer_underrun";
+    d2.confidence = 0.90;
+    audio_glitch_rep.diagnoses.push_back(d2);
+    benchmark.ingest_report(audio_glitch_rep);
+
+    auto summary = benchmark.get_summary();
+    STUTTO_ASSERT(summary.total_frames == 100);
+    STUTTO_ASSERT(summary.stutters_detected == 1);
+    STUTTO_ASSERT(summary.audio_glitches_detected == 1);
+    STUTTO_ASSERT(std::abs(summary.net_stall_ms - 45.0) < 0.01);
+    STUTTO_ASSERT(summary.culprits.size() == 1);
+    STUTTO_ASSERT(summary.culprits[0].hypothesis == "gpu_pipeline_stall");
+
+    // Tag stats must only contain GAME_ENGINE, not EXTERNAL_CONTENTION from audio glitch
+    STUTTO_ASSERT(summary.tag_stats.size() == 1);
+    STUTTO_ASSERT(summary.tag_stats[0].tag == stuttometer::AttributionTag::GAME_ENGINE);
+
+    // Verify JSON serialization
+    std::string json_str = summary.to_json();
+    auto root = nlohmann::json::parse(json_str);
+    STUTTO_ASSERT(root["schema_version"] == "1.2");
+    STUTTO_ASSERT(root.contains("audio_glitches_detected"));
+    STUTTO_ASSERT(root["audio_glitches_detected"] == 1);
+    STUTTO_ASSERT(root["stutters_detected"] == 1);
+
+    // Verify Markdown serialization
+    std::string md_str = summary.to_markdown();
+    STUTTO_ASSERT(md_str.find("- **Audio Glitches:** 1") != std::string::npos);
+    STUTTO_ASSERT(md_str.find("- **Stutters Detected:** 1") != std::string::npos);
+
+    std::cout << "[TEST 18] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -623,12 +691,14 @@ int main() {
         test_cadence_integrated_pipeline();
         test_cadence_standalone_fallback_state2();
         test_cadence_custom_context_and_session_stop();
+        test_audio_glitch_separation();
 
-        std::cout << "\nAll 17 Session Benchmark tests PASSED successfully!\n";
+        std::cout << "\nAll 18 Session Benchmark tests PASSED successfully!\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\nTest suite failed with exception: " << ex.what() << "\n";
         return 1;
     }
 }
+
 

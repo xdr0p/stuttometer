@@ -138,7 +138,7 @@ static void test_version_and_self_check() {
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
         STUTTO_ASSERT(res == CliParseResult::EXIT_OK);
-        STUTTO_ASSERT(out.str().find("Stuttometer v0.4.2") != std::string::npos);
+        STUTTO_ASSERT(out.str().find("Stuttometer v0.5.0") != std::string::npos);
     }
 
     {

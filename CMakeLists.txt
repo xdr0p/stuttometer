@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   stuttometer
-  VERSION 0.4.2
+  VERSION 0.5.0
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )
@@ -65,12 +65,20 @@ add_library(stuttometer_core STATIC
   src/csv_exporter.cpp
   src/ndjson_writer.cpp
   src/cli_parser.cpp
+  src/etw_kernel_opcodes.hpp
+  src/etw_handlers_dxgi.cpp
+  src/etw_handlers_dxgkrnl.cpp
+  src/etw_handlers_user_providers.cpp
+  src/etw_handlers_memory.cpp
+  src/etw_handlers_kernel_mof.cpp
 )
 
 target_include_directories(stuttometer_core
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(stuttometer_core
@@ -105,6 +113,12 @@ target_compile_features(stuttometer PRIVATE cxx_std_20)
 # ------------------------------------------------------------------------------
 add_executable(stuttometer_gui WIN32
   src/gui/main_gui.cpp
+  src/gui/sound_cues.cpp
+  src/gui/theme.cpp
+  src/gui/gui_state.cpp
+  src/gui/dark_controls.cpp
+  src/gui/export_utils.cpp
+  src/gui/settings_dialog.cpp
   src/gui/gui_controller.cpp
   src/gui/card_renderer.cpp
   src/gui/osd_toast.cpp

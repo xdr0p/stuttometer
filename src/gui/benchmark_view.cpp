@@ -468,8 +468,13 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 const unsigned total_sec = static_cast<unsigned>(summary.duration_ms / 1000.0);
                 const unsigned mins = total_sec / 60;
                 const unsigned secs = total_sec % 60;
-                swprintf_s(sub_buf, L"Duration: %02u:%02u  |  Total Frames: %llu  |  Stutters Detected: %llu",
-                           mins, secs, summary.total_frames, summary.stutters_detected);
+                if (summary.audio_glitches_detected > 0) {
+                    swprintf_s(sub_buf, L"Duration: %02u:%02u  |  Total Frames: %llu  |  Stutters: %llu  |  Audio: %llu",
+                               mins, secs, summary.total_frames, summary.stutters_detected, summary.audio_glitches_detected);
+                } else {
+                    swprintf_s(sub_buf, L"Duration: %02u:%02u  |  Total Frames: %llu  |  Stutters Detected: %llu",
+                               mins, secs, summary.total_frames, summary.stutters_detected);
+                }
             }
 
             SelectObject(mem_dc, state->font_regular);

@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <ostream>
 #include <windows.h>
 #include <cguid.h>
@@ -148,8 +149,6 @@ struct WorkingSetTrimInFlight {
 static_assert(sizeof(WorkingSetTrimInFlight) == 16, "WorkingSetTrimInFlight must be 16 bytes");
 static_assert(std::is_trivially_copyable_v<WorkingSetTrimInFlight>, "WorkingSetTrimInFlight must be trivially copyable");
 
-inline constexpr uint8_t KERNEL_OPCODE_VIRTUAL_ALLOC = 98;
-
 struct ThreadSwitchOut {
     uint64_t qpc{0};
     uint32_t pid{0};
@@ -279,6 +278,21 @@ static inline uint64_t make_pso_key(uint32_t tid, uint64_t pso_ptr) noexcept {
     k *= 0x94d049bb133111ebULL;
     k ^= (k >> 31);
     return (k != 0) ? k : 0xDEADBEEFCAFE0001ULL;
+}
+
+// SplitMix64-based 64-bit key derivation for ETW ActivityId GUIDs
+// (used to pair Start/Stop events without a full GUID hash map). Stable across versions.
+[[nodiscard]] inline uint64_t activity_id_to_key(const GUID& guid) noexcept {
+    uint64_t low = 0, high = 0;
+    std::memcpy(&low, &guid, sizeof(uint64_t));
+    std::memcpy(&high, reinterpret_cast<const uint8_t*>(&guid) + sizeof(uint64_t), sizeof(uint64_t));
+    uint64_t k = low ^ (high * 0x9E3779B97F4A7C15ULL);
+    k ^= k >> 30;
+    k *= 0xbf58476d1ce4e5b9ULL;
+    k ^= k >> 27;
+    k *= 0x94d049bb133111ebULL;
+    k ^= k >> 31;
+    return (k == 0) ? 1ULL : k;
 }
 
 class NdjsonWriter;

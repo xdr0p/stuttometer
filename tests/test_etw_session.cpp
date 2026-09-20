@@ -1165,6 +1165,144 @@ static void test_synthetic_ordered_drain_invariant() {
     std::cout << "  -> Strictly ordered drain invariant with " << EVENT_COUNT << " events PASSED (zero tail loss).\n";
 }
 
+static void test_kernel_process_start_image_name_parsing() {
+    std::cout << "[TEST] Validating Kernel-Process ProcessStart image name extraction...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    trig_cfg.target_process_name = "GameTest.exe";
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    engine.update_target_pid(0, true); // Put engine into waiting state for GameTest.exe
+
+    STUTTO_ASSERT(engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 0);
+
+    EtwSessionConfig cfg;
+    cfg.enable_kernel_process_events = true;
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    // Microsoft-Windows-Kernel-Process ProcessStart (Event ID 1) payload:
+    // Offset 0: ProcessID (uint32_t) = 9876
+    // Offset 4: ParentProcessID (uint32_t) = 1000
+    // Offset 8: ImageName (null-terminated wchar_t string) = L"GameTest.exe"
+    //
+    // Notice: ImageName = L"GameTest.exe" has NO path prefixes.
+    // Under buggy offset (+24):
+    //   Byte 24 is wchar index (24 - 8) / 2 = 8.
+    //   In L"GameTest.exe", index 8 is '.'!
+    //   So the buggy offset reads L".exe", extracts basename ".exe",
+    //   which fails matches_process_name(".exe", "GameTest.exe"),
+    //   and active_target_pid remains 0.
+    // Under fixed offset (+8):
+    //   Byte 8 reads L"GameTest.exe", matches target, and attaches PID 9876.
+    const wchar_t image_name[] = L"GameTest.exe";
+    const size_t image_name_bytes = sizeof(image_name); // includes null terminator
+    const size_t payload_size = 8 + image_name_bytes;
+
+    std::vector<uint8_t> payload(payload_size, 0);
+    const uint32_t pid = 9876;
+    const uint32_t ppid = 1000;
+    std::memcpy(payload.data() + 0, &pid, sizeof(uint32_t));
+    std::memcpy(payload.data() + 4, &ppid, sizeof(uint32_t));
+    std::memcpy(payload.data() + 8, image_name, image_name_bytes);
+
+    EVENT_RECORD ev{};
+    ev.UserContext = &mgr;
+    ev.EventHeader.ProviderId = KERNEL_PROCESS_PROVIDER_GUID;
+    ev.EventHeader.EventDescriptor.Id = 1; // ProcessStart
+    ev.EventHeader.ProcessId = pid;
+    ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(get_current_qpc());
+    ev.UserData = payload.data();
+    ev.UserDataLength = static_cast<USHORT>(payload.size());
+
+    EtwSessionManager::on_event_record(&ev);
+
+    STUTTO_ASSERT(!engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 9876);
+
+    mgr.set_running_for_test(false);
+    std::cout << "  -> Kernel-Process ProcessStart image extraction and auto-attachment PASSED.\n";
+}
+
+static void test_working_set_trim_cross_thread_correlation() {
+    std::cout << "[TEST] Validating WorkingSetOutSwap Start/Stop correlation across different TIDs...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    trig_cfg.target_pid = 5432;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+
+    EtwSessionConfig cfg;
+    cfg.enable_kernel_memory = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    const uint64_t baseline_evictions = mgr.unpaired_evictions();
+    const uint64_t baseline_failures = mgr.insertion_failures();
+
+    uint32_t target_pid = 5432;
+    const uint64_t start_qpc = 1000000ULL;
+    const uint64_t delta_ticks = (qpc_freq * 5) / 1000; // 5 ms
+    const uint64_t stop_qpc = start_qpc + delta_ticks;
+
+    // Event 4 (Start) on Thread 101
+    EVENT_RECORD ev_start{};
+    ev_start.EventHeader.ProviderId = KERNEL_MEMORY_PROVIDER_GUID;
+    ev_start.EventHeader.EventDescriptor.Id = 4;
+    ev_start.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(start_qpc);
+    ev_start.EventHeader.ProcessId = 4; // System process executing trim
+    ev_start.EventHeader.ThreadId = 101;
+    ev_start.UserData = &target_pid;
+    ev_start.UserDataLength = sizeof(uint32_t);
+    ev_start.UserContext = &mgr;
+
+    EtwSessionManager::on_event_record(&ev_start);
+
+    // Event 5 (Stop) on Thread 202 (different thread)
+    struct StopPayload {
+        uint32_t pid;
+        uint32_t pad;
+        uint64_t pages_processed;
+    } stop_data{ target_pid, 0, 1024 };
+
+    EVENT_RECORD ev_stop{};
+    ev_stop.EventHeader.ProviderId = KERNEL_MEMORY_PROVIDER_GUID;
+    ev_stop.EventHeader.EventDescriptor.Id = 5;
+    ev_stop.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(stop_qpc);
+    ev_stop.EventHeader.ProcessId = 4;
+    ev_stop.EventHeader.ThreadId = 202; // Cross-thread completion
+    ev_stop.UserData = &stop_data;
+    ev_stop.UserDataLength = sizeof(stop_data);
+    ev_stop.UserContext = &mgr;
+
+    EtwSessionManager::on_event_record(&ev_stop);
+
+    // Extract Stop event via snapshot across the event window
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(start_qpc, stop_qpc, &drops);
+    STUTTO_ASSERT(snap.size() == 1);
+    STUTTO_ASSERT(drops == 0);
+
+    const auto& rec = snap[0];
+    STUTTO_ASSERT(rec.category == static_cast<uint16_t>(EventCategory::MEM_WORKING_SET_TRIM));
+    STUTTO_ASSERT(rec.pid == target_pid);
+    STUTTO_ASSERT(rec.auxiliary_data == 1024ULL * 4096ULL);
+    STUTTO_ASSERT(rec.duration_us >= 4999 && rec.duration_us <= 5001);
+
+    // Verify table state and failure mode tracking against pre-test baseline
+    STUTTO_ASSERT(mgr.unpaired_evictions() == baseline_evictions);
+    STUTTO_ASSERT(mgr.unpaired_evictions() == 0);
+    STUTTO_ASSERT(mgr.insertion_failures() == baseline_failures);
+    STUTTO_ASSERT(mgr.insertion_failures() == 0);
+
+    std::cout << "  -> Cross-TID working set trim correlated successfully ("
+              << rec.duration_us << " us). PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer ETW Session Manager Tests ===\n";
     try {
@@ -1193,6 +1331,8 @@ int main() {
         test_dwm_glitch_deduplication_flag_verification();
         test_clock_resync_seqlock_concurrency();
         test_synthetic_ordered_drain_invariant();
+        test_kernel_process_start_image_name_parsing();
+        test_working_set_trim_cross_thread_correlation();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {
@@ -1200,4 +1340,5 @@ int main() {
         return 1;
     }
 }
+
 
