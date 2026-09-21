@@ -43,6 +43,7 @@ CMakeScripts/
 Testing/
 
 # Test, trace, and report outputs
+temp/
 stutto_*.json
 *.etl
 *.log
