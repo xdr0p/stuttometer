@@ -217,43 +217,104 @@ static void test_png_encoding_and_sampling() {
     std::cout << "  -> PNG encoding, IHDR header, and pixel sampling PASSED.\n";
 }
 
-// Test 3: Clipboard CF_DIB Direct Paste
+// Test 3: Clipboard CF_DIB Direct Paste & In-Memory DIB Encoding
 static void test_clipboard_roundtrip() {
-    std::cout << "[TEST 3] Testing clipboard CF_DIB direct paste format...\n";
-
+    std::cout << "[TEST 3] Testing clipboard CF_DIB format and in-memory DIB encoding...\n";
 
     auto report = create_dummy_report();
 
-    // Test OpenClipboard defensively
-    if (!OpenClipboard(nullptr)) {
-        std::cout << "  -> Clipboard locked or running in headless CI without active desktop station. Soft-skipping.\n";
-        return;
+    // 1. Verify in-memory DIB generation (completely safe, zero OS clipboard side effects)
+    auto dib = CardRenderer::render_card_to_dib_bytes(report);
+    STUTTO_ASSERT(!dib.empty() && "DIB render must succeed");
+    STUTTO_ASSERT(dib.size() >= sizeof(BITMAPINFOHEADER));
+    auto* bih = reinterpret_cast<const BITMAPINFOHEADER*>(dib.data());
+    STUTTO_ASSERT(bih->biSize == sizeof(BITMAPINFOHEADER));
+    STUTTO_ASSERT(bih->biWidth == 1200);
+    STUTTO_ASSERT(bih->biHeight == 675 && "biHeight must be positive for bottom-up orientation");
+    STUTTO_ASSERT(bih->biBitCount == 24);
+    STUTTO_ASSERT(bih->biCompression == BI_RGB);
+    DWORD expected_stride = ((1200 * 3 + 3) & ~3);
+    DWORD expected_bytes = expected_stride * 675;
+    STUTTO_ASSERT(bih->biSizeImage == expected_bytes);
+    STUTTO_ASSERT(dib.size() == sizeof(BITMAPINFOHEADER) + expected_bytes);
+
+    // Invalid input checks (failure contract)
+    CardRenderOptions opt_w0{ .base_width = 0 };
+    STUTTO_ASSERT(CardRenderer::render_card_to_dib_bytes(report, opt_w0).empty());
+
+    CardRenderOptions opt_h0{ .base_height = -10 };
+    STUTTO_ASSERT(CardRenderer::render_card_to_dib_bytes(report, opt_h0).empty());
+
+    CardRenderOptions opt_dpi0{ .dpi_scale = 0.0 };
+    STUTTO_ASSERT(CardRenderer::render_card_to_dib_bytes(report, opt_dpi0).empty());
+
+    std::cout << "  -> In-memory CF_DIB byte structure & failure contracts PASSED.\n";
+
+    // 2. Live OS clipboard test: only executed when explicitly opted-in (e.g. in CI or with STUTTO_TEST_CLIPBOARD=1)
+    //    Guarantees local developer workflows NEVER have their system clipboard hijacked.
+    const char* env_cb = std::getenv("STUTTO_TEST_CLIPBOARD");
+    const char* env_ci = std::getenv("CI");
+    if ((env_cb && env_cb[0] != '\0') || (env_ci && env_ci[0] != '\0')) {
+        std::cout << "  -> Running opt-in live OS clipboard test...\n";
+
+        // Backup existing text on clipboard if present
+        std::wstring saved_text;
+        bool had_text = false;
+        if (OpenClipboard(nullptr)) {
+            HANDLE hText = GetClipboardData(CF_UNICODETEXT);
+            if (hText) {
+                const wchar_t* p = static_cast<const wchar_t*>(GlobalLock(hText));
+                if (p) {
+                    saved_text = p;
+                    had_text = true;
+                    GlobalUnlock(hText);
+                }
+            }
+            CloseClipboard();
+        }
+
+        bool cb_ok = CardRenderer::copy_card_to_clipboard(nullptr, report);
+        if (!cb_ok) {
+            std::cout << "  -> Clipboard access rejected by environment. Soft-skipping live test.\n";
+            return;
+        }
+
+        if (OpenClipboard(nullptr)) {
+            HANDLE hData = GetClipboardData(CF_DIB);
+            STUTTO_ASSERT(hData != nullptr && "CF_DIB handle expected in clipboard");
+            auto* live_bih = reinterpret_cast<BITMAPINFOHEADER*>(GlobalLock(hData));
+            STUTTO_ASSERT(live_bih != nullptr);
+
+            STUTTO_ASSERT(live_bih->biSize == sizeof(BITMAPINFOHEADER));
+            STUTTO_ASSERT(live_bih->biWidth == 1200);
+            STUTTO_ASSERT(live_bih->biHeight == 675);
+            STUTTO_ASSERT(live_bih->biBitCount == 24);
+            STUTTO_ASSERT(live_bih->biCompression == BI_RGB);
+
+            GlobalUnlock(hData);
+
+            // Clean up: Restore previous clipboard state so we never leave dummy card behind
+            EmptyClipboard();
+            if (had_text) {
+                size_t bytes = (saved_text.size() + 1) * sizeof(wchar_t);
+                HGLOBAL hRestore = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                if (hRestore) {
+                    void* p = GlobalLock(hRestore);
+                    if (p) {
+                        std::memcpy(p, saved_text.c_str(), bytes);
+                        GlobalUnlock(hRestore);
+                        SetClipboardData(CF_UNICODETEXT, hRestore);
+                    } else {
+                        GlobalFree(hRestore);
+                    }
+                }
+            }
+            CloseClipboard();
+        }
+        std::cout << "  -> Live OS clipboard test PASSED and clipboard restored.\n";
+    } else {
+        std::cout << "  -> Live OS clipboard mutation skipped to protect user clipboard (set STUTTO_TEST_CLIPBOARD=1 to run).\n";
     }
-    CloseClipboard();
-
-    bool cb_ok = CardRenderer::copy_card_to_clipboard(nullptr, report);
-    if (!cb_ok) {
-        std::cout << "  -> Clipboard access rejected by environment. Soft-skipping.\n";
-        return;
-    }
-
-    if (OpenClipboard(nullptr)) {
-        HANDLE hData = GetClipboardData(CF_DIB);
-        STUTTO_ASSERT(hData != nullptr && "CF_DIB handle expected in clipboard");
-        auto* bih = reinterpret_cast<BITMAPINFOHEADER*>(GlobalLock(hData));
-        STUTTO_ASSERT(bih != nullptr);
-
-        STUTTO_ASSERT(bih->biSize == sizeof(BITMAPINFOHEADER));
-        STUTTO_ASSERT(bih->biWidth == 1200);
-        STUTTO_ASSERT(bih->biHeight == 675 && "biHeight must be positive for bottom-up orientation");
-        STUTTO_ASSERT(bih->biBitCount == 24);
-        STUTTO_ASSERT(bih->biCompression == BI_RGB);
-
-        GlobalUnlock(hData);
-        CloseClipboard();
-    }
-
-    std::cout << "  -> Clipboard CF_DIB structure PASSED.\n";
 }
 
 // Test 4: Attribution Tag Coverage

@@ -1081,63 +1081,50 @@ bool CardRenderer::save_card_to_png(
     }
 }
 
-bool CardRenderer::copy_card_to_clipboard(
-    HWND owner_hwnd,
+std::vector<uint8_t> CardRenderer::render_card_to_dib_bytes(
     const DiagnosticReport& report,
     const CardRenderOptions& options
 ) noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_render_mutex);
         if (!is_initialized()) {
-            return false;
+            return {};
         }
 
         if (options.base_width <= 0 || options.base_height <= 0 || options.dpi_scale <= 0.0) {
-            return false;
+            return {};
         }
 
         int final_w = static_cast<int>(std::lround(options.base_width * options.dpi_scale));
         int final_h = static_cast<int>(std::lround(options.base_height * options.dpi_scale));
         if (final_w <= 0 || final_h <= 0) {
-            return false;
+            return {};
         }
 
         Gdiplus::Bitmap bitmap(final_w, final_h, PixelFormat24bppRGB);
         if (bitmap.GetLastStatus() != Gdiplus::Ok) {
-            return false;
+            return {};
         }
 
         {
             Gdiplus::Graphics g(&bitmap);
             if (g.GetLastStatus() != Gdiplus::Ok) {
-                return false;
+                return {};
             }
             draw_card(g, final_w, final_h, report, options);
         } // Flush Graphics
 
         HBITMAP hbm = nullptr;
         if (bitmap.GetHBITMAP(Gdiplus::Color(0x11, 0x15, 0x1F), &hbm) != Gdiplus::Ok || !hbm) {
-            return false;
+            return {};
         }
 
         DWORD row_stride = ((final_w * 3 + 3) & ~3);
         DWORD image_bytes = row_stride * final_h;
         DWORD total_size = sizeof(BITMAPINFOHEADER) + image_bytes;
 
-        HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, total_size);
-        if (!hGlobal) {
-            DeleteObject(hbm);
-            return false;
-        }
-
-        uint8_t* pBuf = static_cast<uint8_t*>(GlobalLock(hGlobal));
-        if (!pBuf) {
-            GlobalFree(hGlobal);
-            DeleteObject(hbm);
-            return false;
-        }
-
-        auto* bih = reinterpret_cast<BITMAPINFOHEADER*>(pBuf);
+        std::vector<uint8_t> dib(total_size);
+        auto* bih = reinterpret_cast<BITMAPINFOHEADER*>(dib.data());
         std::memset(bih, 0, sizeof(BITMAPINFOHEADER));
         bih->biSize = sizeof(BITMAPINFOHEADER);
         bih->biWidth = final_w;
@@ -1147,19 +1134,47 @@ bool CardRenderer::copy_card_to_clipboard(
         bih->biCompression = BI_RGB;
         bih->biSizeImage = image_bytes;
 
-        uint8_t* pPixels = pBuf + sizeof(BITMAPINFOHEADER);
+        uint8_t* pPixels = dib.data() + sizeof(BITMAPINFOHEADER);
         HDC screen_dc = GetDC(nullptr);
         BITMAPINFO bi{};
         bi.bmiHeader = *bih;
         int lines = GetDIBits(screen_dc, hbm, 0, final_h, pPixels, &bi, DIB_RGB_COLORS);
         ReleaseDC(nullptr, screen_dc);
         DeleteObject(hbm);
-        GlobalUnlock(hGlobal);
 
         if (lines != final_h) {
+            return {};
+        }
+
+        return dib;
+    } catch (...) {
+        return {};
+    }
+}
+
+bool CardRenderer::copy_card_to_clipboard(
+    HWND owner_hwnd,
+    const DiagnosticReport& report,
+    const CardRenderOptions& options
+) noexcept {
+    try {
+        std::vector<uint8_t> dib = render_card_to_dib_bytes(report, options);
+        if (dib.empty()) {
+            return false;
+        }
+
+        HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, dib.size());
+        if (!hGlobal) {
+            return false;
+        }
+
+        void* pBuf = GlobalLock(hGlobal);
+        if (!pBuf) {
             GlobalFree(hGlobal);
             return false;
         }
+        std::memcpy(pBuf, dib.data(), dib.size());
+        GlobalUnlock(hGlobal);
 
         if (!OpenClipboard(owner_hwnd)) {
             GlobalFree(hGlobal);

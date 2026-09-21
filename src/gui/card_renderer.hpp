@@ -97,6 +97,12 @@ public:
         const CardRenderOptions& options = {}
     ) noexcept;
 
+    // Export to DIB memory buffer (BITMAPINFOHEADER + 24bpp RGB pixels, returns empty vector on failure)
+    [[nodiscard]] static std::vector<uint8_t> render_card_to_dib_bytes(
+        const DiagnosticReport& report,
+        const CardRenderOptions& options = {}
+    ) noexcept;
+
     // Direct Windows clipboard copy (CF_DIB format)
     [[nodiscard]] static bool copy_card_to_clipboard(
         HWND owner_hwnd,
