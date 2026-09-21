@@ -61,10 +61,10 @@ constexpr int IDC_SET_LBL_PROFILE_HINT     = 2036;
 // Settings Dialog State & Event Handling
 // -----------------------------------------------------------------------------
 struct SettingsDialogState {
-    UINT hotkey_vk{VK_F11};
-    UINT hotkey_mods{MOD_CONTROL};
-    UINT original_hotkey_vk{VK_F11};
-    UINT original_hotkey_mods{MOD_CONTROL};
+    uint32_t hotkey_vk{VK_F11};
+    uint32_t hotkey_mods{MOD_CONTROL};
+    uint32_t original_hotkey_vk{VK_F11};
+    uint32_t original_hotkey_mods{MOD_CONTROL};
     bool advanced_unlocked{false};
 
     HWND h_hotkey_edit{nullptr};
@@ -108,7 +108,8 @@ struct SettingsDialogState {
     double custom_spike_mult{2.0};
     double custom_min_delta{4.0};
     uint32_t osd_duration_ms{3500};
-    bool present_threshold_manual{false};
+    uint32_t target_pid{0};
+    DisplayRefreshInfo detected_display{};
     bool smi_threshold_manual{false};
     // Set to true around any programmatic edit-control update (e.g. SetWindowTextW) to prevent spurious manual-flag commitment
     bool suppress_change_notification{false};
@@ -595,7 +596,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
         case WM_CREATE: {
             state = new SettingsDialogState();
             state->suppress_change_notification = true;
-            state->present_threshold_manual = g_settings_config.present_threshold_manual;
+            GuiConfig active_cfg = read_gui_config();
+            state->target_pid = active_cfg.target_pid;
+            state->detected_display = query_display_refresh_info(state->target_pid);
             state->smi_threshold_manual = g_settings_config.smi_threshold_manual;
             state->hotkey_vk = g_hotkey_vk;
             state->hotkey_mods = g_hotkey_mods;
@@ -816,7 +819,18 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             apply_control_dark_theme(state->h_combo_pacing_profile);
             SetWindowSubclass(state->h_combo_pacing_profile, DarkComboSubclassProc, IDC_SET_COMBO_PACING_PROFILE, 0);
 
-            swprintf_s(num_buf, L"%.0f", (g_settings_config.present_threshold_ms > 0.0) ? (1000.0 / g_settings_config.present_threshold_ms) : 60.0);
+            if (!g_settings_config.present_threshold_manual) {
+                wcscpy_s(num_buf, L"Auto");
+            } else {
+                double fps = (g_settings_config.present_threshold_ms > 0.0 && !std::isnan(g_settings_config.present_threshold_ms))
+                    ? (1000.0 / g_settings_config.present_threshold_ms)
+                    : 60.0;
+                if (std::abs(fps - std::round(fps)) < 0.05) {
+                    swprintf_s(num_buf, L"%.0f", fps);
+                } else {
+                    swprintf_s(num_buf, L"%.2f", fps);
+                }
+            }
             state->h_edit_target_fps = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_TARGET_FPS, NULL, NULL);
             SetWindowSubclass(state->h_edit_target_fps, EditCenteredSubclassProc, IDC_SET_EDIT_TARGET_FPS, 0);
             SendMessageW(state->h_edit_target_fps, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
@@ -1101,19 +1115,52 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             SelectObject(mem_dc, g_font_ui);
             SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-            RECT rc_lbl_fps_unit = { c2_x + scale_dpi(190), p3_y, c2_x + scale_dpi(270), p3_y + ctrl_h };
-            DrawTextW(mem_dc, L"10 \u2013 500 FPS", -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            RECT rc_lbl_fps_unit = { c2_x + scale_dpi(190), p3_y, c2_x + c2_w - scale_dpi(14), p3_y + ctrl_h };
+
+            wchar_t fps_cur_buf[64]{};
+            GetWindowTextW(state->h_edit_target_fps, fps_cur_buf, 64);
+            std::wstring w_fps_cur(fps_cur_buf);
+            size_t cur_start = w_fps_cur.find_first_not_of(L" \t\r\n");
+            size_t cur_end = w_fps_cur.find_last_not_of(L" \t\r\n");
+            if (cur_start == std::wstring::npos) {
+                w_fps_cur.clear();
+            } else {
+                w_fps_cur = w_fps_cur.substr(cur_start, cur_end - cur_start + 1);
+            }
+
+            bool is_auto = (w_fps_cur.empty() || _wcsicmp(w_fps_cur.c_str(), L"Auto") == 0);
+            if (is_auto) {
+                wchar_t hint_str[128]{};
+                int hz = (state->detected_display.refresh_rate_hz > 0.0 && !std::isnan(state->detected_display.refresh_rate_hz))
+                    ? static_cast<int>(std::round(state->detected_display.refresh_rate_hz))
+                    : 60;
+                double vblank = (state->detected_display.vblank_interval_ms > 0.0 && !std::isnan(state->detected_display.vblank_interval_ms))
+                    ? state->detected_display.vblank_interval_ms
+                    : (1000.0 / hz);
+                if (state->target_pid != 0) {
+                    swprintf_s(hint_str, L"Auto (Target game display: %d Hz / %.2f ms)", hz, vblank);
+                } else {
+                    swprintf_s(hint_str, L"Auto (Primary display: %d Hz; adapts to game monitor on capture)", hz);
+                }
+                DrawTextW(mem_dc, hint_str, -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            } else {
+                DrawTextW(mem_dc, L"10 \u2013 500 FPS (Manual floor)", -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
 
             // Amber warning notice under h_edit_target_fps if target FPS > 83
-            wchar_t fps_chk_buf[32]{};
-            GetWindowTextW(state->h_edit_target_fps, fps_chk_buf, 32);
-            std::wstring w_fps_chk(fps_chk_buf); std::replace(w_fps_chk.begin(), w_fps_chk.end(), L',', L'.');
-            double target_fps_val = _wtof(w_fps_chk.c_str());
-            if (target_fps_val > 83.0) {
-                SelectObject(mem_dc, g_font_ui);
-                SetTextColor(mem_dc, COLOR_ACCENT_AMB);
-                RECT rc_amber = { c2_x + scale_dpi(14), c2_y + scale_y(112), c2_x + c2_w - scale_dpi(14), c2_y + scale_y(128) };
-                DrawTextW(mem_dc, L"High target FPS \u2014 ordinary frame variance above 83 FPS may trigger stutter events.", -1, &rc_amber, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            if (!is_auto) {
+                std::wstring w_fps_chk = w_fps_cur;
+                std::replace(w_fps_chk.begin(), w_fps_chk.end(), L',', L'.');
+                wchar_t* end_chk = nullptr;
+                _locale_t c_locale = _create_locale(LC_ALL, "C");
+                double target_fps_val = _wcstod_l(w_fps_chk.c_str(), &end_chk, c_locale);
+                _free_locale(c_locale);
+                if (target_fps_val > 83.0) {
+                    SelectObject(mem_dc, g_font_ui);
+                    SetTextColor(mem_dc, COLOR_ACCENT_AMB);
+                    RECT rc_amber = { c2_x + scale_dpi(14), c2_y + scale_y(112), c2_x + c2_w - scale_dpi(14), c2_y + scale_y(128) };
+                    DrawTextW(mem_dc, L"High target FPS \u2014 ordinary frame variance above 83 FPS may trigger stutter events.", -1, &rc_amber, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                }
             }
 
             int p4_y = c2_y + scale_y(132);
@@ -1406,9 +1453,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             }
 
             if (wmId == IDC_SET_EDIT_TARGET_FPS && HIWORD(wParam) == EN_CHANGE) {
-                if (!state->suppress_change_notification) {
-                    state->present_threshold_manual = true;
-                }
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
@@ -1456,7 +1500,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             if (wmId == IDC_SET_BTN_RESET) {
                 state->suppress_change_notification = true;
-                state->present_threshold_manual = false;
                 state->smi_threshold_manual = false;
 
                 state->hotkey_vk = VK_F11;
@@ -1494,10 +1537,10 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
                 SendMessageW(state->h_combo_trig_mode, CB_SETCURSEL, 0, 0);
 
-                DisplayRefreshInfo disp = query_display_refresh_info(0);
-                wchar_t fps_buf[32]{};
-                swprintf_s(fps_buf, L"%.0f", (disp.query_succeeded && disp.refresh_rate_hz > 0.0) ? disp.refresh_rate_hz : 60.0);
-                SetWindowTextW(state->h_edit_target_fps, fps_buf);
+                SetWindowTextW(state->h_edit_target_fps, L"Auto");
+                GuiConfig active_cfg = read_gui_config();
+                state->target_pid = active_cfg.target_pid;
+                state->detected_display = query_display_refresh_info(state->target_pid);
 
                 state->current_profile = PacingProfile::AUTO_ADAPTIVE;
                 state->previous_preset = PacingProfile::AUTO_ADAPTIVE;
@@ -1522,6 +1565,37 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             }
 
             if (wmId == IDC_SET_BTN_SAVE) {
+                wchar_t fps_raw_buf[64]{};
+                GetWindowTextW(state->h_edit_target_fps, fps_raw_buf, 64);
+                std::wstring w_fps_input(fps_raw_buf);
+                size_t start = w_fps_input.find_first_not_of(L" \t\r\n");
+                size_t end = w_fps_input.find_last_not_of(L" \t\r\n");
+                if (start == std::wstring::npos) {
+                    w_fps_input.clear();
+                } else {
+                    w_fps_input = w_fps_input.substr(start, end - start + 1);
+                }
+                std::replace(w_fps_input.begin(), w_fps_input.end(), L',', L'.');
+
+                bool new_present_manual = false;
+                double new_present_threshold_ms = 16.67;
+
+                if (w_fps_input.empty() || _wcsicmp(w_fps_input.c_str(), L"Auto") == 0) {
+                    new_present_manual = false;
+                    new_present_threshold_ms = 16.67;
+                } else {
+                    wchar_t* end_ptr = nullptr;
+                    _locale_t c_locale = _create_locale(LC_ALL, "C");
+                    double v_fps = _wcstod_l(w_fps_input.c_str(), &end_ptr, c_locale);
+                    _free_locale(c_locale);
+                    if (end_ptr == w_fps_input.c_str() || *end_ptr != L'\0' || std::isnan(v_fps) || std::isinf(v_fps) || v_fps < 10.0 || v_fps > 500.0) {
+                        MessageBoxW(hwnd, L"Please enter a valid Target FPS Floor between 10 and 500, or 'Auto'.", L"Invalid Setting", MB_OK | MB_ICONWARNING);
+                        return 0;
+                    }
+                    new_present_manual = true;
+                    new_present_threshold_ms = fps_to_present_threshold_ms(v_fps);
+                }
+
                 s_settings_saved = true;
                 g_hotkey_vk = state->hotkey_vk;
                 g_hotkey_mods = state->hotkey_mods;
@@ -1628,12 +1702,8 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 else if (tm_idx == 2) g_settings_config.frame_trigger_mode = FrameTriggerMode::STATIC_ONLY;
                 else g_settings_config.frame_trigger_mode = FrameTriggerMode::HYBRID;
 
-                GetWindowTextW(state->h_edit_target_fps, buf, 64);
-                std::wstring w_fps(buf); std::replace(w_fps.begin(), w_fps.end(), L',', L'.');
-                double v_fps = _wtof(w_fps.c_str());
-                double clamped_fps = std::clamp(v_fps, 10.0, 500.0);
-                g_settings_config.present_threshold_ms = fps_to_present_threshold_ms(clamped_fps);
-                g_settings_config.present_threshold_manual = state->present_threshold_manual;
+                g_settings_config.present_threshold_ms = new_present_threshold_ms;
+                g_settings_config.present_threshold_manual = new_present_manual;
                 g_settings_config.smi_threshold_manual = state->smi_threshold_manual;
 
                 g_settings_config.pacing_profile = state->current_profile;

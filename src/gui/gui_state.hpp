@@ -1,6 +1,7 @@
 #pragma once
 
 #include "theme.hpp"
+#include <stuttometer/gui_config.hpp>
 #include "gui_controller.hpp"
 #include "osd_toast.hpp"
 
@@ -83,8 +84,8 @@ extern OsdToast g_osd_toast;
 // Centralized Settings & Preferences State
 extern GuiConfig g_settings_config;
 extern bool g_sound_cues_enabled;
-extern UINT g_hotkey_vk;
-extern UINT g_hotkey_mods;
+extern uint32_t g_hotkey_vk;
+extern uint32_t g_hotkey_mods;
 extern std::wstring g_settings_file_path;
 extern std::string g_settings_last_target_process;
 extern ProcessList g_cached_processes;
@@ -102,7 +103,7 @@ extern std::deque<std::wstring> g_engine_logs;
 
 void append_engine_log(std::wstring log_msg);
 
-double fps_to_present_threshold_ms(double fps);
+using stuttometer::fps_to_present_threshold_ms;
 std::wstring utf8_to_wstring(std::string_view str);
 std::string wstring_to_utf8(const std::wstring& wstr);
 std::wstring format_hotkey_display(UINT fsModifiers, UINT vk);

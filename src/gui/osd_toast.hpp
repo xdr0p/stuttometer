@@ -1,6 +1,6 @@
 #pragma once
 
-#include "osd_types.hpp"
+#include <stuttometer/gui_config.hpp>
 #include "stuttometer/correlator.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN

@@ -75,6 +75,7 @@ add_library(stuttometer_core STATIC
   src/etw_handlers_user_providers.cpp
   src/etw_handlers_memory.cpp
   src/etw_handlers_kernel_mof.cpp
+  src/gui_config.cpp
 )
 
 target_include_directories(stuttometer_core
@@ -294,6 +295,13 @@ add_executable(test_cli_args
 target_link_libraries(test_cli_args PRIVATE stuttometer_core)
 add_test(NAME test_cli_args COMMAND test_cli_args)
 set_tests_properties(test_cli_args PROPERTIES TIMEOUT 30)
+
+add_executable(test_gui_settings
+  tests/test_gui_settings.cpp
+)
+target_link_libraries(test_gui_settings PRIVATE stuttometer_core)
+add_test(NAME test_gui_settings COMMAND test_gui_settings)
+set_tests_properties(test_gui_settings PROPERTIES TIMEOUT 30)
 
 
 
