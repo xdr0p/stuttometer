@@ -62,7 +62,7 @@ VERSION_TARGETS = [
     },
     {
         "file": "src/gui/stuttometer_gui.manifest",
-        "pattern": r'(version=")\d+\.\d+\.\d+\.\d+(")',
+        "pattern": r'(name="Stuttometer\.GUI"[\s\S]*?version=")\d+\.\d+\.\d+\.\d+(")',
         "template": r'\g<1>{quad}\g<2>'
     }
 ]
