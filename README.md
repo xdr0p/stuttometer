@@ -49,11 +49,12 @@ Stuttometer is engineered for continuous background monitoring during active gam
 
 ### Real-World Working Set (Task Manager)
 
-| Operating State | Working Set (RAM) | CPU Overhead | Subsystems Active |
+| Operating Mode | Working Set (RAM) | CPU Overhead | Use Case / Architecture |
 | :--- | ---:| ---:| :--- |
-| **Idle GUI (Waiting)** | **~20–21 MB** | 0.0% | Standalone Win32 Common Controls dashboard, fonts, and dark theme cache |
-| **Active Tracing (GUI Dashboard)** | **~48–50 MB** | 0.0% – 0.3% | Full telemetry flight recorder, continuous frame pacing ring, in-flight tables & ETW kernel buffers |
+| **Desktop GUI (`stuttometer_gui.exe`)** | **~48–50 MB** | 0.0% – 0.3% | Full interactive dashboard, live frametime plots, session benchmark, & OSD toast |
 | **CLI Diagnostic (`stuttometer.exe`)** | **~23–24 MB** | < 0.1% | Headless diagnostic flight recorder and in-flight tracking tables (zero GUI overhead) |
+
+*(Note: Prior to starting an active capture session, the standalone GUI idle footprint is ~20 MB).*
 
 ### Internal Telemetry Allocation Breakdown
 
