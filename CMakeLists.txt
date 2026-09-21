@@ -133,6 +133,11 @@ add_executable(stuttometer_gui WIN32
   src/gui/stuttometer_gui.manifest
 )
 
+set_source_files_properties(
+  src/gui/resources.rc
+  PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/stuttometer_gui.manifest"
+)
+
 target_include_directories(stuttometer_gui
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
