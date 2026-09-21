@@ -65,3 +65,7 @@ dist/
 stutto_*.csv
 *.ndjson
 
+# Python cache artifacts
+__pycache__/
+*.py[cod]
+*$py.class

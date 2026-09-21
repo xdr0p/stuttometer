@@ -25,56 +25,38 @@ import zipfile
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-# All 10 files that define or validate version strings in Stuttometer
+# Canonical version metadata files:
+# 1. include/stuttometer/version.hpp is the single C++ and Win32 RC source of truth.
+#    All C++ sources and tests dynamically consume stuttometer::TOOL_VERSION.
+#    CMakeLists.txt and resources.rc automatically extract from version.hpp.
+# 2. src/gui/stuttometer_gui.manifest defines the Windows SxS XML assembly version.
 VERSION_TARGETS = [
     {
-        "file": "CMakeLists.txt",
-        "pattern": r'(VERSION\s+)\d+\.\d+\.\d+',
-        "template": r'\g<1>{version}'
-    },
-    {
-        "file": "include/stuttometer/correlator.hpp",
-        "pattern": r'(std::string\s+tool_version\{")\d+\.\d+\.\d+("\};)',
-        "template": r'\g<1>{version}\g<2>'
-    },
-    {
-        "file": "src/cli_parser.cpp",
-        "pattern": r'(out\s*<<\s*"Stuttometer\s+v)\d+\.\d+\.\d+(\\n";)',
-        "template": r'\g<1>{version}\g<2>'
-    },
-    {
-        "file": "src/json_reporter.cpp",
-        "pattern": r'(root\["tool_version"\]\s*=\s*report\.tool_version\.empty\(\)\s*\?\s*")\d+\.\d+\.\d+("\s*:\s*report\.tool_version;)',
-        "template": r'\g<1>{version}\g<2>'
-    },
-    {
-        "file": "src/main.cpp",
-        "pattern": r'(\[STUTTOMETER\]\s+Initializing\s+Stuttometer\s+v)\d+\.\d+\.\d+(\s+\(Elevated Mode\)\.\.\.\\n";)',
-        "template": r'\g<1>{version}\g<2>'
-    },
-    {
-        "file": "src/gui/card_renderer.cpp",
-        "pattern": r'(std::string\s+ver\s*=\s*report\.tool_version\.empty\(\)\s*\?\s*")\d+\.\d+\.\d+("\s*:\s*report\.tool_version;)',
-        "template": r'\g<1>{version}\g<2>'
-    },
-    {
-        "file": "src/gui/resources.rc",
+        "file": "include/stuttometer/version.hpp",
         "multi": [
             {
-                "pattern": r'(FILEVERSION\s+)\d+,\d+,\d+,\d+',
-                "template": r'\g<1>{major},{minor},{patch},0'
+                "pattern": r'#define STUTTOMETER_VERSION_MAJOR \d+',
+                "template": r'#define STUTTOMETER_VERSION_MAJOR {major}'
             },
             {
-                "pattern": r'(PRODUCTVERSION\s+)\d+,\d+,\d+,\d+',
-                "template": r'\g<1>{major},{minor},{patch},0'
+                "pattern": r'#define STUTTOMETER_VERSION_MINOR \d+',
+                "template": r'#define STUTTOMETER_VERSION_MINOR {minor}'
             },
             {
-                "pattern": r'(VALUE\s+"FileVersion",\s*")\d+\.\d+\.\d+\.\d+(")',
-                "template": r'\g<1>{quad}\g<2>'
+                "pattern": r'#define STUTTOMETER_VERSION_PATCH \d+',
+                "template": r'#define STUTTOMETER_VERSION_PATCH {patch}'
             },
             {
-                "pattern": r'(VALUE\s+"ProductVersion",\s*")\d+\.\d+\.\d+\.\d+(")',
-                "template": r'\g<1>{quad}\g<2>'
+                "pattern": r'#define STUTTOMETER_VERSION_STRING "\d+\.\d+\.\d+"',
+                "template": r'#define STUTTOMETER_VERSION_STRING "{version}"'
+            },
+            {
+                "pattern": r'#define STUTTOMETER_VERSION_QUAD \d+,\d+,\d+,\d+',
+                "template": r'#define STUTTOMETER_VERSION_QUAD {major},{minor},{patch},0'
+            },
+            {
+                "pattern": r'#define STUTTOMETER_VERSION_QUAD_STRING "\d+\.\d+\.\d+\.\d+"',
+                "template": r'#define STUTTOMETER_VERSION_QUAD_STRING "{quad}"'
             }
         ]
     },
@@ -82,16 +64,6 @@ VERSION_TARGETS = [
         "file": "src/gui/stuttometer_gui.manifest",
         "pattern": r'(version=")\d+\.\d+\.\d+\.\d+(")',
         "template": r'\g<1>{quad}\g<2>'
-    },
-    {
-        "file": "tests/test_cli_args.cpp",
-        "pattern": r'(STUTTO_ASSERT\(out\.str\(\)\.find\("Stuttometer v)\d+\.\d+\.\d+("\)\s*!=\s*std::string::npos\);)',
-        "template": r'\g<1>{version}\g<2>'
-    },
-    {
-        "file": "tests/test_card_renderer.cpp",
-        "pattern": r'(report\.tool_version\s*=\s*")\d+\.\d+\.\d+(";)',
-        "template": r'\g<1>{version}\g<2>'
     }
 ]
 
@@ -110,13 +82,13 @@ def run_cmd(cmd, check=True, cwd=ROOT_DIR):
 
 
 def get_current_version():
-    """Reads current project version from CMakeLists.txt."""
-    cmake_path = os.path.join(ROOT_DIR, "CMakeLists.txt")
-    with open(cmake_path, "r", encoding="utf-8") as f:
+    """Reads current project version from include/stuttometer/version.hpp."""
+    ver_path = os.path.join(ROOT_DIR, "include", "stuttometer", "version.hpp")
+    with open(ver_path, "r", encoding="utf-8") as f:
         content = f.read()
-    m = re.search(r'VERSION\s+(\d+\.\d+\.\d+)', content)
+    m = re.search(r'#define STUTTOMETER_VERSION_STRING "(\d+\.\d+\.\d+)"', content)
     if not m:
-        raise ValueError("Could not determine current version from CMakeLists.txt")
+        raise ValueError("Could not determine current version from include/stuttometer/version.hpp")
     return m.group(1)
 
 
@@ -174,6 +146,28 @@ def update_file_version(target_def, new_version, dry_run=False):
             f.write(new_content)
 
     print(f"  [OK] {rel_path} ({replaced_count} replacement{'s' if replaced_count > 1 else ''})")
+
+
+def audit_codebase_for_stray_versions(old_version, allow_stray=False):
+    """Scans the codebase to ensure no old version literals were left behind in C++ files."""
+    print(f"\n=== Auditing Codebase for Stray '{old_version}' References ===")
+    cmd = [
+        "git", "grep", "-n", "-F", old_version,
+        "--", "src/", "include/", "tests/",
+        ":!include/stuttometer/version.hpp",
+        ":!src/gui/stuttometer_gui.manifest"
+    ]
+    res = subprocess.run(cmd, cwd=ROOT_DIR, text=True, capture_output=True)
+    matches = res.stdout.strip()
+    if matches:
+        print(f"[ERROR] Found hardcoded old version literal(s) in codebase:")
+        for line in matches.splitlines():
+            print(f"  {line}")
+        print("\nAll C++ source files and tests must reference stuttometer::TOOL_VERSION instead of literal strings.")
+        if not allow_stray:
+            raise RuntimeError(f"Release gate failed: {len(matches.splitlines())} stray version reference(s) found. Fix them or pass --allow-stray-versions.")
+    else:
+        print(f"  [PASS] Zero hardcoded '{old_version}' literals found in C++ codebase.")
 
 
 def get_github_token():
@@ -310,6 +304,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Perform version replacement check without writing files or pushing")
     parser.add_argument("--skip-build", action="store_true", help="Skip CMake build and tests (e.g. for testing version replacement)")
     parser.add_argument("--skip-push", action="store_true", help="Skip git commit, tag, push, and GitHub release publication")
+    parser.add_argument("--allow-stray-versions", action="store_true", help="Allow release even if stray old version literals are found")
 
     args = parser.parse_args()
 
@@ -328,16 +323,19 @@ def main():
 
     print(f"[INFO] Target version: v{target_ver} ({'DRY-RUN' if args.dry_run else 'APPLYING'})")
 
-    # Step 1: Update version in all 10 project files
-    print("\n=== Step 1: Updating Version Across Codebase ===")
+    # Step 1: Update version in canonical files
+    print("\n=== Step 1: Updating Canonical Version Definitions ===")
     for target in VERSION_TARGETS:
         update_file_version(target, target_ver, dry_run=args.dry_run)
 
+    # Step 2: Audit codebase to guarantee no hardcoded old versions remain
+    audit_codebase_for_stray_versions(current_ver, allow_stray=args.allow_stray_versions)
+
     if args.dry_run:
-        print("\n[DRY-RUN] Version substitutions validated successfully across all 10 files.")
+        print("\n[DRY-RUN] Version substitutions validated successfully.")
         return
 
-    # Step 2: Build and Test
+    # Step 3: Build and Test
     if not args.skip_build:
         print("\n=== Step 2: Compiling Release Configuration ===")
         run_cmd("cmake --build build --config Release")
@@ -345,14 +343,14 @@ def main():
         print("\n=== Step 3: Running Test Suite ===")
         run_cmd("ctest --test-dir build -C Release --output-on-failure")
 
-    # Step 3: Package Release Zip
+    # Step 4: Package Release Zip
     package_release_zip(target_ver)
 
     if args.skip_push:
         print(f"\n[LOCAL DONE] v{target_ver} updated and tested locally (--skip-push).")
         return
 
-    # Step 4: Git Commit & Tag
+    # Step 5: Git Commit & Tag
     print("\n=== Step 4: Git Commit & Tag ===")
     commit_msg = f"feat: Stuttometer {target_ver}"
     if args.title:
@@ -363,12 +361,12 @@ def main():
     tag_msg = f"Stuttometer v{target_ver}" + (f" - {args.title}" if args.title else "")
     run_cmd(f'git tag -a v{target_ver} -m "{tag_msg}"')
 
-    # Step 5: Git Push
+    # Step 6: Git Push
     print("\n=== Step 5: Pushing Commit and Tag to Remote ===")
     run_cmd("git push origin main")
     run_cmd(f"git push origin v{target_ver}")
 
-    # Step 6: Publish GitHub Release
+    # Step 7: Publish GitHub Release
     print("\n=== Step 6: Publishing GitHub Release ===")
     notes = args.notes
     if notes and os.path.exists(notes):

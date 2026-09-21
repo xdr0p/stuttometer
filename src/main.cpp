@@ -8,6 +8,7 @@
 #include "stuttometer/csv_exporter.hpp"
 
 #include "stuttometer/cli_parser.hpp"
+#include "stuttometer/version.hpp"
 #include <iostream>
 #include <atomic>
 #include <thread>
@@ -174,7 +175,7 @@ int main(int argc, char** argv) {
         std::cerr << "[STUTTOMETER] Warning: Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
     }
 
-    std::cout << "[STUTTOMETER] Initializing Stuttometer v0.5.0 (Elevated Mode)...\n";
+    std::cout << "[STUTTOMETER] Initializing Stuttometer v" << stuttometer::TOOL_VERSION << " (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
     stuttometer::EtwSessionConfig etw_config;

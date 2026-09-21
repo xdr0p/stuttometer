@@ -1,8 +1,12 @@
 cmake_minimum_required(VERSION 3.25)
 
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/include/stuttometer/version.hpp" _stutto_ver_line
+     REGEX "^#define STUTTOMETER_VERSION_STRING \"[0-9]+\\.[0-9]+\\.[0-9]+\"")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" STUTTOMETER_PROJECT_VERSION "${_stutto_ver_line}")
+
 project(
   stuttometer
-  VERSION 0.5.0
+  VERSION ${STUTTOMETER_PROJECT_VERSION}
   DESCRIPTION "Lightweight Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"
   LANGUAGES CXX RC
 )

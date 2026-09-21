@@ -1,4 +1,5 @@
 #include "stuttometer/cli_parser.hpp"
+#include "stuttometer/version.hpp"
 #include <CLI/CLI.hpp>
 #include <set>
 #include <iostream>
@@ -111,7 +112,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     // Precedence: --version beats --self-check
     if (print_version) {
-        out << "Stuttometer v0.5.0\n";
+        out << TOOL_NAME << " v" << TOOL_VERSION << "\n";
         return CliParseResult::EXIT_OK;
     }
 

@@ -3,6 +3,7 @@
 #include "event_types.hpp"
 #include "trigger_engine.hpp"
 #include "privilege_utils.hpp"
+#include "version.hpp"
 #include <vector>
 #include <string>
 #include <string_view>
@@ -140,7 +141,7 @@ struct AttributionResult {
 
 struct DiagnosticReport {
     std::string schema_version{"1.1"};
-    std::string tool_version{"0.5.0"};
+    std::string tool_version{TOOL_VERSION};
     std::string timestamp_utc;
     TriggerInfo trigger;
     std::string target_process;

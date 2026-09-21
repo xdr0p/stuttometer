@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include "stuttometer/cli_parser.hpp"
+#include "stuttometer/version.hpp"
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -138,7 +139,8 @@ static void test_version_and_self_check() {
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
         STUTTO_ASSERT(res == CliParseResult::EXIT_OK);
-        STUTTO_ASSERT(out.str().find("Stuttometer v0.5.0") != std::string::npos);
+        std::string expected_banner = "Stuttometer v" + std::string(stuttometer::TOOL_VERSION);
+        STUTTO_ASSERT(out.str().find(expected_banner) != std::string::npos);
     }
 
     {
