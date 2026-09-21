@@ -25,21 +25,22 @@ namespace detail {
         return (max_abs_offset_ms >= 1000.0) ? L"Trigger (0.0 s)" : L"Trigger (0 ms)";
     }
 
-    enum class MetricSeverity { Normal, Warning, Danger };
+    using MetricSeverity = stuttometer::MetricSeverity;
 
     [[nodiscard]] inline MetricSeverity classify_stall(
-        double dur_ms, double spike_ratio, double drop, bool is_audio, uint32_t glitches
+        double dur_ms, double spike_ratio, double drop, bool is_audio, uint32_t glitches, double present_threshold_ms = 16.67
     ) {
         if (is_audio) {
-            return (glitches > 0) ? MetricSeverity::Danger : MetricSeverity::Normal;
+            return (glitches > 0) ? MetricSeverity::DANGER : MetricSeverity::NORMAL;
         }
-        if (dur_ms >= 50.0 || drop > 0.60) {
-            return MetricSeverity::Danger;
+        const MetricSeverity dur_sev = compute_duration_severity_fallback(dur_ms, present_threshold_ms);
+        if (dur_sev == MetricSeverity::DANGER || drop > 0.60) {
+            return MetricSeverity::DANGER;
         }
-        if (dur_ms >= 25.0 || drop >= 0.30 || spike_ratio >= 2.0) {
-            return MetricSeverity::Warning;
+        if (dur_sev == MetricSeverity::WARNING || drop >= 0.30 || spike_ratio >= 2.0) {
+            return MetricSeverity::WARNING;
         }
-        return MetricSeverity::Normal;
+        return MetricSeverity::NORMAL;
     }
 
     struct BannerRects {

@@ -9,6 +9,127 @@
 #include <filesystem>
 #include <sstream>
 #include <fstream>
+#include <new>
+#include <cstdlib>
+
+static thread_local bool g_disallow_allocations = false;
+static thread_local bool g_allocation_detected = false;
+
+void* operator new(size_t size) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete(void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete(void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void* operator new[](size_t size) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete[](void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete[](void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    return std::malloc(size);
+}
+
+void operator delete(void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
+
+void* operator new[](size_t size, const std::nothrow_t&) noexcept {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    return std::malloc(size);
+}
+
+void operator delete[](void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
+
+#if defined(__cpp_aligned_new)
+void* operator new(size_t size, std::align_val_t al) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size, static_cast<size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<size_t>(al), size);
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete(void* p, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+void operator delete(void* p, size_t, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+void* operator new[](size_t size, std::align_val_t al) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size, static_cast<size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<size_t>(al), size);
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete[](void* p, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+void operator delete[](void* p, size_t, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+#endif
 
 using namespace stuttometer;
 
@@ -311,8 +432,15 @@ static void test_packed_atomic_target_state() {
     // Test dynamic vblank interval accessor
     STUTTO_ASSERT(engine.vblank_interval_ms() > 0.0);
     cfg.present_threshold_ms = 8.33; // 120 FPS
+    cfg.vblank_interval_ms = 0.0;
     stuttometer::TriggerEngine engine120(cfg, 10000000);
     STUTTO_ASSERT(std::abs(engine120.vblank_interval_ms() - 8.33) < 0.01);
+
+    // Explicit vblank_interval_ms overrides present_threshold_ms
+    cfg.present_threshold_ms = 16.67;
+    cfg.vblank_interval_ms = 4.167; // 240 Hz
+    stuttometer::TriggerEngine engine240(cfg, 10000000);
+    STUTTO_ASSERT(std::abs(engine240.vblank_interval_ms() - 4.167) < 0.001);
 
     std::cout << "  -> TriggerEngine packed 64-bit atomic state and vblank interval tests PASSED.\n";
 }
@@ -1166,64 +1294,237 @@ static void test_synthetic_ordered_drain_invariant() {
 }
 
 static void test_kernel_process_start_image_name_parsing() {
-    std::cout << "[TEST] Validating Kernel-Process ProcessStart image name extraction...\n";
+    std::cout << "[TEST] Validating Kernel-Process ProcessStart image name extraction & allocation guard...\n";
 
     const uint64_t qpc_freq = get_qpc_frequency();
     FlightRecorder recorder(1024);
     TriggerConfig trig_cfg;
     trig_cfg.target_process_name = "GameTest.exe";
     TriggerEngine engine(trig_cfg, qpc_freq);
-    engine.update_target_pid(0, true); // Put engine into waiting state for GameTest.exe
-
-    STUTTO_ASSERT(engine.is_target_waiting());
-    STUTTO_ASSERT(engine.active_target_pid() == 0);
 
     EtwSessionConfig cfg;
     cfg.enable_kernel_process_events = true;
     EtwSessionManager mgr(recorder, engine, cfg);
     mgr.set_running_for_test(true);
 
-    // Microsoft-Windows-Kernel-Process ProcessStart (Event ID 1) payload:
-    // Offset 0: ProcessID (uint32_t) = 9876
-    // Offset 4: ParentProcessID (uint32_t) = 1000
-    // Offset 8: ImageName (null-terminated wchar_t string) = L"GameTest.exe"
-    //
-    // Notice: ImageName = L"GameTest.exe" has NO path prefixes.
-    // Under buggy offset (+24):
-    //   Byte 24 is wchar index (24 - 8) / 2 = 8.
-    //   In L"GameTest.exe", index 8 is '.'!
-    //   So the buggy offset reads L".exe", extracts basename ".exe",
-    //   which fails matches_process_name(".exe", "GameTest.exe"),
-    //   and active_target_pid remains 0.
-    // Under fixed offset (+8):
-    //   Byte 8 reads L"GameTest.exe", matches target, and attaches PID 9876.
-    const wchar_t image_name[] = L"GameTest.exe";
-    const size_t image_name_bytes = sizeof(image_name); // includes null terminator
-    const size_t payload_size = 8 + image_name_bytes;
+    auto send_process_start = [&](uint32_t pid, const wchar_t* image_path) {
+        const size_t image_name_bytes = (std::wcslen(image_path) + 1) * sizeof(wchar_t);
+        const size_t payload_size = 8 + image_name_bytes;
 
-    std::vector<uint8_t> payload(payload_size, 0);
-    const uint32_t pid = 9876;
-    const uint32_t ppid = 1000;
-    std::memcpy(payload.data() + 0, &pid, sizeof(uint32_t));
-    std::memcpy(payload.data() + 4, &ppid, sizeof(uint32_t));
-    std::memcpy(payload.data() + 8, image_name, image_name_bytes);
+        std::vector<uint8_t> payload(payload_size, 0);
+        const uint32_t ppid = 1000;
+        std::memcpy(payload.data() + 0, &pid, sizeof(uint32_t));
+        std::memcpy(payload.data() + 4, &ppid, sizeof(uint32_t));
+        std::memcpy(payload.data() + 8, image_path, image_name_bytes);
 
-    EVENT_RECORD ev{};
-    ev.UserContext = &mgr;
-    ev.EventHeader.ProviderId = KERNEL_PROCESS_PROVIDER_GUID;
-    ev.EventHeader.EventDescriptor.Id = 1; // ProcessStart
-    ev.EventHeader.ProcessId = pid;
-    ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(get_current_qpc());
-    ev.UserData = payload.data();
-    ev.UserDataLength = static_cast<USHORT>(payload.size());
+        EVENT_RECORD ev{};
+        ev.UserContext = &mgr;
+        ev.EventHeader.ProviderId = KERNEL_PROCESS_PROVIDER_GUID;
+        ev.EventHeader.EventDescriptor.Id = 1; // ProcessStart
+        ev.EventHeader.ProcessId = pid;
+        ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(get_current_qpc());
+        ev.UserData = payload.data();
+        ev.UserDataLength = static_cast<USHORT>(payload.size());
 
-    EtwSessionManager::on_event_record(&ev);
+        g_allocation_detected = false;
+        g_disallow_allocations = true;
+        EtwSessionManager::on_event_record(&ev);
+        g_disallow_allocations = false;
+        STUTTO_ASSERT(!g_allocation_detected);
+    };
 
+    // Sanity check: verify runtime allocation guard actively catches allocations
+    g_allocation_detected = false;
+    g_disallow_allocations = true;
+    void* volatile dummy_alloc = ::operator new(32);
+    g_disallow_allocations = false;
+    STUTTO_ASSERT(g_allocation_detected);
+    ::operator delete(dummy_alloc);
+    g_allocation_detected = false;
+
+    // Case 1: Pure filename (no directory prefix)
+    engine.update_target_pid(0, true);
+    STUTTO_ASSERT(engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 0);
+    send_process_start(9871, L"GameTest.exe");
     STUTTO_ASSERT(!engine.is_target_waiting());
-    STUTTO_ASSERT(engine.active_target_pid() == 9876);
+    STUTTO_ASSERT(engine.active_target_pid() == 9871);
+
+    // Case 2: Windows backslash path
+    engine.update_target_pid(0, true);
+    STUTTO_ASSERT(engine.is_target_waiting());
+    send_process_start(9872, L"C:\\Games\\Cyberpunk\\GameTest.exe");
+    STUTTO_ASSERT(!engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 9872);
+
+    // Case 3: Forward slash path
+    engine.update_target_pid(0, true);
+    STUTTO_ASSERT(engine.is_target_waiting());
+    send_process_start(9873, L"D:/Games/GameTest.exe");
+    STUTTO_ASSERT(!engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 9873);
+
+    // Case 4: Multi-byte unicode characters in path
+    engine.update_target_pid(0, true);
+    STUTTO_ASSERT(engine.is_target_waiting());
+    send_process_start(9874, L"C:\\Jeux_Vid\u00E9o\\SteamApps\\GameTest.exe");
+    STUTTO_ASSERT(!engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 9874);
+
+    // Case 5: Waiting bypass test: when target is already attached / not waiting, ProcessStart skips parsing
+    STUTTO_ASSERT(!engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 9874);
+    send_process_start(9875, L"C:\\Other\\GameTest.exe");
+    STUTTO_ASSERT(!engine.is_target_waiting());
+    STUTTO_ASSERT(engine.active_target_pid() == 9874); // Unchanged
 
     mgr.set_running_for_test(false);
-    std::cout << "  -> Kernel-Process ProcessStart image extraction and auto-attachment PASSED.\n";
+    std::cout << "  -> Kernel-Process ProcessStart 4-case extraction, waiting bypass & zero-alloc guard PASSED.\n";
+}
+
+static void test_trigger_engine_stale_writer_generation_guard() {
+    std::cout << "[TEST] Validating TriggerEngine stale-writer generation guard under race condition...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    TriggerConfig trig_cfg;
+    trig_cfg.frame_trigger_mode = FrameTriggerMode::STATIC_ONLY;
+    trig_cfg.present_threshold_ms = 25.0;
+    trig_cfg.window_post_ms = 30.0;
+    trig_cfg.cooldown_ms = 1000.0;
+
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    const uint64_t t_base = 10000000ULL;
+
+    // Step 1: Call engine.reset_test_seams(). Set pause_only_generation_for_test targeting Thread A only.
+    engine.reset_test_seams();
+    const uint64_t target_pause_gen = engine.current_claim_generation_for_test() + 1;
+    engine.set_pause_only_generation_for_test(target_pause_gen);
+    engine.set_pause_after_claim_for_test(true);
+
+    // Step 2: Thread A calls public method on_dxgi_present (enters Phase 1 with my_gen = 1, pauses in Phase 2)
+    std::atomic<bool> a_returned_true{false};
+    std::thread thread_a([&]() {
+        a_returned_true.store(engine.on_dxgi_present(1111, 100, 50.0, t_base, 0, 0), std::memory_order_release);
+    });
+
+    // Step 3: Test thread waits on while (!engine.claim_phase_entered_for_test()) cpu_pause();
+    while (!engine.claim_phase_entered_for_test()) {
+        cpu_pause();
+    }
+
+    // Step 4 (Two-call poll sequence):
+    TriggerInfo tmp_info{};
+    uint64_t tmp_from = 0, tmp_to = 0;
+    // Call 1 (watchdog fires at t_base + 6s): state transitions CLAIMED -> COOLDOWN
+    bool p1 = engine.poll_state(t_base + 6 * qpc_freq, tmp_info, tmp_from, tmp_to);
+    STUTTO_ASSERT(!p1);
+    STUTTO_ASSERT(engine.current_state() == TriggerState::COOLDOWN);
+
+    // Call 2 (cooldown expires at t_base + 7s): state transitions COOLDOWN -> ARMED
+    bool p2 = engine.poll_state(t_base + 7 * qpc_freq, tmp_info, tmp_from, tmp_to);
+    STUTTO_ASSERT(!p2);
+    STUTTO_ASSERT(engine.current_state() == TriggerState::ARMED);
+
+    // Step 5: Thread B calls public method on_dxgi_present.
+    // Thread B has my_gen = 2 != pause_only_generation_for_test (1), so it publishes payload B and returns true.
+    std::atomic<bool> b_returned_true{false};
+    std::thread thread_b([&]() {
+        b_returned_true.store(engine.on_dxgi_present(2222, 200, 75.0, t_base + 8 * qpc_freq, 0, 0), std::memory_order_release);
+    });
+    thread_b.join();
+    STUTTO_ASSERT(b_returned_true.load(std::memory_order_acquire));
+
+    // Step 6: Test thread unpauses Thread A. Thread A resumes, enters Phase 3,
+    // detects claim_generation_ == 2 != my_gen == 1, skips writing active_trigger_, fails Phase 4 CAS, returns false.
+    engine.set_pause_after_claim_for_test(false);
+    thread_a.join();
+    STUTTO_ASSERT(!a_returned_true.load(std::memory_order_acquire));
+
+    // Step 7: Advance QPC past post-window to FROZEN
+    TriggerInfo out_trigger{};
+    uint64_t out_from = 0, out_to = 0;
+    bool p3 = engine.poll_state(t_base + 9 * qpc_freq, out_trigger, out_from, out_to);
+    STUTTO_ASSERT(p3);
+
+    // Step 8: Assert out_trigger.target_pid == 2222 and duration_ms == 75.0, proving Thread A never overwrote Thread B
+    STUTTO_ASSERT(out_trigger.target_pid == 2222);
+    STUTTO_ASSERT(out_trigger.duration_ms == 75.0);
+
+    engine.on_report_completed(t_base + 9 * qpc_freq);
+    std::cout << "  -> Stale writer generation guard and seqlock protection PASSED.\n";
+}
+
+static void test_trigger_engine_stale_writer_concurrent_claimed_race() {
+    std::cout << "[TEST] Validating stale writer cannot steal CLAIMED state from active writer...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    TriggerConfig trig_cfg;
+    trig_cfg.frame_trigger_mode = FrameTriggerMode::STATIC_ONLY;
+    trig_cfg.present_threshold_ms = 25.0;
+    trig_cfg.window_post_ms = 30.0;
+    trig_cfg.cooldown_ms = 1000.0;
+
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    const uint64_t t_base = 20000000ULL;
+
+    // Thread A and B both pause when target is UINT64_MAX
+    engine.reset_test_seams();
+    const uint64_t gen_a = engine.current_claim_generation_for_test() + 1;
+    const uint64_t gen_b = gen_a + 1;
+    engine.set_pause_only_generation_for_test(UINT64_MAX);
+    engine.set_pause_after_claim_for_test(true);
+
+    std::atomic<bool> a_returned_true{false};
+    std::thread thread_a([&]() {
+        a_returned_true.store(engine.on_dxgi_present(1111, 100, 50.0, t_base, 0, 0), std::memory_order_release);
+    });
+
+    while (!engine.claim_phase_entered_for_test()) {
+        cpu_pause();
+    }
+
+    // Watchdog and cooldown recovery
+    TriggerInfo tmp_info{};
+    uint64_t tmp_from = 0, tmp_to = 0;
+    engine.poll_state(t_base + 6 * qpc_freq, tmp_info, tmp_from, tmp_to);
+    engine.poll_state(t_base + 7 * qpc_freq, tmp_info, tmp_from, tmp_to);
+    STUTTO_ASSERT(engine.current_state() == TriggerState::ARMED);
+
+    // Thread B claims generation 2 and enters pause loop because target is UINT64_MAX
+    std::atomic<bool> b_returned_true{false};
+    std::thread thread_b([&]() {
+        b_returned_true.store(engine.on_dxgi_present(2222, 200, 75.0, t_base + 8 * qpc_freq, 0, 0), std::memory_order_release);
+    });
+
+    // Wait until Thread B has claimed generation 2 and state is CLAIMED
+    while (engine.current_state() != TriggerState::CLAIMED || engine.current_claim_generation_for_test() < gen_b) {
+        cpu_pause();
+    }
+    for (int i = 0; i < 5000; ++i) cpu_pause();
+
+    // Release Thread A by setting target_pause_gen exclusively to gen_b (Thread B stays paused)
+    engine.set_pause_only_generation_for_test(gen_b);
+    thread_a.join();
+
+    // Stale Thread A must return false and must NOT have transitioned state_ from CLAIMED
+    STUTTO_ASSERT(!a_returned_true.load(std::memory_order_acquire));
+    STUTTO_ASSERT(engine.current_state() == TriggerState::CLAIMED);
+
+    // Now release Thread B
+    engine.set_pause_after_claim_for_test(false);
+    thread_b.join();
+    STUTTO_ASSERT(b_returned_true.load(std::memory_order_acquire));
+
+    // Post-window collection to FROZEN
+    TriggerInfo out_trigger{};
+    uint64_t out_from = 0, out_to = 0;
+    bool p = engine.poll_state(t_base + 9 * qpc_freq, out_trigger, out_from, out_to);
+    STUTTO_ASSERT(p);
+    STUTTO_ASSERT(out_trigger.target_pid == 2222);
+    STUTTO_ASSERT(out_trigger.duration_ms == 75.0);
+
+    engine.on_report_completed(t_base + 9 * qpc_freq);
+    std::cout << "  -> Stale writer concurrent CLAIMED state protection PASSED.\n";
 }
 
 static void test_working_set_trim_cross_thread_correlation() {
@@ -1332,6 +1633,8 @@ int main() {
         test_clock_resync_seqlock_concurrency();
         test_synthetic_ordered_drain_invariant();
         test_kernel_process_start_image_name_parsing();
+        test_trigger_engine_stale_writer_generation_guard();
+        test_trigger_engine_stale_writer_concurrent_claimed_race();
         test_working_set_trim_cross_thread_correlation();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;

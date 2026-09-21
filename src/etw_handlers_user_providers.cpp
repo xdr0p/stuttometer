@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cstring>
-#include <string>
 #include <string_view>
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/ndjson_writer.hpp"
@@ -149,8 +148,10 @@ void EtwSessionManager::handle_process_event(PEVENT_RECORD p_event, EtwEventReco
         std::memcpy(&target_pid, p_event->UserData, sizeof(uint32_t));
         if (target_pid != 0) {
             rec.pid = target_pid;
-            std::string proc_name;
-            if (p_event->UserDataLength >= 12) {
+
+            // Guard placed immediately before string parsing block:
+            // If target is already attached or in monitor-all mode, skip all image parsing.
+            if (trigger_engine_.is_target_waiting() && p_event->UserDataLength >= 12) {
                 const auto* raw_bytes = static_cast<const uint8_t*>(p_event->UserData) + 8;
                 const auto* p_ws = reinterpret_cast<const wchar_t*>(raw_bytes);
                 const size_t max_wchars = (p_event->UserDataLength - 8) / sizeof(wchar_t);
@@ -159,27 +160,30 @@ void EtwSessionManager::handle_process_event(PEVENT_RECORD p_event, EtwEventReco
                 bool valid_chars = true;
                 while (wlen < max_wchars && wlen < MAX_PATH) {
                     wchar_t wc = p_ws[wlen];
-                    if (wc == L'\0') {
-                        null_terminated = true;
-                        break;
-                    }
-                    if ((wc < 0x20 && wc != L'\t') || wc == 0x7F) {
-                        valid_chars = false;
-                        break;
-                    }
+                    if (wc == L'\0') { null_terminated = true; break; }
+                    if ((wc < 0x20 && wc != L'\t') || wc == 0x7F) { valid_chars = false; break; }
                     ++wlen;
                 }
                 if (null_terminated && valid_chars && wlen > 0) {
-                    std::string full_path = utf16_to_utf8(std::wstring_view(p_ws, wlen));
-                    const size_t slash = full_path.find_last_of("\\/");
-                    proc_name = (slash != std::string::npos) ? full_path.substr(slash + 1) : full_path;
+                    std::wstring_view full_path_w(p_ws, wlen);
+                    const size_t slash = full_path_w.find_last_of(L"\\/");
+                    std::wstring_view exe_name_w = full_path_w;
+                    if (slash != std::wstring_view::npos) {
+                        exe_name_w.remove_prefix(slash + 1);
+                    }
+
+                    char utf8_buf[4 * MAX_PATH + 1];
+                    int utf8_len = WideCharToMultiByte(
+                        CP_UTF8, 0,
+                        exe_name_w.data(), static_cast<int>(exe_name_w.size()),
+                        utf8_buf, static_cast<int>(sizeof(utf8_buf) - 1),
+                        nullptr, nullptr
+                    );
+                    if (utf8_len > 0 && utf8_len < static_cast<int>(sizeof(utf8_buf))) {
+                        utf8_buf[utf8_len] = '\0';
+                        trigger_engine_.on_process_launched(target_pid, std::string_view(utf8_buf, static_cast<size_t>(utf8_len)));
+                    }
                 }
-            }
-            if (proc_name.empty()) {
-                proc_name = get_process_name_by_pid(target_pid);
-            }
-            if (!proc_name.empty()) {
-                trigger_engine_.on_process_launched(target_pid, proc_name);
             }
         }
     } else if (ctx.event_id == 2 && p_event->UserDataLength >= 4 && p_event->UserData) {

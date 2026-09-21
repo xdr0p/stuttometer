@@ -1507,6 +1507,104 @@ static void test_gpu_pipeline_stall_dxgi_relative_spike() {
     std::cout << "  -> gpu_pipeline_stall DXGI & Kernel relative spike test PASSED.\n";
 }
 
+static void test_smi_auto_scaling_and_hardware_vblank() {
+    std::cout << "[TEST] Validating SMI gap auto-scaling with high-refresh cadence and hardware_vblank_ms...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+    stuttometer::DriverSymbolResolver driver_resolver;
+
+    stuttometer::ProviderContext p_active;
+    p_active.kernel_dpc_active = true;
+    p_active.kernel_cswitch_active = true;
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // 1. auto_scale_smi = true with 240Hz baseline (4.167 ms) -> threshold is 2 * 4.167 = 8.33 ms
+    {
+        stuttometer::CorrelatorThresholds thresholds;
+        thresholds.auto_scale_smi = true;
+        stuttometer::CorrelationEngine correlator(driver_resolver, thresholds);
+
+        stuttometer::TriggerInfo trigger;
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+        trigger.target_pid = 4000;
+        trigger.target_tid = 8000;
+        trigger.baseline_avg_ms = 4.167; // 240 Hz
+        trigger.spike_ratio = 2.4;
+
+        // Sub-threshold 7.0 ms (< 8.33 ms) -> insufficient evidence
+        trigger.duration_ms = 7.0;
+        auto rep_sub = correlator.correlate(snapshot, trigger, qpc_freq, p_active);
+        STUTTO_ASSERT(!rep_sub.diagnoses.empty());
+        STUTTO_ASSERT(rep_sub.diagnoses[0].hypothesis == "insufficient_evidence");
+
+        // Over-threshold 10.0 ms (>= 8.33 ms) -> unprofiled_hardware_or_smi_stall
+        trigger.duration_ms = 10.0;
+        auto rep_over = correlator.correlate(snapshot, trigger, qpc_freq, p_active);
+        STUTTO_ASSERT(!rep_over.diagnoses.empty());
+        STUTTO_ASSERT(rep_over.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
+    }
+
+    // 2. auto_scale_smi = false -> fixed thresholds.smi_severity_threshold_ms (33.3 ms) is honored
+    {
+        stuttometer::CorrelatorThresholds thresholds;
+        thresholds.auto_scale_smi = false;
+        thresholds.smi_severity_threshold_ms = 33.3;
+        stuttometer::CorrelationEngine correlator(driver_resolver, thresholds);
+
+        stuttometer::TriggerInfo trigger;
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+        trigger.target_pid = 4000;
+        trigger.target_tid = 8000;
+        trigger.baseline_avg_ms = 4.167; // 240 Hz
+
+        // 10.0 ms stall is < 33.3 ms -> does not trip SMI
+        trigger.duration_ms = 10.0;
+        auto rep_10ms = correlator.correlate(snapshot, trigger, qpc_freq, p_active);
+        STUTTO_ASSERT(!rep_10ms.diagnoses.empty());
+        STUTTO_ASSERT(rep_10ms.diagnoses[0].hypothesis == "insufficient_evidence");
+
+        // 35.0 ms stall is >= 33.3 ms -> trips SMI
+        trigger.duration_ms = 35.0;
+        auto rep_35ms = correlator.correlate(snapshot, trigger, qpc_freq, p_active);
+        STUTTO_ASSERT(!rep_35ms.diagnoses.empty());
+        STUTTO_ASSERT(rep_35ms.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
+    }
+
+    // 3. Fallback to report.hardware_vblank_ms when trigger.baseline_avg_ms == 0.0
+    {
+        stuttometer::CorrelatorThresholds thresholds;
+        thresholds.auto_scale_smi = true;
+        stuttometer::CorrelationEngine correlator(driver_resolver, thresholds);
+
+        stuttometer::TriggerInfo trigger;
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+        trigger.target_pid = 4000;
+        trigger.target_tid = 8000;
+        trigger.baseline_avg_ms = 0.0; // No baseline available
+
+        stuttometer::CorrelateOptions opts;
+        opts.hardware_vblank_ms = 6.944; // 144 Hz -> threshold is 2 * 6.944 = 13.888 ms
+
+        // 12.0 ms (< 13.888 ms) -> insufficient evidence
+        trigger.duration_ms = 12.0;
+        auto rep_12ms = correlator.correlate(snapshot, trigger, qpc_freq, opts, p_active);
+        STUTTO_ASSERT(!rep_12ms.diagnoses.empty());
+        STUTTO_ASSERT(rep_12ms.diagnoses[0].hypothesis == "insufficient_evidence");
+
+        // 15.0 ms (>= 13.888 ms) -> unprofiled_hardware_or_smi_stall
+        trigger.duration_ms = 15.0;
+        auto rep_15ms = correlator.correlate(snapshot, trigger, qpc_freq, opts, p_active);
+        STUTTO_ASSERT(!rep_15ms.diagnoses.empty());
+        STUTTO_ASSERT(rep_15ms.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
+    }
+
+    std::cout << "  -> SMI auto-scaling with high-refresh cadence and hardware_vblank_ms PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -1542,6 +1640,7 @@ int main() {
         test_smi_gap_with_benign_dpcs();
         test_correlator_attribution_pipeline_wiring();
         test_gpu_pipeline_stall_dxgi_relative_spike();
+        test_smi_auto_scaling_and_hardware_vblank();
         std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

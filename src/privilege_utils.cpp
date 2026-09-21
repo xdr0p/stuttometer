@@ -524,4 +524,75 @@ void rotate_directory_by_prefix(
     }
 }
 
+DisplayRefreshInfo query_display_refresh_info(uint32_t target_pid) noexcept {
+    DisplayRefreshInfo info{};
+    info.refresh_rate_hz = 60.0;
+    info.vblank_interval_ms = 16.67;
+    info.query_succeeded = false;
+
+    auto query_monitor = [](HMONITOR hmon, DisplayRefreshInfo& out_info) noexcept -> bool {
+        if (!hmon) return false;
+        MONITORINFOEXW mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(hmon, &mi)) {
+            DEVMODEW dm{};
+            dm.dmSize = sizeof(dm);
+            if (EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) {
+                out_info.refresh_rate_hz = static_cast<double>(dm.dmDisplayFrequency);
+                out_info.vblank_interval_ms = 1000.0 / static_cast<double>(dm.dmDisplayFrequency);
+                out_info.query_succeeded = true;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (target_pid != 0) {
+        // 1. Fullscreen-exclusive / active foreground check
+        HWND fg = GetForegroundWindow();
+        if (fg != nullptr) {
+            DWORD fg_pid = 0;
+            GetWindowThreadProcessId(fg, &fg_pid);
+            if (fg_pid == target_pid) {
+                HMONITOR hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+                if (query_monitor(hmon, info)) {
+                    return info;
+                }
+            }
+        }
+
+        // 2. Top-level window enumeration for target process
+        struct WindowSearchContext {
+            DWORD pid{0};
+            HWND found_hwnd{nullptr};
+        };
+        WindowSearchContext ctx{ target_pid, nullptr };
+        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+            auto* pctx = reinterpret_cast<WindowSearchContext*>(lParam);
+            DWORD wnd_pid = 0;
+            GetWindowThreadProcessId(hwnd, &wnd_pid);
+            if (wnd_pid == pctx->pid && IsWindowVisible(hwnd)) {
+                pctx->found_hwnd = hwnd;
+                return FALSE; // Found visible top-level window, stop enumeration
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&ctx));
+
+        if (ctx.found_hwnd != nullptr) {
+            HMONITOR hmon = MonitorFromWindow(ctx.found_hwnd, MONITOR_DEFAULTTONEAREST);
+            if (query_monitor(hmon, info)) {
+                return info;
+            }
+        }
+    }
+
+    // 3. Desktop primary monitor fallback
+    HMONITOR hmon_desktop = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+    if (query_monitor(hmon_desktop, info)) {
+        return info;
+    }
+
+    return info;
+}
+
 } // namespace stuttometer

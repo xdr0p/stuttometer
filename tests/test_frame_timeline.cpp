@@ -229,6 +229,79 @@ static void test_non_frame_trigger() {
     std::cout << "  -> Empty timeline on non-frame or no-DXGI trigger PASSED.\n";
 }
 
+static void test_high_refresh_timeline_tagging() {
+    std::cout << "[TEST] Validating high-refresh is_pacing_stall timeline tagging (144 Hz)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+    const uint32_t pid = 1234;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+
+    stuttometer::TriggerInfo trigger;
+    trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(500.0, qpc_freq);
+    trigger.duration_ms = 20.0;
+    trigger.baseline_avg_ms = 6.94; // 144 Hz cadence -> effective threshold = 6.94 + 0.5 = 7.44 ms
+    trigger.baseline_fps = 144.0;
+    trigger.spike_ratio = 20.0 / 6.94;
+    trigger.target_pid = pid;
+    trigger.target_tid = 5000;
+
+    // Generate frames around trigger:
+    const uint64_t interval_ticks = stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // Frame 1: clean frame (6.94 ms)
+    stuttometer::EtwEventRecord f1{};
+    f1.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+    f1.event_id = 43;
+    f1.pid = pid;
+    f1.tid = 5000;
+    f1.duration_us = 6940;
+    f1.qpc_timestamp = trigger.trigger_timestamp_qpc - (2 * interval_ticks);
+    snapshot.push_back(f1);
+
+    // Frame 2: 8.5 ms frame (above 7.44ms, but below default 16.67ms present threshold)
+    stuttometer::EtwEventRecord f2{};
+    f2.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+    f2.event_id = 43;
+    f2.pid = pid;
+    f2.tid = 5000;
+    f2.duration_us = 8500;
+    f2.qpc_timestamp = trigger.trigger_timestamp_qpc - interval_ticks;
+    snapshot.push_back(f2);
+
+    // Anchor frame: 20.0 ms
+    stuttometer::EtwEventRecord anchor{};
+    anchor.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+    anchor.event_id = 43;
+    anchor.pid = pid;
+    anchor.tid = 5000;
+    anchor.duration_us = 20000;
+    anchor.qpc_timestamp = trigger.trigger_timestamp_qpc;
+    snapshot.push_back(anchor);
+
+    stuttometer::CorrelateOptions opts;
+    opts.present_threshold_ms = 16.67; // Notice static threshold is 16.67, but baseline_avg_ms is 6.94
+    auto report = correlator.correlate(snapshot, trigger, qpc_freq, opts);
+
+    STUTTO_ASSERT(report.frame_timeline.size() == 3);
+    STUTTO_ASSERT(!report.frame_timeline[0].is_pacing_stall); // 6.94 ms < 7.44 ms
+    STUTTO_ASSERT(report.frame_timeline[1].is_pacing_stall);  // 8.5 ms >= 7.44 ms (tagged as stall because baseline is 144Hz!)
+    STUTTO_ASSERT(report.frame_timeline[2].is_pacing_stall);  // 20.0 ms >= 7.44 ms
+
+    // Fallback when baseline_avg_ms is 0.0 -> uses present_threshold_ms (16.67 ms -> threshold = 17.5035 ms)
+    trigger.baseline_avg_ms = 0.0;
+    auto report_fallback = correlator.correlate(snapshot, trigger, qpc_freq, opts);
+    STUTTO_ASSERT(report_fallback.frame_timeline.size() == 3);
+    STUTTO_ASSERT(!report_fallback.frame_timeline[0].is_pacing_stall); // 6.94 ms < 17.5 ms
+    STUTTO_ASSERT(!report_fallback.frame_timeline[1].is_pacing_stall); // 8.5 ms < 17.5 ms (not a stall under 16.67ms threshold!)
+    STUTTO_ASSERT(report_fallback.frame_timeline[2].is_pacing_stall);  // 20.0 ms >= 17.5 ms
+
+    std::cout << "  -> High-refresh is_pacing_stall timeline tagging PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Frame Timeline Unit Tests ===\n";
     try {
@@ -237,6 +310,7 @@ int main() {
         test_asymmetric_expand_pre();
         test_asymmetric_expand_post();
         test_non_frame_trigger();
+        test_high_refresh_timeline_tagging();
         std::cout << ">>> All Frame Timeline tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

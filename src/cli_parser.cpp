@@ -311,6 +311,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     out_config.dump_max_files = dump_max_files;
     out_config.export_csv_path = export_csv_path;
     out_config.target_pid_manual = (app.count("--target-pid") > 0 && target_pid != 0);
+    out_config.present_threshold_manual = (app.count("--present-threshold-ms") > 0);
+    out_config.smi_threshold_manual = (app.count("--smi-threshold-ms") > 0);
 
     return CliParseResult::SUCCESS;
 }

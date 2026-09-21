@@ -90,6 +90,7 @@ target_link_libraries(stuttometer_core
     nlohmann_json::nlohmann_json
     advapi32
     psapi
+    user32
   PRIVATE
     tdh
     CLI11::CLI11

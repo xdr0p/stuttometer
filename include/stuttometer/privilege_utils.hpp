@@ -19,6 +19,14 @@ bool enable_system_profile_privilege();
 // Validate Windows OS version is Windows 10/11 x64 (build >= 19041)
 bool is_supported_windows_build();
 
+// Display refresh rate and physical vblank cadence query
+struct DisplayRefreshInfo {
+    double refresh_rate_hz{60.0};
+    double vblank_interval_ms{16.67};
+    bool query_succeeded{false};
+};
+[[nodiscard]] DisplayRefreshInfo query_display_refresh_info(uint32_t target_pid = 0) noexcept;
+
 // High-resolution QPC helpers
 uint64_t get_qpc_frequency();
 uint64_t get_current_qpc();

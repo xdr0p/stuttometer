@@ -25,6 +25,8 @@ struct OsdToastData {
     double confidence{0.0};
     stuttometer::TriggerSource source{stuttometer::TriggerSource::DXGI_PRESENT_STUTTER};
     uint32_t glitch_count{0};
+    double present_threshold_ms{16.67};
+    stuttometer::TriggerInfo trigger{};
 };
 
 class OsdToast {
@@ -70,10 +72,6 @@ private:
 
     HBRUSH br_bg_{nullptr};
     HPEN pen_border_{nullptr};
-    HBRUSH br_accent_game_{nullptr};
-    HBRUSH br_accent_dwm_{nullptr};
-    HBRUSH br_accent_ext_{nullptr};
-    HBRUSH br_accent_unk_{nullptr};
 
     static constexpr UINT_PTR TIMER_ID = 1001;
     static constexpr uint32_t FADE_IN_MS = 150;

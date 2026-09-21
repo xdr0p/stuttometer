@@ -159,10 +159,10 @@ void GdiThemeCache::init() {
     pen_btn_quick_pressed = CreatePen(PS_SOLID, 1, RGB(42, 50, 68));
 
     // Cached Attribution & Iconography Brushes (unified 35% desaturated palette)
-    br_attr_game_engine = CreateSolidBrush(RGB(218, 161, 66));
-    br_attr_dwm_composition = CreateSolidBrush(RGB(154, 100, 205));
-    br_attr_external_contention = CreateSolidBrush(RGB(197, 86, 86));
-    br_attr_unknown = CreateSolidBrush(RGB(105, 115, 130));
+    br_attr_game_engine = CreateSolidBrush(COLOR_ATTR_GAME_ENGINE);
+    br_attr_dwm_composition = CreateSolidBrush(COLOR_ATTR_DWM_COMPOSITION);
+    br_attr_external_contention = CreateSolidBrush(COLOR_ATTR_EXTERNAL_CONTENTION);
+    br_attr_unknown = CreateSolidBrush(COLOR_ATTR_UNKNOWN);
     br_beacon_idle = CreateSolidBrush(RGB(75, 85, 99));
 
     // Buttons: Disabled
@@ -212,58 +212,80 @@ void GdiThemeCache::init() {
 }
 
 void GdiThemeCache::destroy() {
-    if (br_bg) DeleteObject(br_bg);
-    if (br_header) DeleteObject(br_header);
-    if (br_card) DeleteObject(br_card);
-    if (br_input) DeleteObject(br_input);
-    if (br_list_bg) DeleteObject(br_list_bg);
-    if (br_list_alt) DeleteObject(br_list_alt);
-    if (br_list_sel) DeleteObject(br_list_sel);
-    if (br_pill) DeleteObject(br_pill);
-    if (br_badge) DeleteObject(br_badge);
-    if (br_list_hdr_bg) DeleteObject(br_list_hdr_bg);
+    auto safe_delete_brush = [](HBRUSH& b) {
+        if (b) { DeleteObject(b); b = nullptr; }
+    };
+    auto safe_delete_pen = [](HPEN& p) {
+        if (p) { DeleteObject(p); p = nullptr; }
+    };
 
-    if (br_btn_emerald) DeleteObject(br_btn_emerald);
-    if (br_btn_emerald_hover) DeleteObject(br_btn_emerald_hover);
-    if (br_btn_emerald_pressed) DeleteObject(br_btn_emerald_pressed);
-    if (br_btn_danger) DeleteObject(br_btn_danger);
-    if (br_btn_danger_hover) DeleteObject(br_btn_danger_hover);
-    if (br_btn_danger_pressed) DeleteObject(br_btn_danger_pressed);
-    if (br_btn_slate) DeleteObject(br_btn_slate);
-    if (br_btn_slate_hover) DeleteObject(br_btn_slate_hover);
-    if (br_btn_slate_pressed) DeleteObject(br_btn_slate_pressed);
-    if (br_btn_quick) DeleteObject(br_btn_quick);
-    if (br_btn_quick_hover) DeleteObject(br_btn_quick_hover);
-    if (br_btn_quick_pressed) DeleteObject(br_btn_quick_pressed);
-    if (br_btn_disabled) DeleteObject(br_btn_disabled);
-    if (br_attr_game_engine) DeleteObject(br_attr_game_engine);
-    if (br_attr_dwm_composition) DeleteObject(br_attr_dwm_composition);
-    if (br_attr_external_contention) DeleteObject(br_attr_external_contention);
-    if (br_attr_unknown) DeleteObject(br_attr_unknown);
-    if (br_beacon_idle) DeleteObject(br_beacon_idle);
+    safe_delete_brush(br_bg);
+    safe_delete_brush(br_header);
+    safe_delete_brush(br_card);
+    safe_delete_brush(br_input);
+    safe_delete_brush(br_list_bg);
+    safe_delete_brush(br_list_alt);
+    safe_delete_brush(br_list_sel);
+    safe_delete_brush(br_pill);
+    safe_delete_brush(br_badge);
+    safe_delete_brush(br_list_hdr_bg);
 
-    if (pen_header_border) DeleteObject(pen_header_border);
-    if (pen_card_border) DeleteObject(pen_card_border);
-    if (pen_card_divider) DeleteObject(pen_card_divider);
-    if (pen_input_border) DeleteObject(pen_input_border);
-    if (pen_pill_border) DeleteObject(pen_pill_border);
-    if (pen_badge_border) DeleteObject(pen_badge_border);
-    if (pen_list_hdr_border) DeleteObject(pen_list_hdr_border);
-    if (pen_focus_border) DeleteObject(pen_focus_border);
+    safe_delete_brush(br_btn_emerald);
+    safe_delete_brush(br_btn_emerald_hover);
+    safe_delete_brush(br_btn_emerald_pressed);
+    safe_delete_brush(br_btn_danger);
+    safe_delete_brush(br_btn_danger_hover);
+    safe_delete_brush(br_btn_danger_pressed);
+    safe_delete_brush(br_btn_slate);
+    safe_delete_brush(br_btn_slate_hover);
+    safe_delete_brush(br_btn_slate_pressed);
+    safe_delete_brush(br_btn_quick);
+    safe_delete_brush(br_btn_quick_hover);
+    safe_delete_brush(br_btn_quick_pressed);
+    safe_delete_brush(br_btn_disabled);
+    safe_delete_brush(br_attr_game_engine);
+    safe_delete_brush(br_attr_dwm_composition);
+    safe_delete_brush(br_attr_external_contention);
+    safe_delete_brush(br_attr_unknown);
+    safe_delete_brush(br_beacon_idle);
 
-    if (pen_btn_emerald) DeleteObject(pen_btn_emerald);
-    if (pen_btn_emerald_hover) DeleteObject(pen_btn_emerald_hover);
-    if (pen_btn_emerald_pressed) DeleteObject(pen_btn_emerald_pressed);
-    if (pen_btn_danger) DeleteObject(pen_btn_danger);
-    if (pen_btn_danger_hover) DeleteObject(pen_btn_danger_hover);
-    if (pen_btn_danger_pressed) DeleteObject(pen_btn_danger_pressed);
-    if (pen_btn_slate) DeleteObject(pen_btn_slate);
-    if (pen_btn_slate_hover) DeleteObject(pen_btn_slate_hover);
-    if (pen_btn_slate_pressed) DeleteObject(pen_btn_slate_pressed);
-    if (pen_btn_quick) DeleteObject(pen_btn_quick);
-    if (pen_btn_quick_hover) DeleteObject(pen_btn_quick_hover);
-    if (pen_btn_quick_pressed) DeleteObject(pen_btn_quick_pressed);
-    if (pen_btn_disabled) DeleteObject(pen_btn_disabled);
+    safe_delete_pen(pen_header_border);
+    safe_delete_pen(pen_card_border);
+    safe_delete_pen(pen_card_divider);
+    safe_delete_pen(pen_input_border);
+    safe_delete_pen(pen_pill_border);
+    safe_delete_pen(pen_badge_border);
+    safe_delete_pen(pen_list_hdr_border);
+    safe_delete_pen(pen_focus_border);
+
+    safe_delete_pen(pen_btn_emerald);
+    safe_delete_pen(pen_btn_emerald_hover);
+    safe_delete_pen(pen_btn_emerald_pressed);
+    safe_delete_pen(pen_btn_danger);
+    safe_delete_pen(pen_btn_danger_hover);
+    safe_delete_pen(pen_btn_danger_pressed);
+    safe_delete_pen(pen_btn_slate);
+    safe_delete_pen(pen_btn_slate_hover);
+    safe_delete_pen(pen_btn_slate_pressed);
+    safe_delete_pen(pen_btn_quick);
+    safe_delete_pen(pen_btn_quick_hover);
+    safe_delete_pen(pen_btn_quick_pressed);
+    safe_delete_pen(pen_btn_disabled);
+}
+
+HBRUSH get_attribution_brush(AttributionTag tag) noexcept {
+    HBRUSH fallback = g_theme.br_attr_unknown ? g_theme.br_attr_unknown : static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    switch (tag) {
+        case AttributionTag::GAME_ENGINE:
+            return g_theme.br_attr_game_engine ? g_theme.br_attr_game_engine : fallback;
+        case AttributionTag::DWM_COMPOSITION:
+            return g_theme.br_attr_dwm_composition ? g_theme.br_attr_dwm_composition : fallback;
+        case AttributionTag::EXTERNAL_CONTENTION:
+            return g_theme.br_attr_external_contention ? g_theme.br_attr_external_contention : fallback;
+        case AttributionTag::UNKNOWN:
+        default:
+            return fallback;
+    }
 }
 
 } // namespace stuttometer::gui

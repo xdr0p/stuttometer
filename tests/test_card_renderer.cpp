@@ -4,6 +4,7 @@
 
 #include "test_common.hpp"
 #include "card_renderer.hpp"
+#include "theme.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
 #include "stuttometer/version.hpp"
 
@@ -563,18 +564,18 @@ static void test_ui_ux_regressions() {
         STUTTO_ASSERT(detail::format_center_label(999.9) == L"Trigger (0 ms)");
         STUTTO_ASSERT(detail::format_center_label(500.0) == L"Trigger (0 ms)");
 
-        STUTTO_ASSERT(detail::classify_stall(45.5, 2.74, 0.0, false, 0) == detail::MetricSeverity::Warning);
-        STUTTO_ASSERT(detail::classify_stall(50.0, 1.0, 0.0, false, 0) == detail::MetricSeverity::Danger);
-        STUTTO_ASSERT(detail::classify_stall(49.9, 1.9, 0.0, false, 0) == detail::MetricSeverity::Warning);
-        STUTTO_ASSERT(detail::classify_stall(24.9, 1.9, 0.0, false, 0) == detail::MetricSeverity::Normal);
-        STUTTO_ASSERT(detail::classify_stall(24.9, 2.0, 0.0, false, 0) == detail::MetricSeverity::Warning);
-        STUTTO_ASSERT(detail::classify_stall(24.9, 1.99, 0.30, false, 0) == detail::MetricSeverity::Warning);
-        STUTTO_ASSERT(detail::classify_stall(24.9, 1.99, 0.60, false, 0) == detail::MetricSeverity::Warning);
-        STUTTO_ASSERT(detail::classify_stall(24.9, 1.99, 0.601, false, 0) == detail::MetricSeverity::Danger);
-        STUTTO_ASSERT(detail::classify_stall(0.0, 0.0, 0.633, false, 0) == detail::MetricSeverity::Danger);
-        STUTTO_ASSERT(detail::classify_stall(0.0, 0.0, 0.0, true, 2) == detail::MetricSeverity::Danger);
-        STUTTO_ASSERT(detail::classify_stall(0.0, 0.0, 0.0, true, 0) == detail::MetricSeverity::Normal);
-        STUTTO_ASSERT(detail::classify_stall(10.0, 0.60, 0.0, false, 0) == detail::MetricSeverity::Normal);
+        STUTTO_ASSERT(detail::classify_stall(45.5, 2.74, 0.0, false, 0) == detail::MetricSeverity::WARNING);
+        STUTTO_ASSERT(detail::classify_stall(52.0, 1.0, 0.0, false, 0) == detail::MetricSeverity::DANGER);
+        STUTTO_ASSERT(detail::classify_stall(48.0, 1.9, 0.0, false, 0) == detail::MetricSeverity::WARNING);
+        STUTTO_ASSERT(detail::classify_stall(24.0, 1.9, 0.0, false, 0) == detail::MetricSeverity::NORMAL);
+        STUTTO_ASSERT(detail::classify_stall(24.0, 2.0, 0.0, false, 0) == detail::MetricSeverity::WARNING);
+        STUTTO_ASSERT(detail::classify_stall(24.0, 1.99, 0.30, false, 0) == detail::MetricSeverity::WARNING);
+        STUTTO_ASSERT(detail::classify_stall(24.0, 1.99, 0.60, false, 0) == detail::MetricSeverity::WARNING);
+        STUTTO_ASSERT(detail::classify_stall(24.0, 1.99, 0.601, false, 0) == detail::MetricSeverity::DANGER);
+        STUTTO_ASSERT(detail::classify_stall(0.0, 0.0, 0.633, false, 0) == detail::MetricSeverity::DANGER);
+        STUTTO_ASSERT(detail::classify_stall(0.0, 0.0, 0.0, true, 2) == detail::MetricSeverity::DANGER);
+        STUTTO_ASSERT(detail::classify_stall(0.0, 0.0, 0.0, true, 0) == detail::MetricSeverity::NORMAL);
+        STUTTO_ASSERT(detail::classify_stall(10.0, 0.60, 0.0, false, 0) == detail::MetricSeverity::NORMAL);
     }
 
     auto report = create_dummy_report();
@@ -1293,9 +1294,34 @@ static void test_ui_ux_regressions() {
     std::cout << "  -> UI/UX regressions (v7) PASSED.\n";
 }
 
+static void test_palette_and_theme() {
+    using stuttometer::AttributionTag;
+    using stuttometer::MetricSeverity;
+
+    // Attribution colors match centralized palette constants
+    STUTTO_ASSERT(get_attribution_color(AttributionTag::GAME_ENGINE) == COLOR_ATTR_GAME_ENGINE);
+    STUTTO_ASSERT(get_attribution_color(AttributionTag::DWM_COMPOSITION) == COLOR_ATTR_DWM_COMPOSITION);
+    STUTTO_ASSERT(get_attribution_color(AttributionTag::EXTERNAL_CONTENTION) == COLOR_ATTR_EXTERNAL_CONTENTION);
+    STUTTO_ASSERT(get_attribution_color(AttributionTag::UNKNOWN) == COLOR_ATTR_UNKNOWN);
+    STUTTO_ASSERT(get_attribution_color(static_cast<AttributionTag>(99)) == COLOR_ATTR_UNKNOWN);
+
+    // Severity colors match centralized palette constants
+    STUTTO_ASSERT(get_severity_color(MetricSeverity::NORMAL) == COLOR_SEV_NORMAL);
+    STUTTO_ASSERT(get_severity_color(MetricSeverity::WARNING) == COLOR_SEV_WARNING);
+    STUTTO_ASSERT(get_severity_color(MetricSeverity::DANGER) == COLOR_SEV_DANGER);
+    STUTTO_ASSERT(get_severity_color(static_cast<MetricSeverity>(99)) == COLOR_SEV_NORMAL);
+
+    // Monotonic ordering
+    STUTTO_ASSERT(static_cast<uint8_t>(MetricSeverity::NORMAL) < static_cast<uint8_t>(MetricSeverity::WARNING));
+    STUTTO_ASSERT(static_cast<uint8_t>(MetricSeverity::WARNING) < static_cast<uint8_t>(MetricSeverity::DANGER));
+
+    std::cout << "  -> Centralized Palette & Theme (v1.0) PASSED.\n";
+}
+
 int main() {
     try {
         test_initialization();
+        test_palette_and_theme();
         test_png_encoding_and_sampling();
         test_clipboard_roundtrip();
         test_attribution_tags();

@@ -36,6 +36,7 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
         {"window_pre_ms", report.window_pre_ms},
         {"window_post_ms", report.window_post_ms},
         {"present_threshold_ms", report.present_threshold_ms},
+        {"hardware_vblank_ms", report.hardware_vblank_ms},
         {"provider_tier", report.provider_tier},
         {"redacted", redact},
         {"thresholds", {

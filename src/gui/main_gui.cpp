@@ -1014,15 +1014,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 if (g_selected_stutter_index >= 0 && g_selected_stutter_index < static_cast<int>(g_stutters.size())) {
                     const auto& rec = g_stutters[g_selected_stutter_index];
                     std::wstring tag_text = utf8_to_wstring(attribution_to_string(rec.report ? rec.report->attribution : AttributionTag::UNKNOWN));
-                    COLORREF tag_color = RGB(105, 115, 130);
-                    if (rec.report) {
-                        switch (rec.report->attribution) {
-                            case AttributionTag::GAME_ENGINE: tag_color = RGB(218, 161, 66); break;
-                            case AttributionTag::DWM_COMPOSITION: tag_color = RGB(154, 100, 205); break;
-                            case AttributionTag::EXTERNAL_CONTENTION: tag_color = RGB(197, 86, 86); break;
-                            case AttributionTag::UNKNOWN: default: tag_color = RGB(105, 115, 130); break;
-                        }
-                    }
+                    COLORREF tag_color = get_attribution_color(rec.report ? rec.report->attribution : AttributionTag::UNKNOWN);
 
                     wchar_t conf_text[32];
                     swprintf_s(conf_text, L"%.1f%% Conf", rec.confidence * 100.0);
@@ -1222,9 +1214,12 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                                 if (item_idx >= 0 && item_idx < static_cast<int>(g_stutters.size())) {
                                     const auto& rec = g_stutters[item_idx];
                                     if (sub_idx == 4) { // Duration
-                                        if (rec.report && (rec.report->trigger.source == TriggerSource::FRAME_PACING_JUDDER || rec.duration_ms >= 50.0)) {
-                                            pCustomDraw->clrText = COLOR_ACCENT_AMB;
+                                        if (!rec.report) {
+                                            pCustomDraw->clrText = COLOR_SEV_NORMAL;
+                                            return CDRF_DODEFAULT;
                                         }
+                                        MetricSeverity sev = classify_severity(rec.report->trigger, rec.report->present_threshold_ms);
+                                        pCustomDraw->clrText = get_severity_color(sev);
                                     } else if (sub_idx == 6) { // Confidence
                                         if (rec.confidence >= 0.80) {
                                             pCustomDraw->clrText = COLOR_ACCENT_EMERALD;
@@ -1243,15 +1238,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                             int item_idx = static_cast<int>(pCustomDraw->nmcd.dwItemSpec);
                             if (item_idx >= 0 && item_idx < static_cast<int>(g_stutters.size())) {
                                 const auto& rec = g_stutters[item_idx];
-                                HBRUSH h_stripe_br = g_theme.br_attr_unknown;
-                                if (rec.report) {
-                                    switch (rec.report->attribution) {
-                                        case AttributionTag::GAME_ENGINE:         h_stripe_br = g_theme.br_attr_game_engine; break;
-                                        case AttributionTag::DWM_COMPOSITION:     h_stripe_br = g_theme.br_attr_dwm_composition; break;
-                                        case AttributionTag::EXTERNAL_CONTENTION: h_stripe_br = g_theme.br_attr_external_contention; break;
-                                        case AttributionTag::UNKNOWN: default:    h_stripe_br = g_theme.br_attr_unknown; break;
-                                    }
-                                }
+                                HBRUSH h_stripe_br = get_attribution_brush(rec.report ? rec.report->attribution : AttributionTag::UNKNOWN);
                                 RECT rc_stripe = pCustomDraw->nmcd.rc;
                                 rc_stripe.right = rc_stripe.left + scale_dpi(3);
                                 FillRect(pCustomDraw->nmcd.hdc, &rc_stripe, h_stripe_br);

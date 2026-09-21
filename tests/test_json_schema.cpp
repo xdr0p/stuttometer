@@ -57,6 +57,7 @@ static void test_json_serialization_and_deep_redaction() {
     STUTTO_ASSERT(j_plain["trigger"]["target_process"] == "ConfidentialGame.exe");
     STUTTO_ASSERT(j_plain["trigger"]["target_pid"] == 7788);
     STUTTO_ASSERT(j_plain["trigger"]["duration_ms"] == 48.5);
+    STUTTO_ASSERT(j_plain["configuration"].contains("hardware_vblank_ms"));
     STUTTO_ASSERT(j_plain["configuration"]["thresholds"]["dpc_threshold_us"] == 1000);
     STUTTO_ASSERT(j_plain["configuration"]["thresholds"]["smi_severity_threshold_ms"] == 33.3);
     STUTTO_ASSERT(j_plain["configuration"]["thresholds"]["d3d12_pso_threshold_ms"] == 5);

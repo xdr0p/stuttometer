@@ -227,6 +227,62 @@ static void test_help_flags() {
     std::cout << "  -> Help flags verified.\n";
 }
 
+static void test_manual_threshold_flags() {
+    std::cout << "[TEST] Testing manual threshold tracking flags...\n";
+
+    // 1. Defaults: neither flag present
+    {
+        const char* argv[] = { "stuttometer.exe" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(1, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(!config.present_threshold_manual);
+        STUTTO_ASSERT(!config.smi_threshold_manual);
+        STUTTO_ASSERT(config.present_threshold_ms == 16.67);
+        STUTTO_ASSERT(config.smi_severity_threshold_ms == 33.3);
+    }
+
+    // 2. Explicit --present-threshold-ms
+    {
+        const char* argv[] = { "stuttometer.exe", "--present-threshold-ms", "20.0" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.present_threshold_manual);
+        STUTTO_ASSERT(!config.smi_threshold_manual);
+        STUTTO_ASSERT(config.present_threshold_ms == 20.0);
+    }
+
+    // 3. Explicit --smi-threshold-ms
+    {
+        const char* argv[] = { "stuttometer.exe", "--smi-threshold-ms", "45.0" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(!config.present_threshold_manual);
+        STUTTO_ASSERT(config.smi_threshold_manual);
+        STUTTO_ASSERT(config.smi_severity_threshold_ms == 45.0);
+    }
+
+    // 4. Both flags together
+    {
+        const char* argv[] = { "stuttometer.exe", "--present-threshold-ms", "8.33", "--smi-threshold-ms", "25.0" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(5, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.present_threshold_manual);
+        STUTTO_ASSERT(config.smi_threshold_manual);
+        STUTTO_ASSERT(config.present_threshold_ms == 8.33);
+        STUTTO_ASSERT(config.smi_severity_threshold_ms == 25.0);
+    }
+
+    std::cout << "  -> Manual threshold tracking flags verified.\n";
+}
+
 int main() {
     try {
         test_pacing_profile_parsing();
@@ -237,6 +293,7 @@ int main() {
         test_version_and_self_check();
         test_range_validations();
         test_help_flags();
+        test_manual_threshold_flags();
 
         std::cout << "\n[ALL CLI ARGS TESTS PASSED]\n";
         return 0;

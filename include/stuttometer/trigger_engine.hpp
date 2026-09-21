@@ -3,7 +3,6 @@
 #include <string>
 #include <cstdint>
 #include <atomic>
-#include <mutex>
 #include <string_view>
 #include "frame_pacing_tracker.hpp"
 #include "fixed_table.hpp"
@@ -69,7 +68,8 @@ static_assert(std::is_trivially_copyable_v<TriggerInfo>, "TriggerInfo must be tr
 struct TriggerConfig {
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{25.0};
+    double present_threshold_ms{16.67};
+    double vblank_interval_ms{0.0};
     bool audio_trigger_enabled{true};
     double cooldown_ms{1000.0};
     uint32_t target_pid{0};             // 0 = auto-detect / all
@@ -138,12 +138,37 @@ public:
 
     TriggerState current_state() const noexcept { return state_.load(std::memory_order_relaxed); }
     uint64_t suppressed_trigger_count() const noexcept { return suppressed_triggers_.load(std::memory_order_relaxed); }
-    double vblank_interval_ms() const noexcept { return config_.present_threshold_ms; }
+    [[nodiscard]] double vblank_interval_ms() const noexcept {
+        return (config_.vblank_interval_ms > 0.0) 
+            ? config_.vblank_interval_ms 
+            : config_.present_threshold_ms;
+    }
 
     void evict_stale_pacing_entries(uint64_t current_qpc, uint64_t max_age_qpc) noexcept {
         pacing_table_.evict_stale(current_qpc, max_age_qpc, [](const RollingFrameStats& s) {
             return s.last_frame_timestamp_qpc;
         });
+    }
+
+    // Test-only seam: must call reset_test_seams() prior to test scenarios that rely on these hooks
+    void set_pause_after_claim_for_test(bool p) noexcept {
+        pause_after_claim_for_test_.store(p, std::memory_order_release);
+    }
+    void set_pause_only_generation_for_test(uint64_t gen) noexcept {
+        pause_only_generation_for_test_.store(gen, std::memory_order_release);
+    }
+    bool claim_phase_entered_for_test() const noexcept {
+        return claim_phase_entered_for_test_.load(std::memory_order_acquire);
+    }
+    uint64_t current_claim_generation_for_test() const noexcept {
+        return claim_generation_.load(std::memory_order_acquire);
+    }
+    void reset_test_seams() noexcept {
+        // Note: claim_generation_ is monotonic and intentionally NOT reset.
+        // Tests targeting a specific generation should use current_claim_generation_for_test() + 1.
+        pause_after_claim_for_test_.store(false, std::memory_order_release);
+        claim_phase_entered_for_test_.store(false, std::memory_order_release);
+        pause_only_generation_for_test_.store(0, std::memory_order_release);
     }
 
     // Test-only: returns the current rolling baseline for the specified stream key (or derived pid/tid).
@@ -200,8 +225,7 @@ private:
     std::atomic<bool> dxgi_observed_for_target_{false};
     std::atomic<uint64_t> last_dxgi_timestamp_qpc_{0};
     std::atomic<uint64_t> target_attach_qpc_{0};
-    uint32_t last_target_pid_{0};
-    std::mutex target_change_mutex_;
+    std::atomic<uint32_t> last_target_pid_{0};
 
     // Indivisible 64-bit atomic target state: High 32-bits = target_pid, Low 32-bits = waiting_for_process flag
     std::atomic<uint64_t> target_state_{0};
@@ -212,9 +236,18 @@ private:
     // Staged GPU trigger upgrade duration during COLLECTING_POST phase (thread-safe lock-free)
     std::atomic<uint32_t> staged_gpu_duration_us_{0};
 
-    // Stored trigger metadata populated under CLAIMED state, guarded against watchdog races by active_trigger_mutex_
-    mutable std::mutex active_trigger_mutex_;
+    // Stored trigger metadata populated under CLAIMED state, published lock-free via seqlock
+    alignas(64) std::atomic<uint64_t> active_trigger_seq_{0};
+    alignas(64) std::atomic<uint64_t> claim_generation_{0};
+    std::atomic_flag writer_lock_{};
     TriggerInfo active_trigger_{};
+
+    // Test-only seams (unconditional member variables, matching set_running_for_test pattern)
+    std::atomic<bool> pause_after_claim_for_test_{false};
+    std::atomic<bool> claim_phase_entered_for_test_{false};
+    // 0 = no thread pauses; otherwise only the thread whose my_gen matches pause_only_generation_for_test_ pauses
+    std::atomic<uint64_t> pause_only_generation_for_test_{0};
+
     std::atomic<uint64_t> claimed_timestamp_qpc_{0};
     std::atomic<uint64_t> post_target_qpc_{0};
     std::atomic<uint64_t> frozen_timestamp_qpc_{0};

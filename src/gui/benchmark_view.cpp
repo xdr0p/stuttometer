@@ -1,4 +1,5 @@
 #include "benchmark_view.hpp"
+#include "theme.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
@@ -64,22 +65,6 @@ static void refresh_cached_summary(BenchmarkViewState* state) {
     state->cached_summary = state->benchmark->get_summary(state->redact);
     state->summary_valid = true;
     update_button_states(state);
-}
-
-static void apply_window_dark_titlebar(HWND hwnd) {
-    if (!hwnd) return;
-    BOOL use_dark_mode = TRUE;
-    if (FAILED(DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &use_dark_mode, sizeof(use_dark_mode)))) {
-        DwmSetWindowAttribute(hwnd, 19 /*DWMWA_USE_IMMERSIVE_DARK_MODE_OLD*/, &use_dark_mode, sizeof(use_dark_mode));
-    }
-    COLORREF caption_color = RGB(13, 17, 23);
-    COLORREF text_color    = RGB(226, 232, 240);
-    COLORREF border_color  = RGB(36, 43, 61);
-    DwmSetWindowAttribute(hwnd, 35 /*DWMWA_CAPTION_COLOR*/, &caption_color, sizeof(caption_color));
-    DwmSetWindowAttribute(hwnd, 36 /*DWMWA_TEXT_COLOR*/, &text_color, sizeof(text_color));
-    DwmSetWindowAttribute(hwnd, 34 /*DWMWA_BORDER_COLOR*/, &border_color, sizeof(border_color));
-    DWORD corner_pref = 2 /*DWMWCP_ROUND*/;
-    (void)DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &corner_pref, sizeof(corner_pref));
 }
 
 static void update_fonts(BenchmarkViewState* state, int dpi) {
@@ -638,9 +623,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                     bind_floor_str = bf_buf;
                 }
 
-                double base_thresh = (summary.static_floor_ms > 0.0)
-                    ? ((summary.static_floor_ms <= 10.5) ? std::max(0.0, summary.static_floor_ms - 0.5) : (summary.static_floor_ms / 1.05))
-                    : 0.0;
+                double base_thresh = invert_effective_static_threshold(summary.static_floor_ms);
                 wchar_t sf_buf[128];
                 swprintf_s(sf_buf, L"\u2265 %.1f ms (%.1f ms + 5%% margin)", summary.static_floor_ms, base_thresh);
                 std::wstring static_thresh_str = sf_buf;
@@ -778,6 +761,10 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                             FillRect(mem_dc, &row_rc, r_br);
                             DeleteObject(r_br);
                         }
+
+                        AttributionTag tag = attribution_tag_for_hypothesis(c.hypothesis);
+                        RECT stripe_rc = { table_rc.left + scale(8), row_y, table_rc.left + scale(8) + scale(3), row_y + row_h };
+                        FillRect(mem_dc, &stripe_rc, get_attribution_brush(tag));
 
                         SelectObject(mem_dc, state->font_regular);
                         SetTextColor(mem_dc, RGB(226, 232, 240));

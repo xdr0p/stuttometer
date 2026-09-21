@@ -32,6 +32,8 @@ public:
 
     // Snapshot records within the given QPC timestamp window [from_qpc, to_qpc].
     // Extracted records are sorted chronologically by qpc_timestamp.
+    // out_dropped_count: optional pointer receiving the count of reader-observed dropped
+    // events in this snapshot (slots lapped by newer writes or torn mid-copy).
     std::vector<EtwEventRecord> snapshot(uint64_t from_qpc, uint64_t to_qpc, uint64_t* out_dropped_count = nullptr) const;
 
     // Diagnostics & Statistics

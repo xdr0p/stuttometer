@@ -10,6 +10,7 @@
 #include "stuttometer/cli_parser.hpp"
 #include "stuttometer/version.hpp"
 #include <iostream>
+#include <iomanip>
 #include <atomic>
 #include <thread>
 #include <chrono>
@@ -222,6 +223,28 @@ int main(int argc, char** argv) {
     trig_config.enable_judder_detection = enable_judder;
     trig_config.judder_swing_ratio = judder_swing_ratio;
 
+    stuttometer::DisplayRefreshInfo disp_info = stuttometer::query_display_refresh_info(target_pid);
+    trig_config.vblank_interval_ms = disp_info.vblank_interval_ms;
+    if (!config.present_threshold_manual) {
+        present_threshold_ms = disp_info.vblank_interval_ms;
+        trig_config.present_threshold_ms = present_threshold_ms;
+    }
+    if (disp_info.query_succeeded) {
+        std::cout << "[STUTTOMETER] Auto-detected display refresh: " 
+                  << disp_info.refresh_rate_hz << " Hz (vblank: " 
+                  << std::fixed << std::setprecision(2) << disp_info.vblank_interval_ms << " ms)\n";
+    } else {
+        std::cout << "[STUTTOMETER] Notice: Display refresh detection unavailable; defaulting to 60.0 Hz (16.67 ms).\n";
+    }
+    if (config.present_threshold_manual && (present_threshold_ms > 2.0 * disp_info.vblank_interval_ms)) {
+        std::cout << "[STUTTOMETER] Notice: Configured stutter threshold (" 
+                  << std::fixed << std::setprecision(1) << present_threshold_ms << " ms) is >2.0x "
+                  << "the detected display refresh interval ("
+                  << disp_info.vblank_interval_ms << " ms, "
+                  << std::setprecision(0) << disp_info.refresh_rate_hz << " Hz). "
+                  << "Stutters under " << std::setprecision(1) << present_threshold_ms << " ms will not be reported.\n";
+    }
+
     stuttometer::TriggerEngine trigger_engine(trig_config, qpc_freq);
     stuttometer::EtwSessionManager session_mgr(flight_recorder, trigger_engine, etw_config);
     if (ndjson_writer) {
@@ -257,6 +280,9 @@ int main(int argc, char** argv) {
     thresholds.mem_alloc_threshold_mb = mem_alloc_threshold_mb;
     thresholds.mem_trim_threshold_mb = mem_trim_threshold_mb;
     thresholds.mem_physical_latency_us = mem_physical_latency_us;
+    if (config.smi_threshold_manual || config.smi_severity_threshold_ms != 33.3) {
+        thresholds.auto_scale_smi = false;
+    }
 
     stuttometer::CorrelationEngine correlator(driver_resolver, thresholds);
     stuttometer::JsonReporter reporter;
@@ -350,6 +376,7 @@ int main(int argc, char** argv) {
                     .window_pre_ms = window_pre_ms,
                     .window_post_ms = window_post_ms,
                     .present_threshold_ms = present_threshold_ms,
+                    .hardware_vblank_ms = trig_config.vblank_interval_ms,
                     .provider_tier = provider_tier,
                     .redact = redact
                 };

@@ -692,6 +692,33 @@ static void test_adaptive_trigger_60fps() {
     std::cout << "  -> 60 FPS adaptive trigger verified (17.0ms clean, 20.0ms static, 35.0ms spike).\n";
 }
 
+static void test_invert_effective_static_threshold() {
+    std::cout << "[TEST] Validating invert_effective_static_threshold round-trip math...\n";
+
+    STUTTO_ASSERT(stuttometer::invert_effective_static_threshold(0.0) == 0.0);
+    STUTTO_ASSERT(stuttometer::invert_effective_static_threshold(-5.0) == 0.0);
+
+    // Below transition (0.5 ms guard): effective = base + 0.5
+    STUTTO_ASSERT(std::abs(stuttometer::invert_effective_static_threshold(5.5) - 5.0) < 1e-9);
+    STUTTO_ASSERT(std::abs(stuttometer::invert_effective_static_threshold(10.5) - 10.0) < 1e-9);
+
+    // Above transition (5% guard): effective = base * 1.05
+    // 16.67 * 1.05 = 17.5035
+    STUTTO_ASSERT(std::abs(stuttometer::invert_effective_static_threshold(17.5035) - 16.67) < 1e-4);
+    // 33.33333333 * 1.05 = 35.0
+    STUTTO_ASSERT(std::abs(stuttometer::invert_effective_static_threshold(35.0) - (1000.0 / 30.0)) < 1e-4);
+
+    // Round-trip validation against calculate_effective_static_threshold
+    const double test_thresholds[] = { 1.0, 4.167, 6.944, 8.333, 10.0, 11.111, 16.67, 33.333, 50.0 };
+    for (double base : test_thresholds) {
+        double effective = stuttometer::calculate_effective_static_threshold(base);
+        double inverted = stuttometer::invert_effective_static_threshold(effective);
+        STUTTO_ASSERT(std::abs(inverted - base) < 1e-9);
+    }
+
+    std::cout << "  -> invert_effective_static_threshold round-trip verified.\n";
+}
+
 int main() {
     std::cout << "================================================================\n";
     std::cout << " STUTTOMETER FRAME PACING & STATISTICAL TRIGGER TEST SUITE\n";
@@ -715,8 +742,9 @@ int main() {
         test_adaptive_pacing_math();
         test_adaptive_trigger_140fps();
         test_adaptive_trigger_60fps();
+        test_invert_effective_static_threshold();
 
-        std::cout << "\n>>> ALL 17 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
+        std::cout << "\n>>> ALL 18 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n[TEST FAILED] Exception: " << e.what() << "\n";

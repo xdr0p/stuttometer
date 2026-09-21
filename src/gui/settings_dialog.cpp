@@ -108,6 +108,10 @@ struct SettingsDialogState {
     double custom_spike_mult{2.0};
     double custom_min_delta{4.0};
     uint32_t osd_duration_ms{3500};
+    bool present_threshold_manual{false};
+    bool smi_threshold_manual{false};
+    // Set to true around any programmatic edit-control update (e.g. SetWindowTextW) to prevent spurious manual-flag commitment
+    bool suppress_change_notification{false};
 
     // Synchronized Hit-Testing Rectangles for Master Banner & Checkbox Labels
     RECT rc_banner{};
@@ -590,6 +594,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
         }
         case WM_CREATE: {
             state = new SettingsDialogState();
+            state->suppress_change_notification = true;
+            state->present_threshold_manual = g_settings_config.present_threshold_manual;
+            state->smi_threshold_manual = g_settings_config.smi_threshold_manual;
             state->hotkey_vk = g_hotkey_vk;
             state->hotkey_mods = g_hotkey_mods;
             state->osd_duration_ms = g_settings_config.osd_duration_ms;
@@ -874,6 +881,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             layout_settings_controls(hwnd, state);
             update_settings_dependencies(state);
+            state->suppress_change_notification = false;
             return 0;
         }
 
@@ -1398,6 +1406,17 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             }
 
             if (wmId == IDC_SET_EDIT_TARGET_FPS && HIWORD(wParam) == EN_CHANGE) {
+                if (!state->suppress_change_notification) {
+                    state->present_threshold_manual = true;
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+
+            if (wmId == IDC_SET_EDIT_SMI && HIWORD(wParam) == EN_CHANGE) {
+                if (!state->suppress_change_notification) {
+                    state->smi_threshold_manual = true;
+                }
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
@@ -1436,6 +1455,10 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             }
 
             if (wmId == IDC_SET_BTN_RESET) {
+                state->suppress_change_notification = true;
+                state->present_threshold_manual = false;
+                state->smi_threshold_manual = false;
+
                 state->hotkey_vk = VK_F11;
                 state->hotkey_mods = MOD_CONTROL;
                 state->original_hotkey_vk = VK_F11;
@@ -1470,7 +1493,11 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 SetWindowTextW(state->h_edit_vram_demoted, L"8");
 
                 SendMessageW(state->h_combo_trig_mode, CB_SETCURSEL, 0, 0);
-                SetWindowTextW(state->h_edit_target_fps, L"60");
+
+                DisplayRefreshInfo disp = query_display_refresh_info(0);
+                wchar_t fps_buf[32]{};
+                swprintf_s(fps_buf, L"%.0f", (disp.query_succeeded && disp.refresh_rate_hz > 0.0) ? disp.refresh_rate_hz : 60.0);
+                SetWindowTextW(state->h_edit_target_fps, fps_buf);
 
                 state->current_profile = PacingProfile::AUTO_ADAPTIVE;
                 state->previous_preset = PacingProfile::AUTO_ADAPTIVE;
@@ -1484,6 +1511,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_UNCHECKED, 0);
                 state->advanced_unlocked = false;
                 update_settings_dependencies(state);
+                state->suppress_change_notification = false;
                 RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
                 return 0;
             }
@@ -1605,6 +1633,8 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 double v_fps = _wtof(w_fps.c_str());
                 double clamped_fps = std::clamp(v_fps, 10.0, 500.0);
                 g_settings_config.present_threshold_ms = fps_to_present_threshold_ms(clamped_fps);
+                g_settings_config.present_threshold_manual = state->present_threshold_manual;
+                g_settings_config.smi_threshold_manual = state->smi_threshold_manual;
 
                 g_settings_config.pacing_profile = state->current_profile;
                 if (state->current_profile == PacingProfile::CUSTOM) {

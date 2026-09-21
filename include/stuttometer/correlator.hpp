@@ -14,7 +14,8 @@ namespace stuttometer {
 struct CorrelateOptions {
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{25.0};
+    double present_threshold_ms{16.67};
+    double hardware_vblank_ms{0.0};
     std::string provider_tier{"standard"};
     bool redact{false};
 };
@@ -25,6 +26,7 @@ struct CorrelatorThresholds {
     uint32_t disk_threshold_ms{20};        // 20 ms
     uint32_t cswitch_preempt_ms{5};        // 5 ms
     double smi_severity_threshold_ms{33.3};// 33.3 ms (~2 frames at 60Hz)
+    bool auto_scale_smi{true};             // Auto-scale SMI severity threshold to 2x cadence/vblank
     uint32_t pagefault_threshold_ms{1};    // 1 ms
     uint32_t antimalware_threshold_ms{5};  // 5 ms
     uint32_t d3d12_pso_threshold_ms{5};    // 5 ms
@@ -118,6 +120,20 @@ enum class AttributionTag {
     UNKNOWN
 };
 
+enum class MetricSeverity : uint8_t { NORMAL = 0, WARNING = 1, DANGER = 2 };
+
+[[nodiscard]] inline MetricSeverity compute_duration_severity_fallback(
+    double duration_ms, double ref_ms = 16.67
+) noexcept {
+    const double ref = (ref_ms > 0.0) ? ref_ms : 16.67;
+    if (duration_ms >= (3.0 * ref)) return MetricSeverity::DANGER;
+    if (duration_ms >= (1.5 * ref)) return MetricSeverity::WARNING;
+    return MetricSeverity::NORMAL;
+}
+
+[[nodiscard]] AttributionTag attribution_tag_for_hypothesis(std::string_view hypothesis) noexcept;
+[[nodiscard]] MetricSeverity classify_severity(const TriggerInfo& trigger, double present_threshold_ms = 16.67) noexcept;
+
 constexpr std::string_view attribution_to_string(AttributionTag tag) noexcept {
     switch (tag) {
         case AttributionTag::GAME_ENGINE: return "GAME_ENGINE";
@@ -148,7 +164,8 @@ struct DiagnosticReport {
 
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{25.0};
+    double present_threshold_ms{16.67};
+    double hardware_vblank_ms{0.0};
     std::string provider_tier{"standard"};
     bool redacted{false};
     uint64_t qpc_frequency{0};

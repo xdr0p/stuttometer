@@ -77,6 +77,10 @@ struct GuiConfig {
     bool enable_osd{false};
     uint32_t osd_duration_ms{3500};
     OsdPosition osd_position{OsdPosition::TOP_RIGHT};
+
+    // Manual threshold override tracking
+    bool present_threshold_manual{false};
+    bool smi_threshold_manual{false};
 };
 
 struct GuiMetrics {

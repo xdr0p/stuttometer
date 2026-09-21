@@ -30,6 +30,64 @@ static std::string get_current_utc_timestamp() {
     return ss.str();
 }
 
+AttributionTag attribution_tag_for_hypothesis(std::string_view hypothesis) noexcept {
+    if (hypothesis == "dpc_isr_spike" ||
+        hypothesis == "disk_io_stall" ||
+        hypothesis == "context_switch_interference" ||
+        hypothesis == "thermal_throttle" ||
+        hypothesis == "antimalware_interference" ||
+        hypothesis == "low_memory_working_set_trim_stall" ||
+        hypothesis == "physical_memory_allocation_latency" ||
+        hypothesis == "unprofiled_hardware_or_smi_stall") {
+        return AttributionTag::EXTERNAL_CONTENTION;
+    }
+    if (hypothesis == "gpu_pipeline_stall" ||
+        hypothesis == "d3d12_shader_pso_compilation_stall" ||
+        hypothesis == "frame_pacing_judder" ||
+        hypothesis == "page_fault_stall" ||
+        hypothesis == "vram_exhaustion_paging_stall" ||
+        hypothesis == "virtual_memory_allocation_stall") {
+        return AttributionTag::GAME_ENGINE;
+    }
+    if (hypothesis == "dwm_compositor_stall") {
+        return AttributionTag::DWM_COMPOSITION;
+    }
+    return AttributionTag::UNKNOWN;
+}
+
+MetricSeverity classify_severity(const TriggerInfo& trigger, double present_threshold_ms) noexcept {
+    // Invariant: TriggerEngine::on_audio_glitch rejects glitch_count == 0, so audio triggers are unconditionally DANGER.
+    if (trigger.source == TriggerSource::AUDIO_GLITCH) {
+        return MetricSeverity::DANGER;
+    }
+
+    // Baseline availability predicate: baseline is available iff both spike_ratio and baseline_avg_ms are positive.
+    const bool has_baseline = (trigger.spike_ratio > 0.0 && trigger.baseline_avg_ms > 0.0);
+
+    if (has_baseline) {
+        // 1. DANGER checks (evaluated first):
+        if (trigger.spike_ratio >= 3.0) return MetricSeverity::DANGER;
+
+        // 2. WARNING checks (evaluated second):
+        // Note: Cadence judder is WARNING by default, but promoted to DANGER if spike_ratio >= 3.0 above.
+        if (trigger.spike_ratio >= 2.0 ||
+            trigger.source == TriggerSource::FRAME_PACING_JUDDER ||
+            trigger.reason == TriggerReason::CADENCE_JUDDER) {
+            return MetricSeverity::WARNING;
+        }
+        return MetricSeverity::NORMAL;
+    }
+
+    // Fallback: only reached when baseline is pending or unavailable
+    MetricSeverity sev = compute_duration_severity_fallback(trigger.duration_ms, present_threshold_ms);
+    if (sev == MetricSeverity::NORMAL &&
+        (trigger.source == TriggerSource::FRAME_PACING_JUDDER ||
+         trigger.reason == TriggerReason::CADENCE_JUDDER)) {
+        return MetricSeverity::WARNING;
+    }
+    return sev;
+}
+
 AttributionResult compute_attribution(const DiagnosticReport& report, uint32_t cached_dwm_pid) {
     try {
         if (report.diagnoses.empty() || report.diagnoses[0].confidence < 0.30) {
@@ -46,82 +104,58 @@ AttributionResult compute_attribution(const DiagnosticReport& report, uint32_t c
         uint32_t ev_pid = ev0 ? ev0->pid : 0;
         std::string ev_driver = ev0 ? ev0->driver_module : "";
 
-        AttributionTag tag = AttributionTag::UNKNOWN;
+        AttributionTag tag = attribution_tag_for_hypothesis(top.hypothesis);
         uint32_t pid = 0;
         std::string process;
 
         const std::string& h = top.hypothesis;
         if (h == "dpc_isr_spike") {
-            tag = AttributionTag::EXTERNAL_CONTENTION;
             pid = 4;
             process = (ev_driver.empty() || ev_driver == "unknown_kernel_address")
                 ? "System (unresolved driver)" : (ev_driver + " (System)");
         } else if (h == "disk_io_stall") {
-            tag = AttributionTag::EXTERNAL_CONTENTION;
             pid = ev_pid ? ev_pid : 4;
             process = ev_pid ? get_process_name_by_pid(ev_pid) : "System Disk I/O";
             if (process.empty()) process = "System Disk I/O";
         } else if (h == "context_switch_interference") {
-            tag = AttributionTag::EXTERNAL_CONTENTION;
             pid = (ev0 && ev0->secondary_pid) ? ev0->secondary_pid : ev_pid;
             process = pid ? get_process_name_by_pid(pid) : "Unknown (preempting thread PID unresolved)";
             if (process.empty()) process = "Unknown (preempting thread PID unresolved)";
-        } else if (h == "gpu_pipeline_stall") {
-            tag = AttributionTag::GAME_ENGINE;
+        } else if (h == "gpu_pipeline_stall" || h == "d3d12_shader_pso_compilation_stall" || h == "frame_pacing_judder") {
             pid = report.trigger.target_pid;
             process = report.target_process.empty() ? "Target Process" : report.target_process;
         } else if (h == "dwm_compositor_stall") {
-            tag = AttributionTag::DWM_COMPOSITION;
             pid = (cached_dwm_pid != 0) ? cached_dwm_pid : 4;
             process = (cached_dwm_pid != 0) ? "dwm.exe" : "dwm.exe (unresolved, System)";
-        } else if (h == "page_fault_stall") {
-            if (ev_pid == report.trigger.target_pid || ev_pid == 0) {
-                tag = AttributionTag::GAME_ENGINE;
-                pid = report.trigger.target_pid;
-                process = report.target_process.empty() ? "Target Process" : report.target_process;
-            } else {
+        } else if (h == "page_fault_stall" || h == "vram_exhaustion_paging_stall" || h == "virtual_memory_allocation_stall") {
+            // NOTE: attribution_tag_for_hypothesis() returns GAME_ENGINE as the default for
+            // these three hypotheses, but the actual attribution is PID-dependent at runtime.
+            // The override below always reassigns the tag; the pure function's return is used
+            // for these three only as documentation of the fallback case.
+            if (ev_pid != 0 && ev_pid != report.trigger.target_pid) {
                 tag = AttributionTag::EXTERNAL_CONTENTION;
                 pid = ev_pid;
                 process = get_process_name_by_pid(ev_pid);
-                if (process.empty()) process = "Unknown Page Fault";
+                if (process.empty()) process = (h == "page_fault_stall") ? "Unknown Page Fault" : "External Allocator";
+            } else {
+                // Note: target_pid == 0 (monitor-all) with ev_pid == 0 falls into this branch, preserving existing behavior
+                tag = AttributionTag::GAME_ENGINE;
+                pid = report.trigger.target_pid;
+                process = report.target_process.empty() ? "Target Process" : report.target_process;
             }
         } else if (h == "thermal_throttle") {
-            tag = AttributionTag::EXTERNAL_CONTENTION;
             pid = 0;
             process = "CPU Thermal Throttling (Hardware)";
         } else if (h == "antimalware_interference") {
-            tag = AttributionTag::EXTERNAL_CONTENTION;
             pid = ev_pid ? ev_pid : resolve_process_name_to_pid("MsMpEng.exe");
             process = "MsMpEng.exe";
-        } else if (h == "d3d12_shader_pso_compilation_stall") {
-            tag = AttributionTag::GAME_ENGINE;
-            pid = report.trigger.target_pid;
-            process = report.target_process.empty() ? "Target Process" : report.target_process;
-        } else if (h == "vram_exhaustion_paging_stall" || h == "virtual_memory_allocation_stall") {
-            if (ev_pid == report.trigger.target_pid || ev_pid == 0) {
-                tag = AttributionTag::GAME_ENGINE;
-                pid = report.trigger.target_pid;
-                process = report.target_process.empty() ? "Target Process" : report.target_process;
-            } else {
-                tag = AttributionTag::EXTERNAL_CONTENTION;
-                pid = ev_pid;
-                process = get_process_name_by_pid(ev_pid);
-                if (process.empty()) process = "External Allocator";
-            }
         } else if (h == "low_memory_working_set_trim_stall" || h == "physical_memory_allocation_latency") {
-            tag = AttributionTag::EXTERNAL_CONTENTION;
             pid = 4;
             process = "NT Kernel (System Memory Manager)";
-        } else if (h == "frame_pacing_judder") {
-            tag = AttributionTag::GAME_ENGINE;
-            pid = report.trigger.target_pid;
-            process = report.target_process.empty() ? "Target Process" : report.target_process;
         } else if (h == "unprofiled_hardware_or_smi_stall") {
-            tag = AttributionTag::EXTERNAL_CONTENTION;
             pid = 0;
             process = "Hardware / BIOS SMI Execution";
         } else {
-            tag = AttributionTag::UNKNOWN;
             pid = 0;
             process = "Unknown";
         }
@@ -197,6 +231,7 @@ DiagnosticReport CorrelationEngine::correlate(
     report.window_pre_ms = options.window_pre_ms;
     report.window_post_ms = options.window_post_ms;
     report.present_threshold_ms = options.present_threshold_ms;
+    report.hardware_vblank_ms = (options.hardware_vblank_ms > 0.0) ? options.hardware_vblank_ms : options.present_threshold_ms;
     report.provider_tier = options.provider_tier;
     report.redacted = options.redact;
     if (trigger.target_pid != 0) {
@@ -628,7 +663,10 @@ DiagnosticReport CorrelationEngine::correlate(
             effective_dur_ms = dwm_candidates.front().record.duration_us / 1000.0;
         }
 
-        const double duration_severity = std::min(1.0, effective_dur_ms / 50.0);
+        const double ref_vblank_ms = (trigger.baseline_avg_ms > 0.0) 
+            ? trigger.baseline_avg_ms 
+            : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : 16.67);
+        const double duration_severity = std::min(1.0, effective_dur_ms / (3.0 * ref_vblank_ms));
         const double confidence = std::clamp(0.50 + (0.25 * duration_severity), 0.50, 0.75);
 
         Diagnosis diag;
@@ -1023,9 +1061,16 @@ DiagnosticReport CorrelationEngine::correlate(
     }
 
     // 16. Constrained SMI / Unprofiled Hardware Gap Check
+    const double ref_smi_cadence_ms = (trigger.baseline_avg_ms > 0.0)
+        ? trigger.baseline_avg_ms
+        : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : 16.67);
+    const double effective_smi_threshold = (thresholds_.auto_scale_smi)
+        ? (2.0 * ref_smi_cadence_ms)
+        : thresholds_.smi_severity_threshold_ms;
+
     const bool is_severe = (trigger.source == TriggerSource::AUDIO_GLITCH) || 
                            (trigger.source == TriggerSource::KERNEL_FRAME_STALL) || 
-                           (trigger.duration_ms >= thresholds_.smi_severity_threshold_ms);
+                           (trigger.duration_ms >= effective_smi_threshold);
     const bool no_preemption_anomaly = (trigger.target_tid != 0) 
         ? (target_thread_preempt_us < (thresholds_.cswitch_preempt_ms * 1000)) 
         : (core_cswitch_preempt_us[trigger.cpu_index] < (thresholds_.cswitch_preempt_ms * 1000));
@@ -1146,7 +1191,8 @@ DiagnosticReport CorrelationEngine::correlate(
             }
 
             report.frame_timeline.reserve(end_idx - start_idx);
-            const double effective_thresh_ms = report.present_threshold_ms + std::max(0.5, report.present_threshold_ms * 0.05);
+            const double base_thresh_ms = (trigger.baseline_avg_ms > 0.0) ? trigger.baseline_avg_ms : report.present_threshold_ms;
+            const double effective_thresh_ms = base_thresh_ms + std::max(0.5, base_thresh_ms * 0.05);
 
             for (size_t i = start_idx; i < end_idx; ++i) {
                 const auto& rec = present_stops[i];

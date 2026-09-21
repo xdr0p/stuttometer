@@ -55,8 +55,10 @@ uint32_t g_session_audio_count = 0;
 std::wstring g_metrics_text = L"Time: 00:00  |  Stutters: 0  |  Audio: 0";
 
 std::deque<std::wstring> g_engine_logs;
+static std::mutex g_engine_logs_mutex;
 
 void append_engine_log(std::wstring log_msg) {
+    std::lock_guard<std::mutex> lock(g_engine_logs_mutex);
     g_engine_logs.push_back(std::move(log_msg));
     if (g_engine_logs.size() > 200) {
         g_engine_logs.erase(g_engine_logs.begin());
@@ -154,7 +156,13 @@ void load_user_settings() {
     if (g_settings_file_path.empty()) return;
     try {
         std::ifstream f(g_settings_file_path);
-        if (!f.is_open()) return;
+        if (!f.is_open()) {
+            DisplayRefreshInfo disp = query_display_refresh_info(0);
+            if (disp.query_succeeded && disp.vblank_interval_ms > 0.0) {
+                g_settings_config.present_threshold_ms = disp.vblank_interval_ms;
+            }
+            return;
+        }
         nlohmann::json j;
         f >> j;
 
@@ -167,10 +175,24 @@ void load_user_settings() {
         if (j.contains("sound_cues_enabled") && j["sound_cues_enabled"].is_boolean()) {
             g_sound_cues_enabled = j["sound_cues_enabled"].get<bool>();
         }
+        if (j.contains("present_threshold_manual") && j["present_threshold_manual"].is_boolean()) {
+            g_settings_config.present_threshold_manual = j["present_threshold_manual"].get<bool>();
+        } else if (j.contains("min_fps_threshold") && j["min_fps_threshold"].is_number()) {
+            g_settings_config.present_threshold_manual = (std::abs(j["min_fps_threshold"].get<double>() - 60.0) > 0.5);
+        } else {
+            g_settings_config.present_threshold_manual = false;
+        }
+
         if (j.contains("min_fps_threshold") && j["min_fps_threshold"].is_number()) {
             double thresh = j["min_fps_threshold"].get<double>();
             if (thresh >= 5.0 && thresh <= 500.0) {
                 g_settings_config.present_threshold_ms = fps_to_present_threshold_ms(thresh);
+            }
+        }
+        if (!g_settings_config.present_threshold_manual) {
+            DisplayRefreshInfo disp = query_display_refresh_info(0);
+            if (disp.query_succeeded && disp.vblank_interval_ms > 0.0) {
+                g_settings_config.present_threshold_ms = disp.vblank_interval_ms;
             }
         }
         if (j.contains("provider_tier") && j["provider_tier"].is_string()) {
@@ -216,6 +238,13 @@ void load_user_settings() {
         if (j.contains("cswitch_preempt_ms") && j["cswitch_preempt_ms"].is_number_unsigned()) {
             uint32_t v = j["cswitch_preempt_ms"].get<uint32_t>();
             if (v >= 1 && v <= 500) g_settings_config.cswitch_preempt_ms = v;
+        }
+        if (j.contains("smi_threshold_manual") && j["smi_threshold_manual"].is_boolean()) {
+            g_settings_config.smi_threshold_manual = j["smi_threshold_manual"].get<bool>();
+        } else if (j.contains("smi_severity_threshold_ms") && j["smi_severity_threshold_ms"].is_number()) {
+            g_settings_config.smi_threshold_manual = (std::abs(j["smi_severity_threshold_ms"].get<double>() - 33.3) > 0.1);
+        } else {
+            g_settings_config.smi_threshold_manual = false;
         }
         if (j.contains("smi_severity_threshold_ms") && j["smi_severity_threshold_ms"].is_number()) {
             double v = j["smi_severity_threshold_ms"].get<double>();
@@ -302,6 +331,8 @@ void save_user_settings() {
         j["hotkey_modifiers"] = g_hotkey_mods;
         j["sound_cues_enabled"] = g_sound_cues_enabled;
         j["min_fps_threshold"] = (g_settings_config.present_threshold_ms > 0.0) ? (1000.0 / g_settings_config.present_threshold_ms) : 60.0;
+        j["present_threshold_manual"] = g_settings_config.present_threshold_manual;
+        j["smi_threshold_manual"] = g_settings_config.smi_threshold_manual;
         j["provider_tier"] = g_settings_config.provider_tier;
         j["enable_audio_glitch"] = g_settings_config.enable_audio;
         j["enable_pii_redaction"] = g_settings_config.redact;

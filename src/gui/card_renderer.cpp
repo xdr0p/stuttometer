@@ -1,4 +1,5 @@
 #include "card_renderer.hpp"
+#include "theme.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
 #include "stuttometer/version.hpp"
 
@@ -18,6 +19,10 @@
 #include <cstring>
 
 namespace stuttometer::gui {
+
+inline Gdiplus::Color to_gdiplus_color(COLORREF c) {
+    return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c));
+}
 
 static std::mutex g_init_mutex;
 static bool g_ever_initialized = false;
@@ -325,28 +330,24 @@ static void draw_card(
     Color color_text_label(255, 0xCB, 0xD5, 0xE1);      // #cbd5e1 (slate label text)
     Color color_text_muted(255, 0x94, 0xA3, 0xB8);      // #94a3b8 (muted slate)
     Color color_accent_emerald(255, 16, 185, 129);      // #10b981 (emerald brand/healthy accent)
-    Color color_accent_danger(255, 239, 68, 68);        // #ef4444 (crimson critical)
-    Color color_accent_amb(255, 245, 158, 11);          // #f59e0b (amber warning/alert)
+    Color color_accent_danger = to_gdiplus_color(COLOR_SEV_DANGER);
+    Color color_accent_amb = to_gdiplus_color(COLOR_SEV_WARNING);
 
     // Attribution accent (unified 35% desaturated palette)
-    Color color_attr;
+    Color color_attr = to_gdiplus_color(get_attribution_color(report.attribution));
     std::wstring attr_label;
     switch (report.attribution) {
         case AttributionTag::GAME_ENGINE:
-            color_attr = Color(255, 218, 161, 66);
             attr_label = L"GAME ENGINE";
             break;
         case AttributionTag::DWM_COMPOSITION:
-            color_attr = Color(255, 154, 100, 205);
             attr_label = L"DWM COMPOSITION";
             break;
         case AttributionTag::EXTERNAL_CONTENTION:
-            color_attr = Color(255, 197, 86, 86);
             attr_label = L"EXTERNAL CONTENTION";
             break;
         case AttributionTag::UNKNOWN:
         default:
-            color_attr = Color(255, 105, 115, 130);
             attr_label = L"UNKNOWN";
             break;
     }
@@ -569,13 +570,10 @@ static void draw_card(
     {
         std::wstring dur_main;
         std::wstring dur_sub;
-        Color val_color = color_text_bright;
         if (is_audio_event) {
             uint32_t gc = report.trigger.glitch_count > 0 ? report.trigger.glitch_count : 1;
             dur_main = L"Glitch (x" + std::to_wstring(gc) + L")";
             dur_sub  = L"Audio buffer underrun";
-            auto sev = detail::classify_stall(0.0, 0.0, 0.0, true, report.trigger.glitch_count);
-            val_color = (sev == detail::MetricSeverity::Danger) ? color_accent_danger : color_text_bright;
         } else {
             std::wstringstream dss;
             dss << std::fixed << std::setprecision(1) << report.trigger.duration_ms << L" ms";
@@ -584,16 +582,10 @@ static void draw_card(
             std::wstringstream sss;
             sss << std::fixed << std::setprecision(2) << report.trigger.spike_ratio << L"x spike ratio";
             dur_sub = sss.str();
-
-            auto sev = detail::classify_stall(report.trigger.duration_ms, report.trigger.spike_ratio, 0.0, false, 0);
-            if (sev == detail::MetricSeverity::Danger) {
-                val_color = color_accent_danger;
-            } else if (sev == detail::MetricSeverity::Warning) {
-                val_color = color_accent_amb;
-            } else {
-                val_color = color_text_bright;
-            }
         }
+
+        MetricSeverity sev = stuttometer::classify_severity(report.trigger, report.present_threshold_ms);
+        Color val_color = to_gdiplus_color(get_severity_color(sev));
         draw_metric_tile(0, L"STALL DURATION", dur_main, dur_sub, val_color);
     }
 
@@ -622,10 +614,10 @@ static void draw_card(
             fps_sub  = L"Framerate drop";
 
             double drop = (report.trigger.baseline_fps - stall_fps) / report.trigger.baseline_fps;
-            auto sev = detail::classify_stall(0.0, 0.0, drop, false, 0);
-            if (sev == detail::MetricSeverity::Danger) {
+            auto sev = detail::classify_stall(0.0, 0.0, drop, false, 0, report.present_threshold_ms);
+            if (sev == detail::MetricSeverity::DANGER) {
                 val_color = color_accent_danger;
-            } else if (sev == detail::MetricSeverity::Warning) {
+            } else if (sev == detail::MetricSeverity::WARNING) {
                 val_color = color_accent_amb;
             } else {
                 val_color = color_text_bright;

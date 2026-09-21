@@ -52,6 +52,8 @@ struct CliConfig {
     size_t dump_max_files{3};
     std::string export_csv_path;
     bool target_pid_manual{false};
+    bool present_threshold_manual{false};
+    bool smi_threshold_manual{false};
 };
 
 CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_config, std::ostream& out, std::ostream& err);

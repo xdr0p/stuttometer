@@ -1,4 +1,5 @@
 #include "osd_toast.hpp"
+#include "theme.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
 
 #include <mmsystem.h>
@@ -136,10 +137,6 @@ void OsdToast::init_gdi_resources() noexcept {
     try {
         if (!br_bg_) br_bg_ = CreateSolidBrush(RGB(17, 21, 31));
         if (!pen_border_) pen_border_ = CreatePen(PS_SOLID, 1, RGB(42, 53, 75));
-        if (!br_accent_game_) br_accent_game_ = CreateSolidBrush(RGB(218, 161, 66));
-        if (!br_accent_dwm_) br_accent_dwm_ = CreateSolidBrush(RGB(154, 100, 205));
-        if (!br_accent_ext_) br_accent_ext_ = CreateSolidBrush(RGB(197, 86, 86));
-        if (!br_accent_unk_) br_accent_unk_ = CreateSolidBrush(RGB(105, 115, 130));
     } catch (...) {
     }
 }
@@ -148,10 +145,6 @@ void OsdToast::destroy_gdi_resources() noexcept {
     try {
         if (br_bg_) { DeleteObject(br_bg_); br_bg_ = nullptr; }
         if (pen_border_) { DeleteObject(pen_border_); pen_border_ = nullptr; }
-        if (br_accent_game_) { DeleteObject(br_accent_game_); br_accent_game_ = nullptr; }
-        if (br_accent_dwm_) { DeleteObject(br_accent_dwm_); br_accent_dwm_ = nullptr; }
-        if (br_accent_ext_) { DeleteObject(br_accent_ext_); br_accent_ext_ = nullptr; }
-        if (br_accent_unk_) { DeleteObject(br_accent_unk_); br_accent_unk_ = nullptr; }
     } catch (...) {
     }
 }
@@ -238,6 +231,8 @@ void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPos
         current_data_.duration_ms = report.trigger.duration_ms;
         current_data_.spike_ratio = report.trigger.spike_ratio;
         current_data_.attribution = report.attribution;
+        current_data_.present_threshold_ms = report.present_threshold_ms;
+        current_data_.trigger = report.trigger;
 
         if (report.redacted) {
             current_data_.process_name = "Process_REDACTED";
@@ -433,30 +428,22 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
 
         COLORREF col_text_pri = RGB(241, 245, 249); // Soft white
         COLORREF col_text_sec = RGB(148, 163, 184); // Slate
-        COLORREF col_accent;
-        HBRUSH br_accent = br_accent_unk_;
+        COLORREF col_accent = get_attribution_color(current_data_.attribution);
+        HBRUSH br_accent = get_attribution_brush(current_data_.attribution);
         std::wstring attr_tag;
 
         switch (current_data_.attribution) {
             case AttributionTag::GAME_ENGINE:
-                col_accent = RGB(218, 161, 66);     // Desaturated Amber
-                br_accent = br_accent_game_;
                 attr_tag = L"GAME ENGINE";
                 break;
             case AttributionTag::DWM_COMPOSITION:
-                col_accent = RGB(154, 100, 205);     // Desaturated Purple
-                br_accent = br_accent_dwm_;
                 attr_tag = L"DWM COMPOSITION";
                 break;
             case AttributionTag::EXTERNAL_CONTENTION:
-                col_accent = RGB(197, 86, 86);      // Desaturated Crimson
-                br_accent = br_accent_ext_;
                 attr_tag = L"EXTERNAL CONTENTION";
                 break;
             case AttributionTag::UNKNOWN:
             default:
-                col_accent = RGB(105, 115, 130);    // Desaturated Slate
-                br_accent = br_accent_unk_;
                 attr_tag = L"UNKNOWN";
                 break;
         }
@@ -507,16 +494,8 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
             callout_str = dss.str();
         }
 
-        COLORREF col_severity = col_text_pri;
-        if (current_data_.source == TriggerSource::AUDIO_GLITCH) {
-            col_severity = RGB(239, 68, 68); // Audio underrun is critical
-        } else if (current_data_.duration_ms > 50.0) {
-            col_severity = RGB(239, 68, 68); // Crimson for >50ms stall
-        } else if (current_data_.duration_ms >= 30.0) {
-            col_severity = RGB(245, 158, 11); // Amber for 30-50ms stall
-        } else {
-            col_severity = RGB(241, 245, 249); // Soft white for mild hitch
-        }
+        MetricSeverity sev = classify_severity(current_data_.trigger, current_data_.present_threshold_ms);
+        COLORREF col_severity = get_severity_color(sev);
 
         SetTextColor(mem_dc, col_severity);
         RECT rc_callout = { width - callout_w - pad_right, r1_top, width - pad_right, r1_bot };
@@ -531,20 +510,27 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
             diag_w = utf8_to_wide(current_data_.culprit) + L": ";
         }
         diag_w += utf8_to_wide(current_data_.summary);
-        if (current_data_.confidence > 0.0) {
-            std::wstringstream css;
-            css << L" (" << std::fixed << std::setprecision(0) << std::round(current_data_.confidence * 100.0) << L"% Conf)";
-            diag_w += css.str();
-        }
 
         RECT rc_diag = { pad_left, r2_top, width - pad_right, r2_bot };
         DrawTextW(mem_dc, diag_w.c_str(), -1, &rc_diag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-        // Row 3: Attribution Tag pill
+        // Row 3: Attribution Tag pill (Left) + Confidence (Right)
         SelectObject(mem_dc, font_sub_);
         SetTextColor(mem_dc, col_accent);
-        RECT rc_tag = { pad_left, r3_top, width - pad_right, r3_bot };
-        DrawTextW(mem_dc, attr_tag.c_str(), -1, &rc_tag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        int conf_w = MulDiv(80, dpi, 96);
+        RECT rc_tag = { pad_left, r3_top, width - pad_right - conf_w, r3_bot };
+        DrawTextW(mem_dc, attr_tag.c_str(), -1, &rc_tag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        if (current_data_.confidence > 0.0) {
+            std::wstringstream css;
+            css << std::fixed << std::setprecision(0) << std::round(current_data_.confidence * 100.0) << L"% CONF";
+            std::wstring conf_str = css.str();
+
+            SetTextColor(mem_dc, col_text_sec);
+            RECT rc_conf = { width - pad_right - conf_w, r3_top, width - pad_right, r3_bot };
+            DrawTextW(mem_dc, conf_str.c_str(), -1, &rc_conf, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
 
         // BitBlt to screen
         BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);

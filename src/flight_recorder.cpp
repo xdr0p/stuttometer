@@ -94,6 +94,10 @@ std::vector<EtwEventRecord> FlightRecorder::snapshot(
     const uint64_t current_head = head_.load(std::memory_order_acquire);
     const uint64_t start_seq = (current_head > capacity_) ? (current_head - capacity_) : 0;
 
+    // local_dropped captures reader-side misses within the scanned window:
+    // 1) Slots lapped by a newer generation before we could read them (seq1 > expected_seq)
+    // 2) Torn reads where a writer touched the slot mid-copy (seq1 != seq2)
+    // Note: Distinct from producer dropped_events_, which tracks failed enqueue attempts.
     uint64_t local_dropped = 0;
     uint64_t seq = current_head;
     size_t out_of_window_count = 0;
@@ -120,19 +124,22 @@ std::vector<EtwEventRecord> FlightRecorder::snapshot(
             continue; // In-flight write; skip without artificially inflating drop statistics
         }
 
-        // If overwritten or not yet published
-        if (seq1 != (seq * 2 + 2)) {
-            if (current_head <= (seq + capacity_)) {
-                // Ring has not wrapped past ticket seq; write is in-flight by a concurrent producer
-                continue;
-            }
+        // Check slot generation against our ticket's published sequence
+        const uint64_t expected_seq = (seq * 2) + 2;
+        if (seq1 < expected_seq) {
+            continue; // Writer has not yet published this ticket; skip silently
+        }
+        if (seq1 > expected_seq) {
+            // Slot lapped by a newer generation before we could read it
             ++local_dropped;
             continue;
         }
 
-        // Copy record using memcpy
+        // Copy record using memcpy bounded by acquire fences (mirrors FixedInFlightTable::lookup)
+        std::atomic_thread_fence(std::memory_order_acquire);
         EtwEventRecord temp{};
         std::memcpy(&temp, &slot.record, sizeof(EtwEventRecord));
+        std::atomic_thread_fence(std::memory_order_acquire);
 
         // Verify sequence did not change during copy
         const uint64_t seq2 = slot.sequence.load(std::memory_order_acquire);

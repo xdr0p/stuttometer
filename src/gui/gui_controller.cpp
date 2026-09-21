@@ -1,7 +1,9 @@
 #include "gui_controller.hpp"
+#include "gui_state.hpp"
 #include "stuttometer/csv_exporter.hpp"
 #include <psapi.h>
 #include <algorithm>
+#include <iomanip>
 #include <set>
 
 namespace stuttometer::gui {
@@ -216,11 +218,27 @@ void GuiController::session_worker_loop(GuiConfig config) {
         trig_config.enable_judder_detection = config.enable_judder_detection;
         trig_config.judder_swing_ratio = config.judder_swing_ratio;
 
+        DisplayRefreshInfo disp_info = query_display_refresh_info(config.target_pid);
+        trig_config.vblank_interval_ms = disp_info.vblank_interval_ms;
+        if (!config.present_threshold_manual) {
+            trig_config.present_threshold_ms = disp_info.vblank_interval_ms;
+        }
+        if (config.present_threshold_manual && (config.present_threshold_ms > 2.0 * disp_info.vblank_interval_ms)) {
+            std::wstringstream ss;
+            ss << L"[CONFIG] Notice: Configured stutter threshold (" 
+               << std::fixed << std::setprecision(1) << config.present_threshold_ms << L" ms) is >2.0x "
+               << L"the detected display refresh interval ("
+               << disp_info.vblank_interval_ms << L" ms, "
+               << std::setprecision(0) << disp_info.refresh_rate_hz << L" Hz). "
+               << L"Stutters under " << std::setprecision(1) << config.present_threshold_ms << L" ms will not be reported.";
+            append_engine_log(ss.str());
+        }
+
         auto trigger_engine = std::make_unique<TriggerEngine>(trig_config, qpc_freq);
         if (session_benchmark_) {
             session_benchmark_->set_pacing_context(
                 config.pacing_profile,
-                config.present_threshold_ms,
+                trig_config.present_threshold_ms,
                 config.spike_multiplier,
                 config.min_spike_delta_ms
             );
@@ -308,6 +326,9 @@ void GuiController::session_worker_loop(GuiConfig config) {
     thresholds.mem_alloc_threshold_mb = config.mem_alloc_threshold_mb;
     thresholds.mem_trim_threshold_mb = config.mem_trim_threshold_mb;
     thresholds.mem_physical_latency_us = config.mem_physical_latency_us;
+    if (config.smi_threshold_manual || config.smi_severity_threshold_ms != 33.3) {
+        thresholds.auto_scale_smi = false;
+    }
     CorrelationEngine correlator(driver_resolver, thresholds);
 
     // Dedicated background thread for asynchronous process name watcher (zero jitter on trigger loop)
@@ -482,7 +503,8 @@ void GuiController::session_worker_loop(GuiConfig config) {
                 CorrelateOptions correlate_opts{
                     .window_pre_ms = config.window_pre_ms,
                     .window_post_ms = config.window_post_ms,
-                    .present_threshold_ms = config.present_threshold_ms,
+                    .present_threshold_ms = trig_config.present_threshold_ms,
+                    .hardware_vblank_ms = trig_config.vblank_interval_ms,
                     .provider_tier = config.provider_tier,
                     .redact = config.redact
                 };

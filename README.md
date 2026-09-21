@@ -16,11 +16,12 @@ Leave it running in the background; when a stutter happens, the evidence is alre
 
 - **Zero-Allocation Flight Recorder:** Events stream into a pre-allocated lock-free ring buffer (262,144 slots × 64 bytes, one seqlock per slot). No heap allocations occur while tracing is active, preventing diagnostic overhead from inducing its own DPCs or memory pressure.
 - **Active ETW Flushing:** A dedicated worker thread issues kernel flush commands (`ControlTraceW` with `EVENT_TRACE_CONTROL_FLUSH`) every 100 ms (configurable down to 25–50 ms) so events reach the flight recorder with minimal delivery latency. Periodic clock resynchronization bounds the age of the last UTC↔QPC snapshot to ≤ 3 seconds + flush interval (default: ~3.1 seconds), ensuring tear-free alignment between wall-clock timestamps and hardware query performance counters.
+- **Dynamic Display Refresh & VBlank Cadence:** Automatically queries the active monitor's physical refresh rate (Hz) and vblank interval (ms) via Win32 display APIs for the target game window, dynamically scaling Present stutter thresholds, DWM compositor glitch evaluations, and hardware SMI stall limits to the hardware cadence (e.g. 4.17 ms at 240 Hz, 6.94 ms at 144 Hz, 16.67 ms at 60 Hz).
 - **Hybrid Trigger Engine:** Tracks a moving-median frametime baseline to catch relative spikes (`--spike-multiplier`) and detects cadence variance ("judder")—the micro-stutters that never cross a fixed millisecond threshold. Static and dynamic trigger modes are also supported.
 - **Three-Tier Presentation Timing:**
   - `Microsoft-Windows-DxgKrnl` (`MMIOFlip` / `FlipEvent` / `PresentStop`) — hardware flip completion events (DirectX 12, Vulkan, DirectX 11).
   - `Microsoft-Windows-DXGI` — CPU-side Present submission latency to isolate API bottlenecks from GPU delivery stalls.
-  - `Microsoft-Windows-Dwm-Core` — desktop compositor schedule glitches with kernel-side keyword filtering. Rapid successive glitches within 50 ms are tagged with `DWM_GLITCH_DEDUPLICATED` (`0x0800`) and parsed completely with accurate durations.
+  - `Microsoft-Windows-Dwm-Core` — desktop compositor schedule glitches with kernel-side keyword filtering. Rapid successive glitches within 50 ms are tagged with `DWM_GLITCH_DEDUPLICATED` (`0x0800`) and parsed completely with accurate durations synthesized from missed vblanks.
 - **Audio Underrun Detection:** Subscribes to `Microsoft-Windows-Audio` (Event ID 11) to capture audio dropouts and crackling.
 
 ---
@@ -104,6 +105,8 @@ Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Con
   ![Stuttometer Visual Stutter Card](assets/dummy_card_game_engine.png)
 
 - **In-Game OSD Toast:** Non-intrusive on-screen notification (`WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT`) displaying stall duration, attribution tag, culprit driver/module, and diagnosis summary when a stutter occurs, without stealing game focus or input. *Note: OSD notifications are suppressed by hardware fullscreen-exclusive presentations; use borderless-windowed mode to receive in-game notifications.*
+
+  ![Stuttometer In-Game OSD Toast](assets/osd_toast_ingame.png)
 - **Process Picker:** Discovers running graphical games and applications via `EnumWindows`.
 - **Live Activity Feed:** Visualizes real-time frametimes, DPC/ISR spikes, disk I/O, and memory events.
 - **Export & Privacy:** One-click JSON report export and clipboard copying, with a toggleable `--redact` mode to sanitize process names, file paths, and usernames. Unquoted path redaction operates conservatively: it scans without an arbitrary length bound until a delimiter (`\n`, `\r`, `\t`, `"`, `'`, `` ` ``, `,`, `;`, `]`, `}`, `>`, `<`) or end of string; trailing unquoted prose without an intervening delimiter is conservatively over-redacted into `[PATH_REDACTED]`; and exotic pathnames containing unquoted commas or brackets should be enclosed in quotes.
@@ -158,7 +161,7 @@ Capture Window:
 
 Trigger Configuration:
   --trigger-mode TEXT             Frame trigger mode: hybrid, dynamic, static (default: hybrid)
-  --present-threshold-ms FLOAT    Static Present stutter threshold in ms (2.0-200.0, default: 16.67)
+  --present-threshold-ms FLOAT    Static Present stutter threshold in ms (2.0-200.0, default: auto-detected vblank, e.g. 16.67 at 60Hz)
   --spike-multiplier FLOAT        Relative stutter spike multiplier (1.2-10.0, default: 2.0)
   --min-spike-delta-ms FLOAT      Minimum absolute spike delta in ms (1.0-50.0, default: 4.0)
   --judder-detection / --no-judder Enable/disable cadence judder detection (default: enabled)
@@ -170,7 +173,7 @@ Subsystem Anomaly Thresholds:
   --isr-threshold-us INT          ISR anomaly threshold in microseconds (50-50000, default: 500)
   --disk-threshold-ms INT         Disk latency anomaly threshold in ms (1-1000, default: 20)
   --cswitch-threshold-ms INT      Context switch preemption threshold in ms (1-500, default: 5)
-  --smi-threshold-ms FLOAT        Hardware SMI stall threshold in ms (10.0-100.0, default: 33.3)
+  --smi-threshold-ms FLOAT        Hardware SMI stall threshold in ms (10.0-100.0, default: 33.3; auto-scales to 2x display cadence)
   --d3d12-pso-threshold-ms INT    D3D12 PSO compilation threshold in ms (1-500, default: 5)
   --vram-threshold-mb INT         GPU VRAM demotion anomaly threshold in MB (1-1024, default: 8)
   --mem-alloc-threshold-mb INT    VirtualAlloc commit stall threshold in MB (1-1024, default: 16)

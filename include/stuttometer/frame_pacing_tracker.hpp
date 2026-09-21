@@ -118,6 +118,14 @@ inline std::optional<PacingProfile> pacing_profile_from_cli_string(std::string_v
     return present_threshold_ms + jitter_guard;
 }
 
+[[nodiscard]] constexpr inline double invert_effective_static_threshold(double effective_ms) noexcept {
+    if (effective_ms <= 0.0) return 0.0;
+    constexpr double TRANSITION_EFFECTIVE_MS = 10.5; // 10.0 ms + 0.5 ms clamp
+    return (effective_ms <= TRANSITION_EFFECTIVE_MS) 
+        ? std::max(0.0, effective_ms - 0.5) 
+        : (effective_ms / 1.05);
+}
+
 struct AdaptivePacingParams {
     double spike_multiplier{2.0};
     double min_spike_delta_ms{4.0};
@@ -323,8 +331,9 @@ inline FramePacingResult evaluate_frame_pacing(
             // HYBRID Warmup:
             if (stats.sample_count < 4) {
                 // Suppress static trigger during initial 4 frames to let baseline stabilize.
-                // 200ms rationale: ~6 frames at 30 FPS; conservative lower bound on obvious level-load/alt-tab stalls.
-                if (dur_ms >= 200.0) {
+                const double base_present_ms = invert_effective_static_threshold(effective_static_threshold_ms);
+                const double catastrophic_cutoff_ms = std::clamp(12.0 * base_present_ms, 50.0, 500.0);
+                if (dur_ms >= catastrophic_cutoff_ms) {
                     stats.last_delta_us = 0;
                     stats.alternating_cadence_count = 0;
                     return res; // Reject catastrophic stall without baseline pollution

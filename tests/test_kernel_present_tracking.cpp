@@ -3,6 +3,7 @@
 #include "stuttometer/trigger_engine.hpp"
 #include "stuttometer/correlator.hpp"
 #include "stuttometer/json_reporter.hpp"
+#include "stuttometer/privilege_utils.hpp"
 #include <iostream>
 #include <unordered_set>
 
@@ -447,6 +448,140 @@ static void test_dxgkrnl_task17_flip_parsing_and_dwm_filtering() {
     std::cout << "  -> DxgKrnl Task 17 offset parsing & DWM filtering PASSED.\n";
 }
 
+static void test_display_refresh_query() {
+    std::cout << "[TEST] Validating query_display_refresh_info resilience & fallbacks...\n";
+
+    // 1. Current process / foreground display query (PID 0)
+    auto info_zero = stuttometer::query_display_refresh_info(0);
+    STUTTO_ASSERT(info_zero.refresh_rate_hz > 0.0);
+    STUTTO_ASSERT(info_zero.vblank_interval_ms > 0.0);
+    STUTTO_ASSERT(std::abs(info_zero.vblank_interval_ms - (1000.0 / info_zero.refresh_rate_hz)) < 0.01);
+    std::cout << "  -> PID 0 resolved: " << info_zero.refresh_rate_hz << " Hz (" 
+              << info_zero.vblank_interval_ms << " ms vblank, " 
+              << (info_zero.query_succeeded ? "monitor" : "fallback") << ").\n";
+
+    // 2. Non-existent PID (0xFFFFFFFE) -> fallback without crash
+    auto info_nonexistent = stuttometer::query_display_refresh_info(0xFFFFFFFE);
+    STUTTO_ASSERT(info_nonexistent.refresh_rate_hz > 0.0);
+    STUTTO_ASSERT(info_nonexistent.vblank_interval_ms > 0.0);
+    STUTTO_ASSERT(std::abs(info_nonexistent.vblank_interval_ms - (1000.0 / info_nonexistent.refresh_rate_hz)) < 0.01);
+    std::cout << "  -> PID 0xFFFFFFFE safely resolved: " << info_nonexistent.refresh_rate_hz << " Hz.\n";
+
+    // 3. Current process ID -> safe resolution without crash
+    auto info_self = stuttometer::query_display_refresh_info(GetCurrentProcessId());
+    STUTTO_ASSERT(info_self.refresh_rate_hz > 0.0);
+    STUTTO_ASSERT(info_self.vblank_interval_ms > 0.0);
+    STUTTO_ASSERT(std::abs(info_self.vblank_interval_ms - (1000.0 / info_self.refresh_rate_hz)) < 0.01);
+    std::cout << "  -> Self PID resolved: " << info_self.refresh_rate_hz << " Hz.\n";
+
+    std::cout << "  -> query_display_refresh_info PASSED.\n";
+}
+
+static void test_dwm_pipeline_high_refresh() {
+    std::cout << "[TEST] Validating end-to-end DWM pipeline with 240Hz vblank interval...\n";
+
+    constexpr double VBLANK_240HZ_MS = 1000.0 / 240.0; // ~4.16667 ms
+    stuttometer::TriggerConfig cfg;
+    cfg.present_threshold_ms = 16.67; // User stutter threshold remains 16.67 ms
+    cfg.vblank_interval_ms = VBLANK_240HZ_MS; // Physical hardware vblank is ~4.167 ms
+    cfg.target_pid = 7777;
+    cfg.window_pre_ms = 250.0;
+    cfg.window_post_ms = 30.0;
+
+    const uint64_t qpc_freq = 10000000;
+    stuttometer::TriggerEngine engine(cfg, qpc_freq);
+    STUTTO_ASSERT(std::abs(engine.vblank_interval_ms() - VBLANK_240HZ_MS) < 1e-6);
+
+    const uint64_t base_qpc = 1000000;
+
+    // Sub-threshold glitch (< 3.667 ms) rejected
+    STUTTO_ASSERT(!engine.on_dwm_glitch(100, 200, 3.0, base_qpc, 0));
+
+    // Single 240Hz vblank glitch (4.167 ms) accepted even though present_threshold_ms = 16.67 ms!
+    STUTTO_ASSERT(engine.on_dwm_glitch(100, 200, VBLANK_240HZ_MS, base_qpc, 0));
+
+    stuttometer::TriggerInfo trig;
+    uint64_t from_qpc = 0, to_qpc = 0;
+    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    STUTTO_ASSERT(engine.poll_state(poll_qpc, trig, from_qpc, to_qpc));
+    STUTTO_ASSERT(trig.source == stuttometer::TriggerSource::DWM_GLITCH);
+    STUTTO_ASSERT(trig.target_pid == 7777);
+    STUTTO_ASSERT(std::abs(trig.duration_ms - VBLANK_240HZ_MS) < 1e-3);
+    STUTTO_ASSERT(std::abs(trig.baseline_avg_ms - VBLANK_240HZ_MS) < 1e-3);
+    STUTTO_ASSERT(std::abs(trig.spike_ratio - 1.0) < 1e-3);
+    STUTTO_ASSERT(std::abs(trig.baseline_fps - 240.0) < 0.1);
+
+    // Now test full ETW pipeline through EtwSessionManager with synthesized duration
+    stuttometer::FlightRecorder recorder(1024);
+    stuttometer::TriggerEngine engine2(cfg, qpc_freq);
+    stuttometer::EtwSessionConfig etw_cfg;
+    etw_cfg.enable_dwm_core = true;
+
+    stuttometer::EtwSessionManager mgr(recorder, engine2, etw_cfg);
+    mgr.set_running_for_test(true);
+
+    // Synthesize DWM Glitch event: Task 132, Id 15, missed_vblanks = 3
+    uint8_t dwm_payload[8]{};
+    const uint32_t glitch_type = 2;
+    const uint32_t missed_vblanks = 3;
+    std::memcpy(dwm_payload + 0, &glitch_type, sizeof(uint32_t));
+    std::memcpy(dwm_payload + 4, &missed_vblanks, sizeof(uint32_t));
+
+    EVENT_RECORD ev_dwm{};
+    ev_dwm.UserContext = &mgr;
+    ev_dwm.EventHeader.ProviderId = stuttometer::DWM_CORE_PROVIDER_GUID;
+    ev_dwm.EventHeader.EventDescriptor.Task = 132;
+    ev_dwm.EventHeader.EventDescriptor.Id = 15;
+    ev_dwm.EventHeader.ProcessId = 1000;
+    ev_dwm.EventHeader.ThreadId = 2000;
+    ev_dwm.EventHeader.TimeStamp.QuadPart = 20000000;
+    ev_dwm.UserData = dwm_payload;
+    ev_dwm.UserDataLength = sizeof(dwm_payload);
+
+    stuttometer::EtwSessionManager::on_event_record(&ev_dwm);
+
+    // Verify flight recorder duration synthesized as 3 * 4.16667 ms = 12.5 ms
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(20000000, 20000000, &drops);
+    STUTTO_ASSERT(snap.size() == 1);
+    STUTTO_ASSERT(snap[0].category == static_cast<uint16_t>(stuttometer::EventCategory::DWM_GLITCH));
+    const double expected_dur_ms = 3.0 * VBLANK_240HZ_MS;
+    const uint32_t expected_dur_us = static_cast<uint32_t>(expected_dur_ms * 1000.0);
+    STUTTO_ASSERT(std::abs(static_cast<int>(snap[0].duration_us) - static_cast<int>(expected_dur_us)) <= 1);
+
+    // Verify engine triggered with proper duration and spike ratio
+    stuttometer::TriggerInfo trig2;
+    const uint64_t poll2_qpc = 20000000 + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    STUTTO_ASSERT(engine2.poll_state(poll2_qpc, trig2, from_qpc, to_qpc));
+    STUTTO_ASSERT(trig2.source == stuttometer::TriggerSource::DWM_GLITCH);
+    STUTTO_ASSERT(std::abs(trig2.duration_ms - expected_dur_ms) < 1e-3);
+    STUTTO_ASSERT(std::abs(trig2.baseline_avg_ms - VBLANK_240HZ_MS) < 1e-3);
+    STUTTO_ASSERT(std::abs(trig2.spike_ratio - 3.0) < 1e-3);
+
+    // Test missed_vblanks == 0 -> synthesizes 1 vblank duration
+    stuttometer::FlightRecorder recorder3(1024);
+    stuttometer::TriggerEngine engine3(cfg, qpc_freq);
+    stuttometer::EtwSessionManager mgr3(recorder3, engine3, etw_cfg);
+    mgr3.set_running_for_test(true);
+
+    uint8_t dwm_payload0[8]{};
+    const uint32_t missed_vblanks0 = 0;
+    std::memcpy(dwm_payload0 + 4, &missed_vblanks0, sizeof(uint32_t));
+    ev_dwm.UserContext = &mgr3;
+    ev_dwm.UserData = dwm_payload0;
+    ev_dwm.EventHeader.TimeStamp.QuadPart = 30000000;
+    stuttometer::EtwSessionManager::on_event_record(&ev_dwm);
+
+    auto snap3 = recorder3.snapshot(30000000, 30000000, &drops);
+    STUTTO_ASSERT(snap3.size() == 1);
+    const uint32_t expected_dur_us0 = static_cast<uint32_t>(VBLANK_240HZ_MS * 1000.0);
+    STUTTO_ASSERT(std::abs(static_cast<int>(snap3[0].duration_us) - static_cast<int>(expected_dur_us0)) <= 1);
+
+    mgr.set_running_for_test(false);
+    mgr3.set_running_for_test(false);
+    std::cout << "  -> End-to-end DWM pipeline 240Hz PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Kernel Present & GPU Tracking Tests ===\n";
     try {
@@ -459,6 +594,8 @@ int main() {
         test_trigger_engine_single_emission_guarantee();
         test_static_trigger_on_pacing_table_exhaustion();
         test_dxgkrnl_task17_flip_parsing_and_dwm_filtering();
+        test_display_refresh_query();
+        test_dwm_pipeline_high_refresh();
         std::cout << ">>> All Kernel Present & GPU Tracking tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

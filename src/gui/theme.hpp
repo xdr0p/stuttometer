@@ -1,5 +1,8 @@
 #pragma once
 
+// Pulls in correlator.hpp for AttributionTag and MetricSeverity; keep theme.hpp free of non-color logic to minimize coupling drift.
+#include "stuttometer/correlator.hpp"
+
 #include <windows.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
@@ -70,6 +73,38 @@ inline constexpr COLORREF COLOR_ACCENT_DANGER   = RGB(239, 68, 68);  // Refined 
 inline constexpr COLORREF COLOR_ACCENT_AMB      = RGB(245, 158, 11); // Amber / Warning (#F59E0B)
 inline constexpr COLORREF COLOR_ACCENT_CYAN     = RGB(56, 189, 248); // Sky / Info (#38BDF8)
 inline constexpr COLORREF COLOR_ACCENT_PURPLE   = RGB(168, 85, 247); // Purple / DWM (#A855F7)
+
+// Centralized Attribution Palette (unified 35% desaturated palette)
+inline constexpr COLORREF COLOR_ATTR_GAME_ENGINE         = RGB(218, 161, 66);  // #daa142
+inline constexpr COLORREF COLOR_ATTR_EXTERNAL_CONTENTION = RGB(197, 86, 86);   // #c55656
+inline constexpr COLORREF COLOR_ATTR_DWM_COMPOSITION     = RGB(154, 100, 205); // #9a64cd
+inline constexpr COLORREF COLOR_ATTR_UNKNOWN             = RGB(105, 115, 130); // #697382
+
+// Centralized Severity Palette
+inline constexpr COLORREF COLOR_SEV_NORMAL               = RGB(241, 245, 249); // #f1f5f9
+inline constexpr COLORREF COLOR_SEV_WARNING              = RGB(245, 158, 11);  // #f59e0b
+inline constexpr COLORREF COLOR_SEV_DANGER               = RGB(239, 68, 68);   // #ef4444
+
+[[nodiscard]] inline constexpr COLORREF get_attribution_color(AttributionTag tag) noexcept {
+    switch (tag) {
+        case AttributionTag::GAME_ENGINE:         return COLOR_ATTR_GAME_ENGINE;
+        case AttributionTag::DWM_COMPOSITION:     return COLOR_ATTR_DWM_COMPOSITION;
+        case AttributionTag::EXTERNAL_CONTENTION: return COLOR_ATTR_EXTERNAL_CONTENTION;
+        case AttributionTag::UNKNOWN:
+        default:                                  return COLOR_ATTR_UNKNOWN;
+    }
+}
+
+[[nodiscard]] inline constexpr COLORREF get_severity_color(MetricSeverity sev) noexcept {
+    switch (sev) {
+        case MetricSeverity::DANGER:  return COLOR_SEV_DANGER;
+        case MetricSeverity::WARNING: return COLOR_SEV_WARNING;
+        case MetricSeverity::NORMAL:
+        default:                      return COLOR_SEV_NORMAL;
+    }
+}
+
+[[nodiscard]] HBRUSH get_attribution_brush(AttributionTag tag) noexcept;
 
 // DPI Tracking & Scaling
 extern UINT g_current_dpi;
