@@ -734,7 +734,7 @@ static void test_invert_effective_static_threshold() {
     std::cout << "  -> invert_effective_static_threshold round-trip verified.\n";
 }
 
-// Regression test for the FileTime-domain timestamp bug (v0.5.4).
+// Regression test for the FileTime-domain timestamp bug.
 //
 // Root cause: ETW delivers ctx.timestamp in FileTime (100ns since 1601-01-01, ~1.34e17)
 // rather than QPC ticks. Phase 2 of initiate_trigger_atomic previously stored
@@ -801,7 +801,7 @@ static void test_filetime_domain_timestamp_does_not_block_poll_state() {
 
     STUTTO_ASSERT_MSG(fired,
         "poll_state never fired: FileTime-domain timestamp caused unreachable post_target_qpc_. "
-        "This is the v0.5.4 zero-report bug. Ensure Phase 2 of initiate_trigger_atomic uses "
+        "This is the zero-report bug. Ensure Phase 2 of initiate_trigger_atomic uses "
         "get_current_qpc() for post_target_qpc_ and claimed_timestamp_qpc_.");
 
     std::cout << "  -> poll_state fired correctly with FileTime-domain ETW timestamp.\n";
