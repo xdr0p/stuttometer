@@ -334,9 +334,13 @@ inline FramePacingResult evaluate_frame_pacing(
                 const double base_present_ms = invert_effective_static_threshold(effective_static_threshold_ms);
                 const double catastrophic_cutoff_ms = std::clamp(12.0 * base_present_ms, 50.0, 500.0);
                 if (dur_ms >= catastrophic_cutoff_ms) {
+                    // Push a clamped sample so sample_count advances and warmup can complete.
+                    // Without this, every catastrophic stall keeps sample_count=0 forever (starvation).
+                    const double clamped_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
+                    push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, judder_swing_ratio);
                     stats.last_delta_us = 0;
                     stats.alternating_cadence_count = 0;
-                    return res; // Reject catastrophic stall without baseline pollution
+                    return res; // Still suppress the trigger, but populate the baseline
                 }
             } else {
                 // sample_count in [4, 7]: baseline has >= 4 valid samples; static triggers active.
@@ -353,11 +357,15 @@ inline FramePacingResult evaluate_frame_pacing(
             push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
             return res;
         } else if (mode == FrameTriggerMode::DYNAMIC_ONLY) {
-            // DYNAMIC_ONLY: Suppress static trigger; reject frames >= threshold during warmup
+            // DYNAMIC_ONLY: Suppress static trigger; push a clamped sample so warmup can complete.
+            // Without pushing, a display where every frame >= threshold keeps sample_count=0 forever
+            // (e.g. 200 Hz display with 5 ms threshold, 8 ms actual frames -> permanent starvation).
             if (dur_ms >= effective_static_threshold_ms) {
+                const double clamped_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
+                push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, judder_swing_ratio);
                 stats.last_delta_us = 0;
                 stats.alternating_cadence_count = 0;
-                return res;
+                return res; // Still suppress the trigger, but populate the baseline
             }
             const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
             push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
