@@ -65,9 +65,15 @@ bool TriggerEngine::initiate_trigger_atomic(
     }
 
     // ---- Phase 2: Atomic metadata updates (no lock required) ----
-    claimed_timestamp_qpc_.store(timestamp_qpc, std::memory_order_release);
+    // NOTE: ETW timestamps (timestamp_qpc) are in FileTime domain (~1.34e17, 100ns since 1601),
+    // not QPC domain (~get_current_qpc()). poll_state compares against get_current_qpc(), so
+    // post_target_qpc_ and claimed_timestamp_qpc_ must be in QPC domain or the deadline is
+    // unreachable and the state machine sticks permanently in COLLECTING_POST.
+    // active_trigger_.trigger_timestamp_qpc (Phase 3) stays in ETW domain for snapshot windowing.
+    const uint64_t now_qpc = get_current_qpc();
+    claimed_timestamp_qpc_.store(now_qpc, std::memory_order_release);
     active_source_.store(src, std::memory_order_release);
-    post_target_qpc_.store(timestamp_qpc + post_window_qpc_, std::memory_order_release);
+    post_target_qpc_.store(now_qpc + post_window_qpc_, std::memory_order_release);
     report_consumed_.store(false, std::memory_order_release);
 
     // Test-only seam: signal that Phase 1 & 2 are complete before entering pause loop
@@ -212,6 +218,13 @@ bool TriggerEngine::evaluate_frame_pacing_common(
         }
     }
 
+    fprintf(stderr, "[D-B] upsert_ok=%d is_stutter=%d reason=%d dur=%.3f thr=%.3f mode=%d\n",
+            (int)upsert_ok,
+            (int)out_pacing_res.is_stutter,
+            (int)out_pacing_res.reason,
+            duration_ms,
+            effective_static_threshold,
+            (int)config_.frame_trigger_mode);
     return out_pacing_res.is_stutter;
 }
 

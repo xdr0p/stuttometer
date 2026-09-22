@@ -43,15 +43,25 @@ void EtwSessionManager::handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord&
 
             uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, 10000000ULL));
             rec.duration_us = clamped_dur_us;
-
             flight_recorder_.push(rec);
+
+            fprintf(stderr, "[D-A] has_inflight=%d pid_match=%d reset=%d dur_us=%llu state=%d suppressed=%llu ev_qpc=%llu now_qpc=%llu\n",
+                    (int)has_in_flight,
+                    (int)(present_data.pid == ctx.pid),
+                    (int)delta_res.is_baseline_reset,
+                    (unsigned long long)delta_res.effective_dur_us,
+                    (int)trigger_engine_.current_state(),
+                    (unsigned long long)trigger_engine_.suppressed_trigger_count(),
+                    (unsigned long long)ctx.timestamp,
+                    (unsigned long long)get_current_qpc());
 
             if (!delta_res.is_baseline_reset && delta_res.effective_dur_us > 0) {
                 double dur_ms = delta_res.effective_dur_us / 1000.0;
                 trigger_engine_.on_dxgi_present(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, swapchain_key, ctx.cpu);
             }
         } else {
-            // Orphaned Event 43 (session started mid-frame or Event 42 dropped by ETW)
+            fprintf(stderr, "[D-A-ORPHAN] has_inflight=%d pid_match=%d\n",
+                    (int)has_in_flight, (int)(present_data.pid == ctx.pid));
             flight_recorder_.push(rec);
         }
     }

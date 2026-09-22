@@ -324,15 +324,29 @@ int main(int argc, char** argv) {
 
         ++loop_counter;
 
+        if (loop_counter % 100 == 0) {
+            fprintf(stderr, "[D-HB] qpc=%llu state=%d suppressed=%llu reports=%u\n",
+                    (unsigned long long)current_qpc,
+                    (int)trigger_engine.current_state(),
+                    (unsigned long long)trigger_engine.suppressed_trigger_count(),
+                    report_count);
+        }
+
         if (verbose && loop_counter % 500 == 0) {
             std::cout << "[VERBOSE] Head: " << flight_recorder.current_head() 
                       << " | Upstream Lost Events: " << session_mgr.events_lost()
                       << " | Lost Buffers: " << session_mgr.buffers_lost()
                       << " | Unpaired Evictions: " << session_mgr.unpaired_evictions()
-                      << " | Insertion Failures: " << session_mgr.insertion_failures() << "\n";
+                      << " | Insertion Failures: " << session_mgr.insertion_failures()
+                      << " | Suppressed Triggers: " << trigger_engine.suppressed_trigger_count() << "\n";
         }
 
         if (trigger_engine.poll_state(current_qpc, trigger_info, from_qpc, to_qpc)) {
+            fprintf(stderr, "[D-C] poll_state=TRUE src=%d dur=%.3f reason=%d state_after=%d\n",
+                    (int)trigger_info.source,
+                    trigger_info.duration_ms,
+                    (int)trigger_info.reason,
+                    (int)trigger_engine.current_state());
             struct ReportScopeGuard {
                 stuttometer::TriggerEngine& engine;
                 ~ReportScopeGuard() {
