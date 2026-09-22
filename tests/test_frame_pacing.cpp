@@ -719,6 +719,79 @@ static void test_invert_effective_static_threshold() {
     std::cout << "  -> invert_effective_static_threshold round-trip verified.\n";
 }
 
+// Regression test for the FileTime-domain timestamp bug (v0.5.4).
+//
+// Root cause: ETW delivers ctx.timestamp in FileTime (100ns since 1601-01-01, ~1.34e17)
+// rather than QPC ticks. Phase 2 of initiate_trigger_atomic previously stored
+//   post_target_qpc_ = timestamp_qpc + post_window_qpc_
+// poll_state() checks current_qpc >= post_target_qpc_ where current_qpc comes from
+// get_current_qpc() (~3.7e10 on a fresh boot). Since 1.34e17 >> 3.7e10 the deadline
+// was never reachable and the state machine stayed in COLLECTING_POST forever.
+//
+// Fix: Phase 2 now uses get_current_qpc() for post_target_qpc_ and
+// claimed_timestamp_qpc_, keeping the ETW timestamp only in active_trigger_
+// for flight-recorder snapshot windowing.
+//
+// This test must FAIL on pre-fix code (poll_state never returns true) and
+// PASS on post-fix code (poll_state returns true within one post-window).
+static void test_filetime_domain_timestamp_does_not_block_poll_state() {
+    std::cout << "[TEST] Regression: FileTime-domain ETW timestamp must not prevent poll_state from firing...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+
+    stuttometer::TriggerConfig cfg;
+    cfg.target_pid      = 1234;
+    cfg.window_pre_ms   = 100.0;
+    cfg.window_post_ms  = 30.0;    // post-window: 30 ms
+    cfg.cooldown_ms     = 500.0;
+    cfg.present_threshold_ms = 5.0;
+    cfg.frame_trigger_mode   = stuttometer::FrameTriggerMode::STATIC_ONLY;
+    cfg.audio_trigger_enabled = false;
+
+    stuttometer::TriggerEngine engine(cfg, qpc_freq);
+
+    // Simulate a FileTime-domain ETW timestamp: ~1.34e17 (100ns ticks since 1601-01-01).
+    // This is the value observed in the wild against Spider-Man2.exe on Windows 11.
+    // On pre-fix code, post_target_qpc_ = 1.34e17 + post_window, which get_current_qpc()
+    // (~3.7e10) can never reach.
+    const uint64_t filetime_timestamp = 134345709646471285ULL;
+
+    // Feed enough frames to exit warmup and fire the static threshold.
+    // STATIC_ONLY mode does not require warmup, so a single frame >= threshold suffices,
+    // but we send a handful to ensure the pacing table entry is populated.
+    const double stutter_ms = 12.0; // well above 5 ms threshold
+    for (int i = 0; i < 5; ++i) {
+        engine.on_dxgi_present(1234, 1, stutter_ms,
+                               filetime_timestamp + static_cast<uint64_t>(i) * 1000000ULL,
+                               /*stream_key=*/0xABCD1234ULL);
+    }
+
+    // Poll for up to 200 ms (6x the 30 ms post-window) using real QPC time.
+    // On post-fix code poll_state transitions COLLECTING_POST -> FROZEN -> true
+    // within ~30 ms of the trigger. On pre-fix code it never fires.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    bool fired = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        stuttometer::TriggerInfo info{};
+        uint64_t from_qpc = 0, to_qpc = 0;
+        if (engine.poll_state(stuttometer::get_current_qpc(), info, from_qpc, to_qpc)) {
+            fired = true;
+            // Verify the report carries the ETW-domain timestamp for snapshot windowing
+            STUTTO_ASSERT(info.trigger_timestamp_qpc == filetime_timestamp);
+            STUTTO_ASSERT(info.source == stuttometer::TriggerSource::DXGI_PRESENT_STUTTER);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    STUTTO_ASSERT_MSG(fired,
+        "poll_state never fired: FileTime-domain timestamp caused unreachable post_target_qpc_. "
+        "This is the v0.5.4 zero-report bug. Ensure Phase 2 of initiate_trigger_atomic uses "
+        "get_current_qpc() for post_target_qpc_ and claimed_timestamp_qpc_.");
+
+    std::cout << "  -> poll_state fired correctly with FileTime-domain ETW timestamp.\n";
+}
+
 int main() {
     std::cout << "================================================================\n";
     std::cout << " STUTTOMETER FRAME PACING & STATISTICAL TRIGGER TEST SUITE\n";
@@ -743,8 +816,9 @@ int main() {
         test_adaptive_trigger_140fps();
         test_adaptive_trigger_60fps();
         test_invert_effective_static_threshold();
+        test_filetime_domain_timestamp_does_not_block_poll_state();
 
-        std::cout << "\n>>> ALL 18 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
+        std::cout << "\n>>> ALL 19 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n[TEST FAILED] Exception: " << e.what() << "\n";
