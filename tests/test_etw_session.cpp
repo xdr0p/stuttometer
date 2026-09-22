@@ -1393,7 +1393,7 @@ static void test_trigger_engine_stale_writer_generation_guard() {
     trig_cfg.cooldown_ms = 1000.0;
 
     TriggerEngine engine(trig_cfg, qpc_freq);
-    const uint64_t t_base = 10000000ULL;
+    const uint64_t t_base = get_current_qpc();
 
     // Step 1: Call engine.reset_test_seams(). Set pause_only_generation_for_test targeting Thread A only.
     engine.reset_test_seams();
@@ -1465,7 +1465,7 @@ static void test_trigger_engine_stale_writer_concurrent_claimed_race() {
     trig_cfg.cooldown_ms = 1000.0;
 
     TriggerEngine engine(trig_cfg, qpc_freq);
-    const uint64_t t_base = 20000000ULL;
+    const uint64_t t_base = get_current_qpc();
 
     // Thread A and B both pause when target is UINT64_MAX
     engine.reset_test_seams();

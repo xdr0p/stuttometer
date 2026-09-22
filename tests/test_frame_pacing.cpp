@@ -129,7 +129,9 @@ static void test_high_fps_micro_stutter_relative_spike() {
     stuttometer::TriggerInfo info{};
     uint64_t from_qpc = 0;
     uint64_t to_qpc = 0;
-    bool polled = engine.poll_state(qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq), info, from_qpc, to_qpc);
+    const uint64_t poll_qpc = stuttometer::get_current_qpc()
+                            + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    bool polled = engine.poll_state(poll_qpc, info, from_qpc, to_qpc);
     STUTTO_ASSERT(polled);
     STUTTO_ASSERT(info.reason == stuttometer::TriggerReason::RELATIVE_SPIKE);
     STUTTO_ASSERT(info.duration_ms == 12.0);
@@ -179,7 +181,9 @@ static void test_cadence_judder_detection() {
     stuttometer::TriggerInfo info{};
     uint64_t from_qpc = 0;
     uint64_t to_qpc = 0;
-    bool polled = engine.poll_state(qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq), info, from_qpc, to_qpc);
+    const uint64_t poll_qpc = stuttometer::get_current_qpc()
+                            + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    bool polled = engine.poll_state(poll_qpc, info, from_qpc, to_qpc);
     STUTTO_ASSERT(polled);
     STUTTO_ASSERT(info.reason == stuttometer::TriggerReason::CADENCE_JUDDER);
     STUTTO_ASSERT(info.source == stuttometer::TriggerSource::FRAME_PACING_JUDDER);
@@ -245,9 +249,12 @@ static void test_dynamic_only_warmup_sanity_clamping() {
         25.0
     );
 
-    // Must not trigger static threshold in DYNAMIC_ONLY mode, and must NOT contaminate baseline (sample_count remains 0)
+    // Must not trigger static threshold in DYNAMIC_ONLY mode.
+    // DYNAMIC_ONLY pushes a clamped sample (max 100 ms) so warmup can complete even if every
+    // frame exceeds the static threshold (prevents permanent starvation on high-refresh displays).
     STUTTO_ASSERT(!res.is_stutter);
-    STUTTO_ASSERT(stats.sample_count == 0);
+    STUTTO_ASSERT(stats.sample_count == 1);
+    STUTTO_ASSERT(stats.durations_us[0] == 100000); // 5000 ms clamped to 100 ms
 
     // Subsequent clean frame (16.6ms) is successfully ingested
     qpc += stuttometer::ms_to_qpc_delta(16.666, qpc_freq);
@@ -264,8 +271,9 @@ static void test_dynamic_only_warmup_sanity_clamping() {
         25.0
     );
     STUTTO_ASSERT(!res_clean.is_stutter);
-    STUTTO_ASSERT(stats.sample_count == 1);
-    STUTTO_ASSERT(stats.durations_us[0] == 16666);
+    STUTTO_ASSERT(stats.sample_count == 2);
+    STUTTO_ASSERT(stats.durations_us[0] == 100000); // Clamped warmup sample still at index 0
+    STUTTO_ASSERT(stats.durations_us[1] == 16666);  // Clean frame pushed at index 1
     std::cout << "  -> DYNAMIC_ONLY warmup spike rejection and clean frame ingestion verified.\n";
 }
 
@@ -460,7 +468,9 @@ static void test_hybrid_warmup_reject_then_recover() {
     stuttometer::reset_frame_stats(stats, 1000);
 
     uint64_t qpc = 10000000ULL;
-    // Push 3 stalls of 500ms (>= 200ms)
+    // Push 3 stalls of 500ms (>= 285.7ms catastrophic cutoff).
+    // HYBRID mode clamps catastrophic frames to a 100 ms sample and pushes them so warmup
+    // can complete (prevents permanent starvation when every early frame exceeds the threshold).
     for (int i = 0; i < 3; ++i) {
         qpc += stuttometer::ms_to_qpc_delta(500.0, qpc_freq);
         auto res = stuttometer::evaluate_frame_pacing(
@@ -469,10 +479,13 @@ static void test_hybrid_warmup_reject_then_recover() {
             2.0, 4.0, true, 0.35, 25.0
         );
         STUTTO_ASSERT(!res.is_stutter); // Rejected without trigger during initial 4 frames
-        STUTTO_ASSERT(stats.sample_count == 0);
+        STUTTO_ASSERT(stats.sample_count == static_cast<uint16_t>(i + 1)); // Clamped 100 ms sample pushed each iteration
         STUTTO_ASSERT(stats.last_delta_us == 0);
         STUTTO_ASSERT(stats.alternating_cadence_count == 0);
     }
+    STUTTO_ASSERT(stats.durations_us[0] == 100000); // 500 ms clamped to 100 ms
+    STUTTO_ASSERT(stats.durations_us[1] == 100000);
+    STUTTO_ASSERT(stats.durations_us[2] == 100000);
 
     // Push 4 clean frames of 16.6ms
     for (int i = 0; i < 4; ++i) {
@@ -484,9 +497,11 @@ static void test_hybrid_warmup_reject_then_recover() {
         );
         STUTTO_ASSERT(!res.is_stutter);
     }
-    STUTTO_ASSERT(stats.sample_count == 4);
+    // 3 clamped warmup samples + 4 clean frames = 7 total samples
+    STUTTO_ASSERT(stats.sample_count == 7);
 
-    // Push frame 5 at 30.0ms (>= 25.0ms)
+    // Push frame 8 at 30.0ms (>= 25.0ms). sample_count == 7 is in the [4,7] window, so static
+    // triggers are active now.
     qpc += stuttometer::ms_to_qpc_delta(30.0, qpc_freq);
     auto res_spike = stuttometer::evaluate_frame_pacing(
         stats, 30.0, qpc, qpc_freq,
@@ -495,7 +510,7 @@ static void test_hybrid_warmup_reject_then_recover() {
     );
     STUTTO_ASSERT(res_spike.is_stutter);
     STUTTO_ASSERT(res_spike.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
-    STUTTO_ASSERT(stats.sample_count == 4); // Not pushed into baseline
+    STUTTO_ASSERT(stats.sample_count == 7); // Stutter frame rejected from baseline
     std::cout << "  -> HYBRID warmup reject-then-recover verified.\n";
 }
 

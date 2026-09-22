@@ -1386,7 +1386,7 @@ static void test_monitor_all_glitch_attribution() {
         STUTTO_ASSERT(dwm_fired);
         stuttometer::TriggerInfo trg_out{};
         uint64_t from_q = 0, to_q = 0;
-        bool polled = engine.poll_state(1000000 + qpc_freq, trg_out, from_q, to_q);
+        bool polled = engine.poll_state(stuttometer::get_current_qpc() + qpc_freq, trg_out, from_q, to_q);
         STUTTO_ASSERT(polled);
         STUTTO_ASSERT(trg_out.target_pid == 0);
         STUTTO_ASSERT(trg_out.target_tid == 0);
@@ -1402,7 +1402,7 @@ static void test_monitor_all_glitch_attribution() {
         STUTTO_ASSERT(audio_fired);
         stuttometer::TriggerInfo trg_out{};
         uint64_t from_q = 0, to_q = 0;
-        bool polled = engine.poll_state(2000000 + qpc_freq, trg_out, from_q, to_q);
+        bool polled = engine.poll_state(stuttometer::get_current_qpc() + qpc_freq, trg_out, from_q, to_q);
         STUTTO_ASSERT(polled);
         STUTTO_ASSERT(trg_out.target_pid == 0);
         STUTTO_ASSERT(trg_out.target_tid == 0);

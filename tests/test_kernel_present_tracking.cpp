@@ -492,7 +492,7 @@ static void test_dwm_pipeline_high_refresh() {
     stuttometer::TriggerEngine engine(cfg, qpc_freq);
     STUTTO_ASSERT(std::abs(engine.vblank_interval_ms() - VBLANK_240HZ_MS) < 1e-6);
 
-    const uint64_t base_qpc = 1000000;
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
 
     // Sub-threshold glitch (< 3.667 ms) rejected
     STUTTO_ASSERT(!engine.on_dwm_glitch(100, 200, 3.0, base_qpc, 0));
@@ -502,7 +502,8 @@ static void test_dwm_pipeline_high_refresh() {
 
     stuttometer::TriggerInfo trig;
     uint64_t from_qpc = 0, to_qpc = 0;
-    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    const uint64_t poll_qpc = stuttometer::get_current_qpc()
+                            + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
     STUTTO_ASSERT(engine.poll_state(poll_qpc, trig, from_qpc, to_qpc));
     STUTTO_ASSERT(trig.source == stuttometer::TriggerSource::DWM_GLITCH);
     STUTTO_ASSERT(trig.target_pid == 7777);
@@ -551,7 +552,8 @@ static void test_dwm_pipeline_high_refresh() {
 
     // Verify engine triggered with proper duration and spike ratio
     stuttometer::TriggerInfo trig2;
-    const uint64_t poll2_qpc = 20000000 + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    const uint64_t poll2_qpc = stuttometer::get_current_qpc()
+                             + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
     STUTTO_ASSERT(engine2.poll_state(poll2_qpc, trig2, from_qpc, to_qpc));
     STUTTO_ASSERT(trig2.source == stuttometer::TriggerSource::DWM_GLITCH);
     STUTTO_ASSERT(std::abs(trig2.duration_ms - expected_dur_ms) < 1e-3);

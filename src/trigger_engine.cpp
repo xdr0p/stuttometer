@@ -139,7 +139,7 @@ bool TriggerEngine::initiate_trigger_atomic(
         : TriggerState::FROZEN;
 
     if (next_state == TriggerState::FROZEN) {
-        frozen_timestamp_qpc_.store(timestamp_qpc, std::memory_order_release);
+        frozen_timestamp_qpc_.store(now_qpc, std::memory_order_release);
     }
 
     if (!state_.compare_exchange_strong(expected_claimed, next_state,
