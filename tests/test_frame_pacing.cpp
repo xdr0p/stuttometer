@@ -510,7 +510,7 @@ static void test_hybrid_warmup_reject_then_recover() {
     );
     STUTTO_ASSERT(res_spike.is_stutter);
     STUTTO_ASSERT(res_spike.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
-    STUTTO_ASSERT(stats.sample_count == 7); // Stutter frame rejected from baseline
+    STUTTO_ASSERT(stats.sample_count == 8); // Stutter frame is now pushed as a clamped warmup sample (prevents starvation)
     std::cout << "  -> HYBRID warmup reject-then-recover verified.\n";
 }
 
@@ -579,7 +579,7 @@ static void test_hybrid_warmup_static_suppression_below_200ms() {
     );
     STUTTO_ASSERT(res4.is_stutter);
     STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
-    STUTTO_ASSERT(stats.sample_count == 4); // Stutter frame rejected from baseline
+    STUTTO_ASSERT(stats.sample_count == 5); // Stutter frame is now pushed as a clamped warmup sample (prevents [4,7] starvation)
     std::cout << "  -> HYBRID warmup static suppression for frames 0..3 verified.\n";
 }
 
