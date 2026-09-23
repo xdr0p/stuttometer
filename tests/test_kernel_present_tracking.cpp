@@ -990,7 +990,7 @@ static void test_dxgi_duplicate_not_in_frame_timeline() {
     stuttometer::TriggerInfo trig{};
     uint64_t from_qpc = 0, to_qpc = 0;
     // poll_state compares against post_target_qpc_, which the trigger engine now stores
-    // using real get_current_qpc() (QPC domain, post-v0.5.5 fix), NOT the synthetic ETW
+    // using real get_current_qpc() (QPC domain, post-FileTime-domain fix), NOT the synthetic ETW
     // timestamp passed to on_dxgi_present(). Use real QPC here so the post-window deadline
     // is actually reachable.
     const uint64_t poll_qpc = stuttometer::get_current_qpc()
@@ -1134,7 +1134,7 @@ static void test_hybrid_static_floor_adaptive_high_refresh() {
             }
             if (trig) {
                 // Drain: COLLECTING_POST -> FROZEN -> COOLDOWN -> (past cooldown) -> ARMED.
-                // poll_state uses the real QPC domain (post-v0.5.5 fix), so we must pass a
+                // poll_state uses the real QPC domain (post-FileTime-domain fix), so we must pass a
                 // real get_current_qpc()-derived value to reach the post_target_qpc_ deadline.
                 const uint64_t drain_qpc = stuttometer::get_current_qpc()
                                          + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
