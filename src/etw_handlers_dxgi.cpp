@@ -24,8 +24,8 @@ void EtwSessionManager::handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord&
         PresentInFlight present_data{};
         bool has_in_flight = in_flight_present_.find_and_erase(thread_key, present_data);
 
-        // Always push Event 43 to flight recorder and ndjson writer (N-2)
-        // If orphaned (no matching Event 42), fallback skips inter-frame calculation to prevent baseline pollution
+        // Always push Event 43/56 to flight recorder and ndjson writer (N-2)
+        // If orphaned (no matching Event 42/55), fallback skips inter-frame calculation to prevent baseline pollution
         if (has_in_flight && present_data.pid == ctx.pid) {
             uint64_t start_qpc = present_data.start_qpc;
             uint64_t swapchain_ptr = present_data.swapchain_ptr;
@@ -39,23 +39,41 @@ void EtwSessionManager::handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord&
                 ctx.timestamp, prev_qpc, start_qpc, qpc_freq_, 10000000ULL
             );
 
+            // Tag duplicate present path artifacts before pushing so the flight recorder and NDJSON
+            // stream carry the flag for data fidelity and the correlator can filter them from the
+            // exported frame timeline. The canonical swapchain boundary is preserved in
+            // last_present_table_ regardless (unconditional insert below).
+            if (delta_res.is_duplicate_present_path) {
+                rec.flags |= EventFlags::DXGI_DUPLICATE_PRESENT_PATH;
+            }
+
             last_present_table_.insert(swapchain_key, { ctx.timestamp, ctx.pid, ctx.tid });
 
             uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, 10000000ULL));
             rec.duration_us = clamped_dur_us;
             flight_recorder_.push(rec);
 
-            fprintf(stderr, "[D-A] has_inflight=%d pid_match=%d reset=%d dur_us=%llu state=%d suppressed=%llu ev_qpc=%llu now_qpc=%llu\n",
+            fprintf(stderr, "[D-A] has_inflight=%d pid_match=%d reset=%d dup=%d dur_us=%llu state=%d suppressed=%llu ev_qpc=%llu now_qpc=%llu\n",
                     (int)has_in_flight,
                     (int)(present_data.pid == ctx.pid),
                     (int)delta_res.is_baseline_reset,
+                    (int)delta_res.is_duplicate_present_path,
                     (unsigned long long)delta_res.effective_dur_us,
                     (int)trigger_engine_.current_state(),
                     (unsigned long long)trigger_engine_.suppressed_trigger_count(),
                     (unsigned long long)ctx.timestamp,
                     (unsigned long long)get_current_qpc());
 
-            if (!delta_res.is_baseline_reset && delta_res.effective_dur_us > 0) {
+            // Guard pacing ingestion: duplicates must not pollute the rolling baseline, SessionBenchmark,
+            // or trigger reports. The flight recorder push and NDJSON write above are unconditional so
+            // that all Stop events remain observable in the raw stream.
+            // NOTE: In-flight pairing assumes 42→43→55→56 ordering. If a title emits 42→55→43→56,
+            // the 43-Stop pairs with the 55-Start (different thread keys), yielding a slightly wrong
+            // API duration for rec.duration_us on event 43 (cosmetic only). The dedup still works
+            // correctly because it operates on last_present_table_ inter-Stop deltas, not on API
+            // durations. This ordering ambiguity is documented here and intentionally not fixed
+            // (out of scope per design decision; see implementation plan Section 8).
+            if (!delta_res.is_baseline_reset && delta_res.effective_dur_us > 0 && !delta_res.is_duplicate_present_path) {
                 double dur_ms = delta_res.effective_dur_us / 1000.0;
                 trigger_engine_.on_dxgi_present(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, swapchain_key, ctx.cpu);
             }
@@ -64,6 +82,7 @@ void EtwSessionManager::handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord&
                     (int)has_in_flight, (int)(present_data.pid == ctx.pid));
             flight_recorder_.push(rec);
         }
+
     }
 
     NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);

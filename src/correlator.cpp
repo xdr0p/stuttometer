@@ -1123,7 +1123,8 @@ DiagnosticReport CorrelationEngine::correlate(
         for (const auto& rec : snapshot) {
             if (static_cast<EventCategory>(rec.category) == EventCategory::DXGI &&
                 rec.pid == trigger.target_pid &&
-                rec.duration_us > 0) {
+                rec.duration_us > 0 &&
+                !(rec.flags & EventFlags::DXGI_DUPLICATE_PRESENT_PATH)) {
                 present_stops.push_back(rec);
             }
         }

@@ -73,6 +73,12 @@ namespace EventFlags {
     inline constexpr uint16_t MEM_ALLOC_COMMIT        = 0x1000;
     inline constexpr uint16_t MEM_WS_TRIM_OUTSWAP      = 0x2000;
     inline constexpr uint16_t MEM_PHYSICAL_CONTIGUOUS  = 0x4000;
+    // Bit 15: Set on DXGI Present Stop events (id=43 or id=56) that are duplicate present path
+    // artifacts — a second Stop arriving on the same swapchain within DUPLICATE_PRESENT_PATH_MAX_US
+    // of the first Stop in the same frame (e.g. standard DXGI + MPO interleaved on a DX12 title).
+    // These events are pushed to the flight recorder and NDJSON stream for data fidelity but are
+    // excluded from pacing baseline ingestion and the exported frame timeline.
+    inline constexpr uint16_t DXGI_DUPLICATE_PRESENT_PATH = 0x8000; // Bit 15
 }
 
 // Strictly 56-byte POD normalized event record.

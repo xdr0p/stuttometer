@@ -19,6 +19,7 @@
 #include "trigger_engine.hpp"
 #include "fixed_table.hpp"
 #include "privilege_utils.hpp"
+#include "constants.hpp"
 
 namespace stuttometer {
 
@@ -191,6 +192,7 @@ static_assert(std::is_trivially_copyable_v<LastFlipEntry>, "LastFlipEntry must b
 struct PresentDeltaResult {
     uint64_t effective_dur_us{0};
     bool is_baseline_reset{false};
+    bool is_duplicate_present_path{false}; // True when frametime_us is implausibly small (< 1 ms): duplicate present path artifact
 };
 
 static inline PresentDeltaResult calculate_effective_present_duration(
@@ -224,6 +226,16 @@ static inline PresentDeltaResult calculate_effective_present_duration(
 
     result.effective_dur_us = (frametime_us > api_dur_us) ? frametime_us : api_dur_us;
     result.is_baseline_reset = false;
+
+    // Temporal deduplication: a sub-DUPLICATE_PRESENT_PATH_MAX_US inter-frame delta on the same swapchain
+    // is physically implausible for a real frame (even 240 Hz = ~4.17 ms). This is the signature of a
+    // duplicate present path artifact — e.g. a DX12 title emitting both standard DXGI (42/43) and
+    // MPO (55/56) Stop events for the same rendered frame. The event is recorded faithfully in the flight
+    // recorder and NDJSON stream (data fidelity); only pacing baseline ingestion is skipped by the caller.
+    if (frametime_us > 0 && frametime_us < DUPLICATE_PRESENT_PATH_MAX_US) {
+        result.is_duplicate_present_path = true;
+    }
+
     return result;
 }
 
