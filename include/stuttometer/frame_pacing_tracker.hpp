@@ -345,6 +345,14 @@ inline FramePacingResult evaluate_frame_pacing(
             } else {
                 // sample_count in [4, 7]: baseline has >= 4 valid samples; static triggers active.
                 if (dur_ms >= effective_static_threshold_ms) {
+                    // Push a clamped sample before returning so sample_count advances and warmup
+                    // can complete. Without this, a high-refresh display running below refresh
+                    // rate (e.g. 200 Hz / 5.25 ms threshold with ~8.5 ms frames) would trip
+                    // STATIC_THRESHOLD on every frame in this window, keeping sample_count pinned
+                    // at 4 forever and preventing the post-warmup adaptive floor from ever
+                    // activating.
+                    const double clamped_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
+                    push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, judder_swing_ratio);
                     res.is_stutter = true;
                     res.reason = TriggerReason::STATIC_THRESHOLD;
                     stats.last_delta_us = 0;
@@ -399,6 +407,21 @@ inline FramePacingResult evaluate_frame_pacing(
     }
 
     // 3. Static Threshold Ceiling Fallback
+    // In HYBRID mode, once the baseline is established (>= 8 samples), lift the static ceiling above
+    // the observed mean if and only if the threshold would otherwise fire on normal-cadence frames.
+    // This corrects vblank-derived thresholds that sit below the game's actual frame time
+    // (e.g. effective_static = 5.25 ms at 200 Hz vs ~8.5 ms actual for a 120 FPS title).
+    // Guard: only raise when threshold < mean (i.e. threshold would fire on a normal-cadence frame).
+    // At 60 FPS (mean 16.67 ms, threshold 17.5 ms), threshold already exceeds mean → no adjustment.
+    // effective_static_threshold_ms is passed by value; does NOT apply to STATIC_ONLY mode.
+    if (mode == FrameTriggerMode::HYBRID && stats.sample_count >= 8 &&
+        effective_static_threshold_ms < mean_ms) {
+        effective_static_threshold_ms = std::max(
+            effective_static_threshold_ms,
+            mean_ms + min_spike_delta_ms
+        );
+    }
+
     if (mode == FrameTriggerMode::HYBRID || mode == FrameTriggerMode::STATIC_ONLY) {
         if (dur_ms >= effective_static_threshold_ms) {
             res.is_stutter = true;
