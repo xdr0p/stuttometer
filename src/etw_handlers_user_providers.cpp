@@ -149,6 +149,10 @@ void EtwSessionManager::handle_process_event(PEVENT_RECORD p_event, EtwEventReco
                 size_t wlen = 0;
                 bool null_terminated = false;
                 bool valid_chars = true;
+                // Direct pointer arithmetic (p_ws[wlen]) relies on x64 unaligned 2-byte read
+                // guarantees. If this project is ever ported to ARM64, this loop must be
+                // refactored to per-character std::memcpy reads (ARM64 faults on unaligned
+                // multi-byte loads).
                 while (wlen < max_wchars && wlen < MAX_PATH) {
                     wchar_t wc = p_ws[wlen];
                     if (wc == L'\0') { null_terminated = true; break; }

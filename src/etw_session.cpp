@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <vector>
 #include <cstring>
+#include <cassert>
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
@@ -556,6 +557,10 @@ void EtwSessionManager::kernel_trace_consumer_loop() {
 
 void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
     if (!p_event) return;
+#ifdef _DEBUG
+    // UserDataLength is USHORT; documents the invariant for static analyzers.
+    assert(p_event->UserDataLength <= 65535 && "ETW USHORT invariant");
+#endif
     auto* mgr = reinterpret_cast<EtwSessionManager*>(p_event->UserContext);
     if (!mgr || !mgr->running_.load(std::memory_order_acquire)) return;
 
