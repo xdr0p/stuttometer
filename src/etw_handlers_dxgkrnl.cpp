@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cstring>
 #include "stuttometer/etw_session.hpp"
-#include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
 namespace stuttometer {
@@ -48,10 +47,7 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
 
     last_flip_table_.insert(flip_key, { ctx.timestamp, static_cast<uint32_t>(allocation_ptr & 0xFFFFFFFF), ctx.pid, ctx.tid });
 
-    flight_recorder_.push(rec);
-
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_event(rec);
 
     // DWM/System Filtering (S1, N-3):
     // In DWM-composed borderless mode, flips originate from DWM/System (PID 4) and are filtered here;
@@ -68,16 +64,14 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
 
 void EtwSessionManager::handle_dxgkrnl_vsync_event(PEVENT_RECORD /*p_event*/, EtwEventRecord& rec, const EventContext& /*ctx*/) noexcept {
     rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VSYNCDPC);
-    flight_recorder_.push(rec);
-
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_event(rec);
 }
 
 void EtwSessionManager::handle_dxgkrnl_vidmm_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
     rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VRAM_PAGING);
     const uint16_t task = p_event->EventHeader.EventDescriptor.Task;
     if (ctx.event_id == 370 || task == 222) {
+        bool data_ok = false;
         if (p_event->UserDataLength >= 28 && p_event->UserData) {
             uint64_t commitment = 0;
             uint64_t old_commitment = 0;
@@ -91,10 +85,14 @@ void EtwSessionManager::handle_dxgkrnl_vidmm_event(PEVENT_RECORD p_event, EtwEve
                 rec.pid = (process_id != 0) ? process_id : ctx.pid;
                 rec.auxiliary_data = commitment;
                 rec.flags = EventFlags::VRAM_DEMOTED_COMMITMENT;
-                flight_recorder_.push(rec);
+                data_ok = true;
             }
         }
-    } else if (ctx.event_id == 367 || task == 219) {
+        emit_event(rec, data_ok);
+        return;
+    }
+    if (ctx.event_id == 367 || task == 219) {
+        bool data_ok = false;
         if (p_event->UserDataLength >= 31 && p_event->UserData) {
             uint64_t new_usage = 0;
             uint32_t process_id = 0;
@@ -108,16 +106,18 @@ void EtwSessionManager::handle_dxgkrnl_vidmm_event(PEVENT_RECORD p_event, EtwEve
                 rec.pid = (process_id != 0) ? process_id : ctx.pid;
                 rec.auxiliary_data = new_usage;
                 rec.flags = EventFlags::VRAM_USAGE_OVER_BUDGET;
-                flight_recorder_.push(rec);
+                data_ok = true;
             }
         }
+        emit_event(rec, data_ok);
+        return;
     }
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_ndjson_only(rec);
 }
 
 void EtwSessionManager::handle_dxgkrnl_paging_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& /*ctx*/) noexcept {
     rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_VRAM_PAGING);
+    bool data_ok = false;
     if (p_event->UserDataLength >= 64 && p_event->UserData) {
         uint64_t number_of_pages = 0;
         const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
@@ -126,11 +126,10 @@ void EtwSessionManager::handle_dxgkrnl_paging_event(PEVENT_RECORD p_event, EtwEv
         if (number_of_pages > 0) {
             rec.auxiliary_data = number_of_pages * 4096ULL;
             rec.flags = EventFlags::VRAM_PAGING_TRANSFER;
-            flight_recorder_.push(rec);
+            data_ok = true;
         }
     }
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_event(rec, data_ok);
 }
 
 } // namespace stuttometer

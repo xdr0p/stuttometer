@@ -1,6 +1,5 @@
 #include <cstring>
 #include "stuttometer/etw_session.hpp"
-#include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
 namespace stuttometer {

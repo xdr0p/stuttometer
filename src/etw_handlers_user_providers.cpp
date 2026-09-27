@@ -2,7 +2,6 @@
 #include <cstring>
 #include <string_view>
 #include "stuttometer/etw_session.hpp"
-#include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
 namespace stuttometer {
@@ -24,10 +23,7 @@ void EtwSessionManager::handle_audio_event(PEVENT_RECORD p_event, EtwEventRecord
         rec.payload.audio.error_code = error_code;
         rec.auxiliary_data = glitch_count;
 
-        flight_recorder_.push(rec);
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+        emit_event(rec);
 
         trigger_engine_.on_audio_glitch(ctx.pid, ctx.tid, glitch_count, ctx.timestamp, ctx.cpu);
     }
@@ -70,10 +66,7 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
         recent_dwm_glitches_qpc_[slot].store(ctx.timestamp, std::memory_order_release);
     }
 
-    flight_recorder_.push(rec);
-
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_event(rec);
 
     if (!is_dedup) {
         trigger_engine_.on_dwm_glitch(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, ctx.cpu);
@@ -83,23 +76,22 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
 void EtwSessionManager::handle_power_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
     if (ctx.event_id == 37) {
         rec.category = static_cast<uint16_t>(EventCategory::THERMAL_THROTTLE);
-
+        uint32_t core_number = 0;
+        uint32_t cap_duration_sec = 0;
+        bool data_ok = false;
         if (p_event->UserDataLength >= 24 && p_event->UserData) {
             const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-            uint32_t core_number = 0;
-            uint32_t cap_duration_sec = 0;
             std::memcpy(&core_number, raw + 4, sizeof(uint32_t));
             std::memcpy(&cap_duration_sec, raw + 8, sizeof(uint32_t));
             if (core_number <= 1024 && cap_duration_sec <= 86400) {
                 rec.cpu_index = static_cast<uint8_t>(std::min(core_number, 255U));
                 rec.auxiliary_data = cap_duration_sec;
                 rec.duration_us = 0;
-                flight_recorder_.push(rec);
+                data_ok = true;
             }
         }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+        emit_event(rec, data_ok);
+        return;
     }
 }
 
@@ -117,23 +109,22 @@ void EtwSessionManager::handle_antimalware_event(PEVENT_RECORD p_event, EtwEvent
 
     if (ctx.opcode == 1) { // win:Start
         in_flight_scans_.insert(scan_key, { ctx.timestamp, ctx.pid, ctx.tid });
-    } else if (ctx.opcode == 2) { // win:Stop
+        emit_ndjson_only(rec);
+        return;
+    }
+    if (ctx.opcode == 2) { // win:Stop
         AntimalwareScanInFlight scan_data{};
-        if (in_flight_scans_.find_and_erase(scan_key, scan_data)) {
-            if (ctx.timestamp >= scan_data.start_qpc) {
-                const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - scan_data.start_qpc, qpc_freq_));
-                if (delta_us <= KERNEL_SINGLE_EVENT_CAP_US) {
-                    rec.duration_us = static_cast<uint32_t>(delta_us);
-                }
-            }
+        const bool found = in_flight_scans_.find_and_erase(scan_key, scan_data);
+        if (found) {
+            rec.duration_us = clamped_qpc_delta_us(
+                ctx.timestamp, scan_data.start_qpc, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
         }
-        if (rec.duration_us > 0) {
-            flight_recorder_.push(rec);
-        }
+        const bool data_ok = found && (rec.duration_us > 0);
+        emit_event(rec, data_ok);
+        return;
     }
 
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_ndjson_only(rec);
 }
 
 // Microsoft-Windows-Kernel-Process ProcessStart (Event ID 1) payload:
@@ -195,8 +186,7 @@ void EtwSessionManager::handle_process_event(PEVENT_RECORD p_event, EtwEventReco
         }
     }
 
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_ndjson_only(rec);
 }
 
 } // namespace stuttometer

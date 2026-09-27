@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cstring>
 #include "stuttometer/etw_session.hpp"
-#include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include "etw_kernel_opcodes.hpp"
 
@@ -130,11 +129,11 @@ void EtwSessionManager::handle_nt_cswitch_event(PEVENT_RECORD p_event, EtwEventR
         rec.payload.cswitch.prev_tid = old_tid;
         rec.payload.cswitch.prev_pid = old_pid;
 
-        flight_recorder_.push(rec);
+        emit_event(rec);
+        return;
     }
 
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_ndjson_only(rec);
 }
 
 void EtwSessionManager::handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
@@ -154,10 +153,14 @@ void EtwSessionManager::handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventReco
                 rec.flags |= EventFlags::DISK_IS_WRITE;
             }
         }
-    } else if (ctx.opcode == KERNEL_OPCODE_DISK_READ || ctx.opcode == KERNEL_OPCODE_DISK_WRITE) {
+        emit_ndjson_only(rec);
+        return;
+    }
+    if (ctx.opcode == KERNEL_OPCODE_DISK_READ || ctx.opcode == KERNEL_OPCODE_DISK_WRITE) {
         if (ctx.opcode == KERNEL_OPCODE_DISK_WRITE) {
             rec.flags |= EventFlags::DISK_IS_WRITE;
         }
+        bool data_ok = false;
         if (p_event->UserDataLength >= 40 && p_event->UserData) {
             const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
             uint32_t size_bytes = 0;
@@ -185,21 +188,20 @@ void EtwSessionManager::handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventReco
             } else {
                 rec.duration_us = 0;
             }
-            if (rec.duration_us > 0 || rec.pid != 0) {
-                flight_recorder_.push(rec);
-            }
+            data_ok = (rec.duration_us > 0 || rec.pid != 0);
         }
+        emit_event(rec, data_ok);
+        return;
     }
 
-    NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-    if (writer) writer->push(rec);
+    emit_ndjson_only(rec);
 }
 
 void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
     // Hard Page Fault (Opcode 32 / HardFault)
     if (ctx.opcode == KERNEL_OPCODE_HARDFAULT) {
         rec.category = static_cast<uint16_t>(EventCategory::PAGE_FAULT);
-
+        bool data_ok = false;
         if (p_event->UserDataLength >= 40 && p_event->UserData) {
             const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
             int64_t initial_time = 0;
@@ -232,16 +234,15 @@ void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRec
             } else {
                 rec.duration_us = 0;
             }
-            flight_recorder_.push(rec);
+            data_ok = true;
         }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+        emit_event(rec, data_ok);
+        return;
     }
     // VirtualAlloc (Opcode 98 under PAGE_FAULT_GUID)
-    else if (ctx.opcode == KERNEL_OPCODE_VIRTUAL_ALLOC) {
+    if (ctx.opcode == KERNEL_OPCODE_VIRTUAL_ALLOC) {
         rec.category = static_cast<uint16_t>(EventCategory::MEM_VIRTUAL_ALLOC);
-
+        bool data_ok = false;
         if (p_event->UserDataLength >= 24 && p_event->UserData) {
             const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
             uint64_t base_addr = 0;
@@ -258,14 +259,13 @@ void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRec
             rec.auxiliary_data = region_size;
             rec.flags = (alloc_flags & MEM_COMMIT) ? EventFlags::MEM_ALLOC_COMMIT : EventFlags::NONE;
 
-            if (region_size >= (4 * 1024 * 1024ULL) && (alloc_flags & (MEM_COMMIT | MEM_RESET | MEM_LARGE_PAGES)) != 0) {
-                flight_recorder_.push(rec);
-            }
+            data_ok = region_size >= (4 * 1024 * 1024ULL) && (alloc_flags & (MEM_COMMIT | MEM_RESET | MEM_LARGE_PAGES)) != 0;
         }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+        emit_event(rec, data_ok);
+        return;
     }
+
+    emit_ndjson_only(rec);
 }
 
 } // namespace stuttometer
