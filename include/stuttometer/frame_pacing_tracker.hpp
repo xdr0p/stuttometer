@@ -167,6 +167,16 @@ struct alignas(64) RollingFrameStats {
 static_assert(sizeof(RollingFrameStats) == 320, "RollingFrameStats must be exactly 320 bytes (5 cache lines)");
 static_assert(std::is_trivially_copyable_v<RollingFrameStats>, "RollingFrameStats must be trivially copyable");
 
+// Clears all four candidate accumulator fields. Used at 7 sites: reset_frame_stats,
+// pause reset, promotion success, inconsistent-candidate rejection, CADENCE_JUDDER trigger,
+// STATIC_THRESHOLD fallback, and clean-frame tail.
+inline void clear_cadence_candidate(RollingFrameStats& stats) noexcept {
+    stats.candidate_count     = 0;
+    stats.candidate_sum_us    = 0;
+    stats.candidate_sum_sq_us = 0;
+    stats.candidate_first_qpc = 0;
+}
+
 inline void reset_frame_stats(RollingFrameStats& stats, uint64_t qpc_ts = 0) noexcept {
     for (size_t i = 0; i < 64; ++i) {
         stats.durations_us[i] = 0;
@@ -179,11 +189,8 @@ inline void reset_frame_stats(RollingFrameStats& stats, uint64_t qpc_ts = 0) noe
     stats.write_idx = 0;
     stats.alternating_cadence_count = 0;
     stats._align_pad0 = 0;
-    stats.candidate_count = 0;
     stats._align_pad1 = 0;
-    stats.candidate_first_qpc = 0;
-    stats.candidate_sum_us = 0;
-    stats.candidate_sum_sq_us = 0;
+    clear_cadence_candidate(stats);
 }
 
 inline double calculate_mean_ms(const RollingFrameStats& stats) noexcept {
@@ -263,6 +270,110 @@ inline void push_clean_frame(RollingFrameStats& stats, uint32_t dur_us, uint64_t
     }
 }
 
+// Clamps dur_ms into [1 µs, max_us] and forwards to push_clean_frame.
+// The default max_us of WARMUP_CLAMP_US matches the warmup-phase call sites;
+// the post-warmup clean-frame tail passes DEFENSIVE_DURATION_CLAMP_US explicitly.
+inline void push_clamped_clean_frame(
+    RollingFrameStats& stats,
+    double dur_ms,
+    uint64_t timestamp_qpc,
+    double swing_ratio,
+    double max_us = WARMUP_CLAMP_US
+) noexcept {
+    const double clamped_us = std::clamp(dur_ms * 1000.0, 1.0, max_us);
+    push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, swing_ratio);
+}
+
+// Accumulates stutter-candidate frames and promotes the candidate to the rolling
+// baseline when 60+ consistent samples with σ < 1.0 ms have been observed and the
+// static gate condition is satisfied.
+//
+// Returns true on promotion, in which case out_promoted_avg_ms holds the new
+// baseline mean in milliseconds and stats.candidate_* have been cleared.
+// Returns false otherwise; the caller must NOT modify res.baseline_* on false.
+//
+// The caller is responsible for setting res.is_stutter / res.reason; this helper
+// touches only the candidate accumulator fields and (on promotion) the rolling
+// baseline fields. It does NOT touch stats.last_delta_us or
+// stats.alternating_cadence_count — those are cadence-detector state, reset by
+// the caller on every stutter.
+//
+// Uses sum-of-squares variance estimator (not Welford — layout-constrained).
+[[nodiscard]] inline bool process_cadence_candidate(
+    RollingFrameStats& stats,
+    double dur_ms,
+    uint64_t timestamp_qpc,
+    FrameTriggerMode mode,
+    double effective_static_threshold_ms,
+    double& out_promoted_avg_ms
+) noexcept {
+    const uint32_t dur_us =
+        static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1.0, DEFENSIVE_DURATION_CLAMP_US));
+
+    // Seed case: first frame of a new candidate accumulation.
+    if (stats.candidate_count == 0) {
+        stats.candidate_first_qpc  = timestamp_qpc;
+        stats.candidate_sum_us     = dur_us;
+        stats.candidate_sum_sq_us  = static_cast<uint64_t>(dur_us) * dur_us;
+        stats.candidate_count      = 1;
+        return false;
+    }
+
+    // Consistency check: reject frames whose duration deviates from the running
+    // candidate mean beyond a tolerance of max(1.5 ms, 15% of mean).
+    const double cand_mean_us = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
+    const double cand_mean_ms = cand_mean_us / 1000.0;
+    const double tol_ms       = std::max(1.5, cand_mean_ms * 0.15);
+
+    if (std::abs(dur_ms - cand_mean_ms) > tol_ms) {
+        // Inconsistent candidate: reset. The frame is discarded without seeding.
+        clear_cadence_candidate(stats);
+        return false;
+    }
+
+    // Accumulate (capped at 1000 samples to bound uint64_t sum_sq_dur_us growth).
+    if (stats.candidate_count < 1000) {
+        stats.candidate_sum_us    += dur_us;
+        stats.candidate_sum_sq_us += static_cast<uint64_t>(dur_us) * dur_us;
+        ++stats.candidate_count;
+    }
+
+    // Promotion threshold not yet reached.
+    if (stats.candidate_count < 60) {
+        return false;
+    }
+
+    const double mean_us    = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
+    const double mean_sq_us = static_cast<double>(stats.candidate_sum_sq_us) / stats.candidate_count;
+    const double var_us     = std::max(0.0, mean_sq_us - (mean_us * mean_us));
+    const double sigma_ms   = std::sqrt(var_us) / 1000.0;
+
+    const bool static_gate_passed =
+        (mode == FrameTriggerMode::DYNAMIC_ONLY) ||
+        ((mean_us / 1000.0) < effective_static_threshold_ms);
+
+    if (sigma_ms >= 1.0 || !static_gate_passed) {
+        // IMPORTANT: do NOT clear the candidate here. See docstring above and
+        // test_static_gate_block_then_reenter.
+        return false;
+    }
+
+    // Promote candidate → baseline.
+    const uint32_t seed_us = static_cast<uint32_t>(mean_us);
+    for (size_t i = 0; i < 64; ++i) {
+        stats.durations_us[i] = seed_us;
+    }
+    stats.sum_dur_us    = static_cast<uint64_t>(seed_us) * 64ULL;
+    stats.sum_sq_dur_us = static_cast<uint64_t>(seed_us) * seed_us * 64ULL;
+    stats.sample_count  = 64;
+    stats.write_idx     = 0;
+
+    clear_cadence_candidate(stats);
+
+    out_promoted_avg_ms = mean_us / 1000.0;
+    return true;
+}
+
 struct FramePacingResult {
     bool is_stutter{false};
     TriggerReason reason{TriggerReason::NONE};
@@ -303,13 +414,9 @@ inline FramePacingResult evaluate_frame_pacing(
     }
 
     if (pause_reset_occurred) {
-        stats.candidate_count = 0;
-        stats.candidate_sum_us = 0;
-        stats.candidate_sum_sq_us = 0;
-        stats.candidate_first_qpc = 0;
+        clear_cadence_candidate(stats);
         // Post-pause frame: seed baseline without evaluating as a stutter or polluting with pause duration
-        const double seed_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-        push_clean_frame(stats, static_cast<uint32_t>(seed_us), timestamp_qpc, judder_swing_ratio);
+        push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
         return res;
     }
 
@@ -353,59 +460,57 @@ inline FramePacingResult evaluate_frame_pacing(
                 stats.alternating_cadence_count = 0;
                 return res;
             }
-            const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-            push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
+            push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
             return res;
         } else if (mode == FrameTriggerMode::HYBRID) {
-            // HYBRID Warmup:
+            bool is_warmup_stall = false;
+            bool static_trigger  = false;
+
             if (stats.sample_count < 4) {
-                // Suppress static trigger during initial 4 frames to let baseline stabilize.
-                const double base_present_ms = invert_effective_static_threshold(effective_static_threshold_ms);
+                // Initial 4 frames: suppress static trigger entirely to let the baseline
+                // stabilize. Only truly catastrophic frames (>= 12x base present time,
+                // clamped to [50 ms, 500 ms]) are clamped and pushed so warmup can
+                // complete; ordinary slow frames are pushed unclamped.
+                const double base_present_ms =
+                    invert_effective_static_threshold(effective_static_threshold_ms);
                 const double catastrophic_cutoff_ms = std::clamp(12.0 * base_present_ms, 50.0, 500.0);
+
                 if (dur_ms >= catastrophic_cutoff_ms) {
-                    // Push a clamped sample so sample_count advances and warmup can complete.
-                    // Without this, every catastrophic stall keeps sample_count=0 forever (starvation).
-                    const double clamped_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-                    push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, judder_swing_ratio);
-                    stats.last_delta_us = 0;
-                    stats.alternating_cadence_count = 0;
-                    return res; // Still suppress the trigger, but populate the baseline
+                    is_warmup_stall = true; // Catastrophic stall during early warmup: suppress trigger, advance baseline
                 }
-            } else {
-                // sample_count in [4, 7]: baseline has >= 4 valid samples; static triggers active.
-                if (dur_ms >= effective_static_threshold_ms) {
-                    // Push a clamped sample before returning so sample_count advances and warmup
-                    // can complete. Without this, a high-refresh display running below refresh
-                    // rate (e.g. 200 Hz / 5.25 ms threshold with ~8.5 ms frames) would trip
-                    // STATIC_THRESHOLD on every frame in this window, keeping sample_count pinned
-                    // at 4 forever and preventing the post-warmup adaptive floor from ever
-                    // activating.
-                    const double clamped_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-                    push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, judder_swing_ratio);
-                    res.is_stutter = true;
-                    res.reason = TriggerReason::STATIC_THRESHOLD;
-                    stats.last_delta_us = 0;
-                    stats.alternating_cadence_count = 0;
-                    return res;
-                }
+            } else if (dur_ms >= effective_static_threshold_ms) {
+                // sample_count in [4, 7]: baseline has >= 4 valid samples; static
+                // triggers are active. Push a clamped sample BEFORE returning so
+                // sample_count advances and warmup can complete.
+                is_warmup_stall = true;     // Static stall during late warmup: advance baseline AND fire trigger
+                static_trigger  = true;
             }
-            // Tighter 100ms clamp during warmup prevents early baseline skew with small sample counts
-            const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-            push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
+
+            if (is_warmup_stall) {
+                push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
+                stats.last_delta_us = 0;
+                stats.alternating_cadence_count = 0;
+                if (static_trigger) {
+                    res.is_stutter = true;
+                    res.reason     = TriggerReason::STATIC_THRESHOLD;
+                }
+                return res;
+            }
+
+            // Normal warmup frame: push with the 100 ms clamp.
+            push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
             return res;
         } else if (mode == FrameTriggerMode::DYNAMIC_ONLY) {
             // DYNAMIC_ONLY: Suppress static trigger; push a clamped sample so warmup can complete.
             // Without pushing, a display where every frame >= threshold keeps sample_count=0 forever
             // (e.g. 200 Hz display with 5 ms threshold, 8 ms actual frames -> permanent starvation).
             if (dur_ms >= effective_static_threshold_ms) {
-                const double clamped_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-                push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, judder_swing_ratio);
+                push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
                 stats.last_delta_us = 0;
                 stats.alternating_cadence_count = 0;
                 return res; // Still suppress the trigger, but populate the baseline
             }
-            const double clamped_warmup_us = std::clamp(dur_ms * 1000.0, 1.0, 100000.0);
-            push_clean_frame(stats, static_cast<uint32_t>(clamped_warmup_us), timestamp_qpc, judder_swing_ratio);
+            push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
             return res;
         }
     }
@@ -420,60 +525,12 @@ inline FramePacingResult evaluate_frame_pacing(
             stats.last_delta_us = 0;
             stats.alternating_cadence_count = 0;
 
-            const uint32_t dur_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1.0, 10000000.0));
-            if (stats.candidate_count == 0) {
-                stats.candidate_first_qpc = timestamp_qpc;
-                stats.candidate_sum_us = dur_us;
-                stats.candidate_sum_sq_us = static_cast<uint64_t>(dur_us) * dur_us;
-                stats.candidate_count = 1;
-            } else {
-                const double cand_mean_us = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
-                const double cand_mean_ms = cand_mean_us / 1000.0;
-                const double consistency_tol_ms = std::max(1.5, cand_mean_ms * 0.15);
-
-                if (std::abs(dur_ms - cand_mean_ms) <= consistency_tol_ms) {
-                    if (stats.candidate_count < 1000) {
-                        stats.candidate_sum_us += dur_us;
-                        stats.candidate_sum_sq_us += (static_cast<uint64_t>(dur_us) * dur_us);
-                        ++stats.candidate_count;
-                    }
-
-                    if (stats.candidate_count >= 60) {
-                        const double mean_us = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
-                        const double mean_sq_us = static_cast<double>(stats.candidate_sum_sq_us) / stats.candidate_count;
-                        const double var_us = std::max(0.0, mean_sq_us - (mean_us * mean_us));
-                        const double sigma_cand_ms = std::sqrt(var_us) / 1000.0;
-
-                        const bool static_gate_passed = (mode == FrameTriggerMode::DYNAMIC_ONLY) ||
-                                                        ((mean_us / 1000.0) < effective_static_threshold_ms);
-
-                        if (sigma_cand_ms < 1.0 && static_gate_passed) {
-                            const uint32_t seed_us = static_cast<uint32_t>(mean_us);
-                            for (size_t i = 0; i < 64; ++i) {
-                                stats.durations_us[i] = seed_us;
-                            }
-                            stats.sum_dur_us = static_cast<uint64_t>(seed_us) * 64ULL;
-                            stats.sum_sq_dur_us = static_cast<uint64_t>(seed_us) * seed_us * 64ULL;
-                            stats.sample_count = 64;
-                            stats.write_idx = 0;
-
-                            stats.candidate_count = 0;
-                            stats.candidate_sum_us = 0;
-                            stats.candidate_sum_sq_us = 0;
-                            stats.candidate_first_qpc = 0;
-
-                            res.baseline_avg_ms = mean_us / 1000.0;
-                            res.baseline_fps = (res.baseline_avg_ms > 0.0) ? (1000.0 / res.baseline_avg_ms) : 0.0;
-                            res.spike_ratio = 1.0;
-                        }
-                    }
-                } else {
-                    // Inconsistent candidate: reset (frame is discarded from candidate, not seeded)
-                    stats.candidate_count = 0;
-                    stats.candidate_sum_us = 0;
-                    stats.candidate_sum_sq_us = 0;
-                    stats.candidate_first_qpc = 0;
-                }
+            double promoted_avg_ms = 0.0;
+            if (process_cadence_candidate(stats, dur_ms, timestamp_qpc, mode,
+                                          effective_static_threshold_ms, promoted_avg_ms)) {
+                res.baseline_avg_ms = promoted_avg_ms;
+                res.baseline_fps    = (promoted_avg_ms > 0.0) ? (1000.0 / promoted_avg_ms) : 0.0;
+                res.spike_ratio     = 1.0;
             }
 
             return res;
@@ -487,10 +544,7 @@ inline FramePacingResult evaluate_frame_pacing(
                 res.reason = TriggerReason::CADENCE_JUDDER;
                 stats.last_delta_us = 0;
                 stats.alternating_cadence_count = 0;
-                stats.candidate_count = 0;
-                stats.candidate_sum_us = 0;
-                stats.candidate_sum_sq_us = 0;
-                stats.candidate_first_qpc = 0;
+                clear_cadence_candidate(stats);
                 return res;
             }
         }
@@ -504,20 +558,14 @@ inline FramePacingResult evaluate_frame_pacing(
             res.reason = TriggerReason::STATIC_THRESHOLD;
             stats.last_delta_us = 0;
             stats.alternating_cadence_count = 0;
-            stats.candidate_count = 0;
-            stats.candidate_sum_us = 0;
-            stats.candidate_sum_sq_us = 0;
-            stats.candidate_first_qpc = 0;
+            clear_cadence_candidate(stats);
             return res;
         }
     }
 
     // Clean frame: push into rolling statistics
-    stats.candidate_count = 0;
-    stats.candidate_sum_us = 0;
-    stats.candidate_sum_sq_us = 0;
-    stats.candidate_first_qpc = 0;
-    push_clean_frame(stats, static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1.0, 10000000.0)), timestamp_qpc, judder_swing_ratio);
+    clear_cadence_candidate(stats);
+    push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio, DEFENSIVE_DURATION_CLAMP_US);
     return res;
 }
 
