@@ -11,6 +11,68 @@
 
 namespace stuttometer {
 
+namespace detail {
+
+// ── Scoring primitives: constexpr, zero-allocation, branch-free ──────────
+
+/// Linear severity: value/scale clamped to [0, 1].
+[[nodiscard]] constexpr double severity_linear(double value, double scale) noexcept {
+    return (scale > 0.0) ? std::clamp(value / scale, 0.0, 1.0) : 0.0;
+}
+
+/// Temporal proximity: linear decay from 1.0 at offset=0 to 0.0 at |offset|=window.
+[[nodiscard]] constexpr double proximity_decay(double offset_ms, double window_ms) noexcept {
+    return (window_ms > 0.0) ? std::max(0.0, 1.0 - std::abs(offset_ms) / window_ms) : 0.0;
+}
+
+/// Target-PID affinity: 1.0 exact match, monitor_all_score for auto-detect, mismatch_score otherwise.
+[[nodiscard]] constexpr double target_pid_affinity(
+    uint32_t event_pid, uint32_t target_pid,
+    double monitor_all_score, double mismatch_score = 0.0
+) noexcept {
+    if (target_pid != 0 && event_pid == target_pid) return 1.0;
+    return (target_pid == 0) ? monitor_all_score : mismatch_score;
+}
+
+/// Core affinity: 1.0 exact match, mismatch_score otherwise.
+[[nodiscard]] constexpr double core_affinity(
+    uint8_t event_core, uint8_t trigger_core, double mismatch_score
+) noexcept {
+    return (event_core == trigger_core) ? 1.0 : mismatch_score;
+}
+
+/// Weighted confidence: base + Σ(wᵢ·fᵢ), clamped to [lo, hi].
+/// Note: Defaulted factor pairs allow 1-pair (Thermal), 2-pair, 3-pair, 4-pair, or 5-pair calls without compile errors.
+[[nodiscard]] constexpr double confidence_weighted(
+    double base, double lo, double hi,
+    double w0, double f0,
+    double w1 = 0.0, double f1 = 0.0,
+    double w2 = 0.0, double f2 = 0.0,
+    double w3 = 0.0, double f3 = 0.0,
+    double w4 = 0.0, double f4 = 0.0
+) noexcept {
+    return std::clamp(base + (w0 * f0) + (w1 * f1) + (w2 * f2) + (w3 * f3) + (w4 * f4), lo, hi);
+}
+
+// ── Ingestion threshold helpers: constexpr, unit-safe ───────────────────
+
+[[nodiscard]] constexpr bool exceeds_duration_us(uint32_t duration_us, uint32_t threshold_ms) noexcept {
+    return static_cast<uint64_t>(duration_us) >= static_cast<uint64_t>(threshold_ms) * 1000ull;
+}
+
+[[nodiscard]] constexpr bool exceeds_size_bytes(uint64_t bytes, uint32_t threshold_mb) noexcept {
+    return bytes >= static_cast<uint64_t>(threshold_mb) * 1024u * 1024u;
+}
+
+template <typename Vec>
+inline void try_emplace_candidate(Vec& vec, const EtwEventRecord& rec, double offset_ms, bool predicate) {
+    if (predicate) {
+        vec.push_back({ rec, offset_ms });
+    }
+}
+
+} // namespace detail
+
 static std::string format_hex_address(uint64_t addr) {
     std::stringstream ss;
     ss << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(16) << addr;
@@ -30,30 +92,59 @@ static std::string get_current_utc_timestamp() {
     return ss.str();
 }
 
+namespace {
+
+struct HypothesisTagEntry {
+    std::string_view name;
+    AttributionTag   tag;
+};
+
+constexpr std::array<HypothesisTagEntry, 15> kHypothesisTagTable = {{
+    // EXTERNAL_CONTENTION (8)
+    {"dpc_isr_spike",                        AttributionTag::EXTERNAL_CONTENTION},
+    {"disk_io_stall",                        AttributionTag::EXTERNAL_CONTENTION},
+    {"context_switch_interference",          AttributionTag::EXTERNAL_CONTENTION},
+    {"thermal_throttle",                     AttributionTag::EXTERNAL_CONTENTION},
+    {"antimalware_interference",             AttributionTag::EXTERNAL_CONTENTION},
+    {"low_memory_working_set_trim_stall",    AttributionTag::EXTERNAL_CONTENTION},
+    {"physical_memory_allocation_latency",   AttributionTag::EXTERNAL_CONTENTION},
+    {"unprofiled_hardware_or_smi_stall",     AttributionTag::EXTERNAL_CONTENTION},
+    // GAME_ENGINE (6)
+    {"gpu_pipeline_stall",                   AttributionTag::GAME_ENGINE},
+    {"d3d12_shader_pso_compilation_stall",   AttributionTag::GAME_ENGINE},
+    {"frame_pacing_judder",                  AttributionTag::GAME_ENGINE},
+    {"page_fault_stall",                     AttributionTag::GAME_ENGINE},
+    {"vram_exhaustion_paging_stall",         AttributionTag::GAME_ENGINE},
+    {"virtual_memory_allocation_stall",      AttributionTag::GAME_ENGINE},
+    // DWM_COMPOSITION (1)
+    {"dwm_compositor_stall",                 AttributionTag::DWM_COMPOSITION},
+}};
+
+[[nodiscard]] inline EvidenceItem base_evidence(
+    const EtwEventRecord& rec,
+    double offset_ms,
+    std::string_view event_type
+) {
+    EvidenceItem ev{};
+    ev.event_type = event_type; // Direct string_view assignment in C++17 (no temporary string)
+    ev.duration_us = rec.duration_us;
+    ev.cpu_core = rec.cpu_index;
+    ev.offset_from_trigger_ms = offset_ms;
+    ev.pid = rec.pid;
+    return ev;
+}
+
+} // anonymous namespace
+
 AttributionTag attribution_tag_for_hypothesis(std::string_view hypothesis) noexcept {
-    if (hypothesis == "dpc_isr_spike" ||
-        hypothesis == "disk_io_stall" ||
-        hypothesis == "context_switch_interference" ||
-        hypothesis == "thermal_throttle" ||
-        hypothesis == "antimalware_interference" ||
-        hypothesis == "low_memory_working_set_trim_stall" ||
-        hypothesis == "physical_memory_allocation_latency" ||
-        hypothesis == "unprofiled_hardware_or_smi_stall") {
-        return AttributionTag::EXTERNAL_CONTENTION;
-    }
-    if (hypothesis == "gpu_pipeline_stall" ||
-        hypothesis == "d3d12_shader_pso_compilation_stall" ||
-        hypothesis == "frame_pacing_judder" ||
-        hypothesis == "page_fault_stall" ||
-        hypothesis == "vram_exhaustion_paging_stall" ||
-        hypothesis == "virtual_memory_allocation_stall") {
-        return AttributionTag::GAME_ENGINE;
-    }
-    if (hypothesis == "dwm_compositor_stall") {
-        return AttributionTag::DWM_COMPOSITION;
+    for (const auto& entry : kHypothesisTagTable) {
+        if (hypothesis == entry.name) {
+            return entry.tag;
+        }
     }
     return AttributionTag::UNKNOWN;
 }
+
 
 MetricSeverity classify_severity(const TriggerInfo& trigger, double present_threshold_ms) noexcept {
     // Invariant: TriggerEngine::on_audio_glitch rejects glitch_count == 0, so audio triggers are unconditionally DANGER.
@@ -264,9 +355,11 @@ DiagnosticReport CorrelationEngine::correlate(
     std::vector<MemTrimCandidate> mem_trim_candidates; mem_trim_candidates.reserve(64);
     std::vector<MemPhysicalAllocCandidate> mem_physical_candidates; mem_physical_candidates.reserve(64);
 
-    bool thermal_throttle_detected = false;
-    uint32_t throttle_core = 0;
-    uint32_t throttle_cap_seconds = 0;
+    struct ThermalState {
+        bool     detected{false};
+        uint32_t core{0};       // uint32_t ensures numeric streaming into std::stringstream
+        uint32_t cap_seconds{0};
+    } thermal;
 
     std::array<uint64_t, 256> core_cswitch_preempt_us{};
     uint64_t target_thread_preempt_us = 0;
@@ -317,12 +410,8 @@ DiagnosticReport CorrelationEngine::correlate(
                 break;
             case EventCategory::DISK:
                 ++report.event_counts.disk;
-                if (rec.duration_us >= (thresholds_.disk_threshold_ms * 1000)) {
-                    DiskCandidate cand;
-                    cand.record = rec;
-                    cand.offset_ms = offset_ms;
-                    disk_candidates.push_back(std::move(cand));
-                }
+                detail::try_emplace_candidate(disk_candidates, rec, offset_ms,
+                    detail::exceeds_duration_us(rec.duration_us, thresholds_.disk_threshold_ms));
                 break;
             case EventCategory::CSWITCH:
                 ++report.event_counts.cswitch;
@@ -363,52 +452,45 @@ DiagnosticReport CorrelationEngine::correlate(
                 break;
             case EventCategory::PAGE_FAULT:
                 ++report.event_counts.page_fault;
-                if (rec.duration_us >= (thresholds_.pagefault_threshold_ms * 1000)) {
-                    pagefault_candidates.push_back({ rec, offset_ms });
-                }
+                detail::try_emplace_candidate(pagefault_candidates, rec, offset_ms,
+                    detail::exceeds_duration_us(rec.duration_us, thresholds_.pagefault_threshold_ms));
                 break;
             case EventCategory::THERMAL_THROTTLE:
                 ++report.event_counts.thermal_throttle;
-                thermal_throttle_detected = true;
-                throttle_core = rec.cpu_index;
-                throttle_cap_seconds = static_cast<uint32_t>(rec.auxiliary_data);
+                thermal.detected = true;
+                thermal.core = rec.cpu_index;
+                thermal.cap_seconds = static_cast<uint32_t>(rec.auxiliary_data);
                 break;
             case EventCategory::ANTIMALWARE_SCAN:
                 ++report.event_counts.antimalware_scan;
-                if (rec.duration_us >= (thresholds_.antimalware_threshold_ms * 1000)) {
-                    antimalware_candidates.push_back({ rec, offset_ms });
-                }
+                detail::try_emplace_candidate(antimalware_candidates, rec, offset_ms,
+                    detail::exceeds_duration_us(rec.duration_us, thresholds_.antimalware_threshold_ms));
                 break;
             case EventCategory::D3D12_PSO_CREATE:
                 ++report.event_counts.d3d12_pso_create;
-                if (rec.duration_us >= (thresholds_.d3d12_pso_threshold_ms * 1000)) {
-                    d3d12_candidates.push_back({ rec, offset_ms });
-                }
+                detail::try_emplace_candidate(d3d12_candidates, rec, offset_ms,
+                    detail::exceeds_duration_us(rec.duration_us, thresholds_.d3d12_pso_threshold_ms));
                 break;
             case EventCategory::DXGKRNL_VRAM_PAGING:
                 ++report.event_counts.dxgkrnl_vram_paging;
-                if (rec.auxiliary_data >= (thresholds_.vram_demoted_threshold_mb * 1024ULL * 1024ULL) &&
-                    (rec.flags & EventFlags::VRAM_DEMOTED_COMMITMENT)) {
-                    vram_candidates.push_back({ rec, offset_ms });
-                }
+                detail::try_emplace_candidate(vram_candidates, rec, offset_ms,
+                    detail::exceeds_size_bytes(rec.auxiliary_data, thresholds_.vram_demoted_threshold_mb) &&
+                    (rec.flags & EventFlags::VRAM_DEMOTED_COMMITMENT));
                 break;
             case EventCategory::MEM_VIRTUAL_ALLOC:
                 ++report.event_counts.mem_virtual_alloc;
-                if (rec.auxiliary_data >= (thresholds_.mem_alloc_threshold_mb * 1024ULL * 1024ULL)) {
-                    mem_alloc_candidates.push_back({ rec, offset_ms });
-                }
+                detail::try_emplace_candidate(mem_alloc_candidates, rec, offset_ms,
+                    detail::exceeds_size_bytes(rec.auxiliary_data, thresholds_.mem_alloc_threshold_mb));
                 break;
             case EventCategory::MEM_WORKING_SET_TRIM:
                 ++report.event_counts.mem_working_set_trim;
-                if (rec.auxiliary_data >= (thresholds_.mem_trim_threshold_mb * 1024ULL * 1024ULL)) {
-                    mem_trim_candidates.push_back({ rec, offset_ms });
-                }
+                detail::try_emplace_candidate(mem_trim_candidates, rec, offset_ms,
+                    detail::exceeds_size_bytes(rec.auxiliary_data, thresholds_.mem_trim_threshold_mb));
                 break;
             case EventCategory::MEM_PHYSICAL_ALLOC:
                 ++report.event_counts.mem_physical_alloc;
-                if (rec.duration_us >= thresholds_.mem_physical_latency_us) {
-                    mem_physical_candidates.push_back({ rec, offset_ms });
-                }
+                detail::try_emplace_candidate(mem_physical_candidates, rec, offset_ms,
+                    rec.duration_us >= thresholds_.mem_physical_latency_us);
                 break;
             case EventCategory::PROCESS:
                 break;
@@ -427,12 +509,12 @@ DiagnosticReport CorrelationEngine::correlate(
         });
 
         const auto& worst = dpc_candidates.front();
-        const double duration_severity = std::min(1.0, static_cast<double>(worst.record.duration_us) / 3000.0);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 150.0));
-        const double core_match = (worst.record.cpu_index == trigger.cpu_index) ? 1.0 : 0.5;
+        const double duration_severity = detail::severity_linear(worst.record.duration_us, 3000.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 150.0);
+        const double core_match = detail::core_affinity(worst.record.cpu_index, trigger.cpu_index, 0.5);
 
         // Weights sum to 0.98 max (0.40 base + 0.35 duration + 0.15 temporal + 0.08 core)
-        const double confidence = 0.40 + (0.35 * duration_severity) + (0.15 * temporal_proximity) + (0.08 * core_match);
+        const double confidence = detail::confidence_weighted(0.40, 0.0, 1.0, 0.35, duration_severity, 0.15, temporal_proximity, 0.08, core_match);
 
         Diagnosis diag;
         diag.hypothesis = "dpc_isr_spike";
@@ -449,14 +531,9 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(dpc_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = dpc_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = std::string(category_to_string(static_cast<EventCategory>(cand.record.category)));
+            auto ev = base_evidence(cand.record, cand.offset_ms, category_to_string(static_cast<EventCategory>(cand.record.category)));
             ev.driver_module = cand.driver_name;
             ev.routine_address = format_hex_address(cand.record.payload.routine_addr);
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
 
@@ -471,12 +548,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = disk_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = std::min(1.0, lat_ms / 60.0);
-        const double is_target_proc = (trigger.target_pid != 0 && worst.record.pid == trigger.target_pid) ? 1.0 
-                                    : (trigger.target_pid == 0 ? 0.5 : 0.0);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+        const double duration_severity = detail::severity_linear(lat_ms, 60.0);
+        const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.5, 0.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
 
-        const double confidence = std::min(0.95, 0.40 + (0.35 * duration_severity) + (0.15 * is_target_proc) + (0.10 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.35, duration_severity, 0.15, is_target_proc, 0.10, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "disk_io_stall";
@@ -491,15 +567,10 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(disk_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = disk_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "DISK";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "DISK");
             ev.driver_module = "storport.sys / disk.sys";
             ev.routine_address = format_hex_address(cand.record.payload.file_key);
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = std::to_string(cand.record.auxiliary_data) + " bytes";
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
 
@@ -514,18 +585,10 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = cswitch_candidates.front();
         const double preempt_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = std::min(1.0, preempt_ms / 20.0);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 100.0));
-        
-        double confidence = 0.0;
-        double core_match = 0.0;
-        if (trigger.target_tid != 0) {
-            core_match = (worst.record.cpu_index == trigger.cpu_index) ? 1.0 : 0.5;
-            confidence = 0.40 + (0.30 * duration_severity) + (0.10 * temporal_proximity) + (0.05 * core_match);
-        } else {
-            core_match = (worst.record.cpu_index == trigger.cpu_index) ? 1.0 : 0.4;
-            confidence = 0.35 + (0.30 * duration_severity) + (0.10 * temporal_proximity) + (0.05 * core_match);
-        }
+        const double duration_severity = detail::severity_linear(preempt_ms, 20.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 100.0);
+        const double core_match = detail::core_affinity(worst.record.cpu_index, trigger.cpu_index, (trigger.target_tid != 0 ? 0.5 : 0.4));
+        const double confidence = detail::confidence_weighted(trigger.target_tid != 0 ? 0.40 : 0.35, 0.0, 1.0, 0.30, duration_severity, 0.10, temporal_proximity, 0.05, core_match);
 
         Diagnosis diag;
         diag.hypothesis = "context_switch_interference";
@@ -556,16 +619,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(cswitch_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = cswitch_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "CSWITCH";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "CSWITCH");
             ev.driver_module = "ntoskrnl.exe";
             ev.routine_address = "0x0000000000000000";
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             ev.secondary_tid = cand.record.payload.cswitch.prev_tid;
             ev.secondary_pid = cand.record.payload.cswitch.prev_pid;
-            ev.pid = cand.record.pid;
             if (cand.is_resumption) {
                 std::stringstream ev_ss;
                 ev_ss << "Resumed TID " << cand.record.tid << " after " << std::fixed << std::setprecision(1) 
@@ -667,8 +725,8 @@ DiagnosticReport CorrelationEngine::correlate(
         const double ref_vblank_ms = (trigger.baseline_avg_ms > 0.0) 
             ? trigger.baseline_avg_ms 
             : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : 16.67);
-        const double duration_severity = std::min(1.0, effective_dur_ms / (3.0 * ref_vblank_ms));
-        const double confidence = std::clamp(0.50 + (0.25 * duration_severity), 0.50, 0.75);
+        const double duration_severity = detail::severity_linear(effective_dur_ms, 3.0 * ref_vblank_ms);
+        const double confidence = detail::confidence_weighted(0.50, 0.50, 0.75, 0.25, duration_severity);
 
         Diagnosis diag;
         diag.hypothesis = "dwm_compositor_stall";
@@ -689,15 +747,10 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(dwm_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = dwm_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "DWM_GLITCH";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "DWM_GLITCH");
             ev.driver_module = "dwm.exe / dwmcore.dll";
             ev.routine_address = "0x0000000000000000";
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = "GlitchType: " + std::to_string(cand.record.auxiliary_data);
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
 
@@ -713,12 +766,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = pagefault_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = std::min(1.0, lat_ms / 30.0);
-        const double is_target_proc = (trigger.target_pid != 0 && worst.record.pid == trigger.target_pid) ? 1.0
-                                    : (trigger.target_pid == 0 ? 0.5 : 0.0);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+        const double duration_severity = detail::severity_linear(lat_ms, 30.0);
+        const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.5, 0.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
 
-        const double confidence = std::min(0.90, 0.40 + (0.30 * duration_severity) + (0.20 * is_target_proc) + (0.10 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.40, 0.0, 0.90, 0.30, duration_severity, 0.20, is_target_proc, 0.10, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "page_fault_stall";
@@ -734,32 +786,27 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(pagefault_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = pagefault_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "PAGE_FAULT";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "PAGE_FAULT");
             ev.driver_module = "ntoskrnl.exe / mm";
             ev.routine_address = format_hex_address(cand.record.payload.file_key);
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = std::to_string(cand.record.auxiliary_data) + " bytes (hard fault)";
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
     }
 
     // 8. Thermal Throttle Hypothesis
-    if (thermal_throttle_detected) {
-        const double cap_severity = std::min(1.0, static_cast<double>(throttle_cap_seconds) / 20.0);
-        const double confidence = std::clamp(0.40 + (0.35 * cap_severity), 0.40, 0.80);
+    if (thermal.detected) {
+        const double cap_severity = detail::severity_linear(static_cast<double>(thermal.cap_seconds), 20.0);
+        const double confidence = detail::confidence_weighted(0.40, 0.40, 0.80, 0.35, cap_severity);
         Diagnosis diag;
         diag.hypothesis = "thermal_throttle";
         diag.confidence = confidence;
         diag.factors = { cap_severity, 0.0, 1.0 };
 
         std::stringstream ss;
-        ss << "CPU core " << throttle_core << " was firmware-throttled for "
-           << throttle_cap_seconds << " seconds during the capture window. "
+        ss << "CPU core " << thermal.core << " was firmware-throttled for "
+           << thermal.cap_seconds << " seconds during the capture window. "
            << "Thermal or power budget constraints reduced processor speed, causing increased frame times.";
         diag.summary = ss.str();
         hypotheses.push_back(std::move(diag));
@@ -774,11 +821,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = antimalware_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = std::min(1.0, lat_ms / 50.0);
-        const double scan_count_factor = std::min(1.0, static_cast<double>(antimalware_candidates.size()) / 5.0);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+        const double duration_severity = detail::severity_linear(lat_ms, 50.0);
+        const double scan_count_factor = detail::severity_linear(static_cast<double>(antimalware_candidates.size()), 5.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
 
-        const double confidence = std::min(0.85, 0.35 + (0.25 * duration_severity) + (0.15 * scan_count_factor) + (0.10 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.35, 0.0, 0.85, 0.25, duration_severity, 0.15, scan_count_factor, 0.10, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "antimalware_interference";
@@ -795,15 +842,10 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(antimalware_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = antimalware_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "ANTIMALWARE_SCAN";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "ANTIMALWARE_SCAN");
             ev.driver_module = "MsMpEng.exe / WdFilter.sys";
             ev.routine_address = "0x0000000000000000";
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = "Real-time scan (" + std::to_string(cand.record.duration_us / 1000) + "ms)";
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -818,12 +860,12 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = d3d12_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = std::min(1.0, lat_ms / 30.0);
+        const double duration_severity = detail::severity_linear(lat_ms, 30.0);
         const double is_target_thread = (trigger.target_tid != 0 && trigger.target_tid == worst.record.tid) ? 1.0
                                       : (trigger.target_pid != 0 && trigger.target_pid == worst.record.pid ? 0.8 : (trigger.target_pid == 0 ? 0.5 : 0.1));
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
 
-        const double confidence = std::min(0.95, 0.40 + (0.35 * duration_severity) + (0.15 * is_target_thread) + (0.10 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.35, duration_severity, 0.15, is_target_thread, 0.10, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "d3d12_shader_pso_compilation_stall";
@@ -838,16 +880,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(d3d12_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = d3d12_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "D3D12_PSO";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "D3D12_PSO");
             ev.driver_module = "d3d12.dll";
             ev.routine_address = format_hex_address(cand.record.auxiliary_data);
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             ev.extra_info = ((cand.record.flags & EventFlags::D3D12_COMPUTE_PSO) ? "Compute/DXR State Object (" : "Graphics PSO (") +
                             std::to_string(cand.record.duration_us / 1000) + "ms)";
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -861,13 +898,12 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = vram_candidates.front();
         const double max_demoted_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double duration_severity = std::min(1.0, max_demoted_mb / 64.0);
-        const double is_target_proc = (trigger.target_pid != 0 && worst.record.pid == trigger.target_pid) ? 1.0 
-                                    : (trigger.target_pid == 0 ? 0.6 : 0.0); // 0.0 if explicitly non-target PID
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 100.0));
+        const double duration_severity = detail::severity_linear(max_demoted_mb, 64.0);
+        const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.6, 0.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 100.0);
 
         // Base score is 0.15; reaches >= 0.30 only with meaningful target attribution or severe demotion
-        const double confidence = std::min(0.95, 0.15 + (0.35 * duration_severity) + (0.35 * is_target_proc) + (0.15 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.15, 0.0, 0.95, 0.35, duration_severity, 0.35, is_target_proc, 0.15, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "vram_exhaustion_paging_stall";
@@ -882,13 +918,9 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(vram_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = vram_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "VRAM_PAGING";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "VRAM_PAGING");
             ev.driver_module = "dxgkrnl.sys / dxgmms2.sys";
             ev.routine_address = format_hex_address(cand.record.auxiliary_data);
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
 
             const double mb = cand.record.auxiliary_data / (1024.0 * 1024.0);
             std::stringstream ev_ss;
@@ -900,7 +932,6 @@ DiagnosticReport CorrelationEngine::correlate(
                 ev_ss << "PCIe Paging Transfer: " << std::fixed << std::setprecision(1) << mb << " MB";
             }
             ev.extra_info = ev_ss.str();
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -914,12 +945,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = mem_alloc_candidates.front();
         const double alloc_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double size_severity = std::min(1.0, alloc_mb / 64.0);
-        const double is_target_proc = (trigger.target_pid != 0 && worst.record.pid == trigger.target_pid) ? 1.0 
-                                    : (trigger.target_pid == 0 ? 0.6 : 0.2);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+        const double size_severity = detail::severity_linear(alloc_mb, 64.0);
+        const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.6, 0.2);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
 
-        const double confidence = std::min(0.95, 0.45 + (0.30 * size_severity) + (0.15 * is_target_proc) + (0.10 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.45, 0.0, 0.95, 0.30, size_severity, 0.15, is_target_proc, 0.10, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "virtual_memory_allocation_stall";
@@ -934,16 +964,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(mem_alloc_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = mem_alloc_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "MEM_VIRTUAL_ALLOC";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "MEM_VIRTUAL_ALLOC");
             ev.driver_module = "ntoskrnl.exe";
             ev.routine_address = format_hex_address(cand.record.payload.routine_addr);
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             const double mb = cand.record.auxiliary_data / (1024.0 * 1024.0);
             ev.extra_info = "Committed " + std::to_string(static_cast<uint64_t>(mb)) + " MB (Base " + format_hex_address(cand.record.payload.routine_addr) + ")";
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -957,13 +982,12 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = mem_trim_candidates.front();
         const double trim_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double trim_severity = std::min(1.0, trim_mb / 32.0);
-        const double duration_factor = (worst.record.duration_us > 0) ? std::min(1.0, worst.record.duration_us / 10000.0) : 0.5;
-        const double is_target_proc = (trigger.target_pid != 0 && worst.record.pid == trigger.target_pid) ? 1.0 
-                                    : (trigger.target_pid == 0 ? 0.6 : 0.2);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+        const double trim_severity = detail::severity_linear(trim_mb, 32.0);
+        const double duration_factor = (worst.record.duration_us > 0) ? detail::severity_linear(worst.record.duration_us, 10000.0) : 0.5;
+        const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.6, 0.2);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
 
-        const double confidence = std::min(0.95, 0.40 + (0.25 * trim_severity) + (0.15 * duration_factor) + (0.10 * is_target_proc) + (0.10 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.25, trim_severity, 0.15, duration_factor, 0.10, is_target_proc, 0.10, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "low_memory_working_set_trim_stall";
@@ -981,13 +1005,9 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(mem_trim_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = mem_trim_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "MEM_WORKING_SET_TRIM";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "MEM_WORKING_SET_TRIM");
             ev.driver_module = "ntoskrnl.exe";
             ev.routine_address = "0x0000000000000000";
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             const double mb = cand.record.auxiliary_data / (1024.0 * 1024.0);
             std::stringstream ev_ss;
             ev_ss << "Trimmed " << std::fixed << std::setprecision(1) << mb << " MB";
@@ -995,7 +1015,6 @@ DiagnosticReport CorrelationEngine::correlate(
                 ev_ss << " (" << (cand.record.duration_us / 1000.0) << "ms)";
             }
             ev.extra_info = ev_ss.str();
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));
@@ -1010,11 +1029,11 @@ DiagnosticReport CorrelationEngine::correlate(
         const auto& worst = mem_physical_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
         const double alloc_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double latency_severity = std::min(1.0, worst.record.duration_us / 10000.0);
-        const double size_factor = std::min(1.0, alloc_mb / 32.0);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+        const double latency_severity = detail::severity_linear(worst.record.duration_us, 10000.0);
+        const double size_factor = detail::severity_linear(alloc_mb, 32.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
 
-        const double confidence = std::min(0.95, 0.40 + (0.35 * latency_severity) + (0.15 * size_factor) + (0.10 * temporal_proximity));
+        const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.35, latency_severity, 0.15, size_factor, 0.10, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "physical_memory_allocation_latency";
@@ -1029,16 +1048,11 @@ DiagnosticReport CorrelationEngine::correlate(
 
         for (size_t i = 0; i < std::min(mem_physical_candidates.size(), MAX_EVIDENCE_ITEMS); ++i) {
             const auto& cand = mem_physical_candidates[i];
-            EvidenceItem ev;
-            ev.event_type = "MEM_PHYSICAL_ALLOC";
+            auto ev = base_evidence(cand.record, cand.offset_ms, "MEM_PHYSICAL_ALLOC");
             ev.driver_module = "ntoskrnl.exe";
             ev.routine_address = "0x0000000000000000";
-            ev.duration_us = cand.record.duration_us;
-            ev.cpu_core = cand.record.cpu_index;
-            ev.offset_from_trigger_ms = cand.offset_ms;
             const double mb = cand.record.auxiliary_data / (1024.0 * 1024.0);
             ev.extra_info = "Physical alloc: " + std::to_string(cand.record.duration_us / 1000) + "ms (" + std::to_string(static_cast<uint64_t>(mb)) + " MB)";
-            ev.pid = cand.record.pid;
             diag.evidence.push_back(std::move(ev));
         }
         hypotheses.push_back(std::move(diag));

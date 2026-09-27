@@ -77,6 +77,20 @@ static void test_disk_stall_correlation() {
     STUTTO_ASSERT(!report.diagnoses.empty());
     STUTTO_ASSERT(report.diagnoses[0].hypothesis == "disk_io_stall");
     STUTTO_ASSERT(report.diagnoses[0].confidence >= 0.70);
+
+    // Verify overflow immunity with large threshold (5000s)
+    {
+        stuttometer::CorrelatorThresholds large_thresh;
+        large_thresh.disk_threshold_ms = 5000000;
+        stuttometer::CorrelationEngine correlator_large(driver_resolver, large_thresh);
+        std::vector<stuttometer::EtwEventRecord> large_snapshot;
+        stuttometer::EtwEventRecord disk_large = disk;
+        disk_large.duration_us = 800000000; // 800s (< 5000s threshold)
+        large_snapshot.push_back(disk_large);
+        auto rep_large = correlator_large.correlate(large_snapshot, trigger, qpc_freq, p_ctx);
+        STUTTO_ASSERT(rep_large.diagnoses.empty() || rep_large.diagnoses[0].hypothesis != "disk_io_stall");
+    }
+
     std::cout << "  -> Rank 1: " << report.diagnoses[0].hypothesis 
               << " (" << (report.diagnoses[0].confidence * 100.0) << "% confidence) PASSED.\n";
 }
