@@ -33,6 +33,15 @@ inline std::string_view trigger_source_to_string(TriggerSource src) noexcept {
     }
 }
 
+[[nodiscard]] constexpr inline TriggerSource resolve_trigger_source(
+    TriggerReason reason,
+    TriggerSource default_src
+) noexcept {
+    return (reason == TriggerReason::CADENCE_JUDDER)
+        ? TriggerSource::FRAME_PACING_JUDDER
+        : default_src;
+}
+
 enum class TriggerState : uint8_t {
     ARMED           = 0,
     CLAIMED         = 1,

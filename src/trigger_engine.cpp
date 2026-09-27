@@ -239,9 +239,8 @@ bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_
         return false;
     }
 
-    TriggerSource src = (pacing_res.reason == TriggerReason::CADENCE_JUDDER)
-        ? TriggerSource::FRAME_PACING_JUDDER
-        : TriggerSource::DXGI_PRESENT_STUTTER;
+    const TriggerSource src =
+        resolve_trigger_source(pacing_res.reason, TriggerSource::DXGI_PRESENT_STUTTER);
 
     return initiate_trigger_atomic(
         src,
@@ -276,10 +275,9 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
         return false;
     }
 
-    TriggerState current = state_.load(std::memory_order_acquire);
-    TriggerSource src = (pacing_res.reason == TriggerReason::CADENCE_JUDDER)
-        ? TriggerSource::FRAME_PACING_JUDDER
-        : TriggerSource::KERNEL_FRAME_STALL;
+    const TriggerState current = state_.load(std::memory_order_acquire);
+    const TriggerSource src =
+        resolve_trigger_source(pacing_res.reason, TriggerSource::KERNEL_FRAME_STALL);
 
     if (current == TriggerState::ARMED) {
         return initiate_trigger_atomic(
@@ -299,7 +297,8 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
 
     // Thread-safe trigger upgrade: if collecting post-window from a CPU Present trigger, stage GPU stall upgrade (worst-case duration)
     if (current == TriggerState::COLLECTING_POST && active_source_.load(std::memory_order_acquire) == TriggerSource::DXGI_PRESENT_STUTTER) {
-        const uint32_t candidate_us = static_cast<uint32_t>(std::clamp(duration_ms * 1000.0, 1.0, 10000000.0));
+        const uint32_t candidate_us =
+            static_cast<uint32_t>(std::clamp(duration_ms * 1000.0, 1.0, DEFENSIVE_DURATION_CLAMP_US));
         uint32_t prev_us = staged_gpu_duration_us_.load(std::memory_order_relaxed);
         while (candidate_us > prev_us &&
                !staged_gpu_duration_us_.compare_exchange_weak(prev_us, candidate_us,
