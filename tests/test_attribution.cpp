@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include "stuttometer/correlator.hpp"
+#include "stuttometer/privilege_utils.hpp"
 #include <iostream>
 
 static void test_attribution_low_confidence() {
@@ -572,6 +573,130 @@ static void test_classify_severity() {
     std::cout << "[TEST] classify_severity PASSED.\n";
 }
 
+static void test_vram_attribution_flag_filtering() {
+    std::cout << "[TEST] Validating VRAM attribution flag filtering and fallback unblocking...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    const uint32_t target_pid = 1234;
+    const uint32_t external_pid = 7777; // e.g. obs64.exe
+    const uint32_t fake_dwm_pid = 8888;
+
+    // Part A: Synthesize ETW record with VRAM_USAGE_OVER_BUDGET (17.8 MB) from external PID
+    {
+        stuttometer::TriggerInfo trigger{};
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+        trigger.duration_ms = 45.0;
+        trigger.target_pid = target_pid;
+        trigger.target_tid = 5678;
+
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::EtwEventRecord vram{};
+        vram.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGKRNL_VRAM_PAGING);
+        vram.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+        vram.pid = external_pid;
+        vram.auxiliary_data = static_cast<uint64_t>(17.8 * 1024.0 * 1024.0);
+        vram.flags = stuttometer::EventFlags::VRAM_USAGE_OVER_BUDGET; // NOT VRAM_DEMOTED_COMMITMENT
+        snapshot.push_back(vram);
+
+        stuttometer::ProviderContext p_ctx{};
+        p_ctx.user_vram_paging_active = true;
+
+        auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+        report.target_process = "Game.exe";
+
+        // Event counted in summary
+        STUTTO_ASSERT(report.event_counts.dxgkrnl_vram_paging == 1);
+
+        // vram_candidates must be empty -> no vram_exhaustion_paging_stall diagnosis
+        for (const auto& diag : report.diagnoses) {
+            STUTTO_ASSERT(diag.hypothesis != "vram_exhaustion_paging_stall");
+        }
+
+        // Fallback diagnosis gpu_pipeline_stall must be unblocked and present
+        STUTTO_ASSERT(!report.diagnoses.empty());
+        STUTTO_ASSERT(report.diagnoses[0].hypothesis == "gpu_pipeline_stall");
+
+        // Attribution must not blame external_pid
+        auto attr = stuttometer::compute_attribution(report, fake_dwm_pid);
+        STUTTO_ASSERT(attr.tag == stuttometer::AttributionTag::GAME_ENGINE);
+        STUTTO_ASSERT(attr.pid == target_pid);
+        STUTTO_ASSERT(attr.process == "Game.exe");
+    }
+
+    // Part B: Synthesize ETW record with VRAM_DEMOTED_COMMITMENT (17.8 MB) from target PID
+    {
+        stuttometer::TriggerInfo trigger{};
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+        trigger.duration_ms = 45.0;
+        trigger.target_pid = target_pid;
+        trigger.target_tid = 5678;
+
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::EtwEventRecord vram{};
+        vram.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGKRNL_VRAM_PAGING);
+        vram.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+        vram.pid = target_pid;
+        vram.auxiliary_data = static_cast<uint64_t>(17.8 * 1024.0 * 1024.0);
+        vram.flags = stuttometer::EventFlags::VRAM_DEMOTED_COMMITMENT;
+        snapshot.push_back(vram);
+
+        stuttometer::ProviderContext p_ctx{};
+        p_ctx.user_vram_paging_active = true;
+
+        auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+        report.target_process = "Game.exe";
+
+        STUTTO_ASSERT(!report.diagnoses.empty());
+        STUTTO_ASSERT(report.diagnoses[0].hypothesis == "vram_exhaustion_paging_stall");
+        STUTTO_ASSERT(report.diagnoses[0].confidence >= 0.60);
+
+        auto attr = stuttometer::compute_attribution(report, fake_dwm_pid);
+        STUTTO_ASSERT(attr.tag == stuttometer::AttributionTag::GAME_ENGINE);
+        STUTTO_ASSERT(attr.pid == target_pid);
+    }
+
+    // Part C: Verify external PID with distant/sub-threshold demotion does not attain attribution
+    {
+        stuttometer::TriggerInfo trigger{};
+        trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+        trigger.duration_ms = 45.0;
+        trigger.target_pid = target_pid;
+        trigger.target_tid = 5678;
+
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::EtwEventRecord vram{};
+        vram.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGKRNL_VRAM_PAGING);
+        vram.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(90.0, qpc_freq);
+        vram.pid = external_pid;
+        vram.auxiliary_data = static_cast<uint64_t>(17.8 * 1024.0 * 1024.0);
+        vram.flags = stuttometer::EventFlags::VRAM_DEMOTED_COMMITMENT;
+        snapshot.push_back(vram);
+
+        stuttometer::ProviderContext p_ctx{};
+        p_ctx.user_vram_paging_active = true;
+
+        auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+        report.target_process = "Game.exe";
+
+        // Confidence without target PID and with low temporal proximity is < 0.30
+        auto attr = stuttometer::compute_attribution(report, fake_dwm_pid);
+        STUTTO_ASSERT(attr.tag != stuttometer::AttributionTag::EXTERNAL_CONTENTION || attr.pid != external_pid);
+    }
+
+    std::cout << "  -> test_vram_attribution_flag_filtering PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Attribution Unit Tests ===\n";
     try {
@@ -581,6 +706,7 @@ int main() {
         test_hypothesis_attribution_mapping();
         test_compute_attribution_pid_override();
         test_classify_severity();
+        test_vram_attribution_flag_filtering();
         std::cout << ">>> All Attribution tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

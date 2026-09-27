@@ -39,10 +39,10 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
     if (has_prev && prev_qpc > 0 && ctx.timestamp > prev_qpc) {
         uint64_t delta_qpc = ctx.timestamp - prev_qpc;
         double delta_us = qpc_delta_to_us(delta_qpc, qpc_freq_);
-        if (delta_us <= 30000000.0) { // 30s ceiling for loading / Alt-Tab
+        if (delta_us <= static_cast<double>(PAUSE_CEILING_US)) { // 2.0s ceiling for loading / Alt-Tab
             delivery_ms = delta_us / 1000.0;
             is_baseline = false;
-            rec.duration_us = static_cast<uint32_t>(std::min(delta_us, 10000000.0));
+            rec.duration_us = static_cast<uint32_t>(delta_us);
         }
     }
 

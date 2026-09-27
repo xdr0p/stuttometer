@@ -672,6 +672,39 @@ static void test_audio_glitch_separation() {
     std::cout << "[TEST 18] PASSED\n";
 }
 
+static void test_pause_ceiling_2s_boundary() {
+    std::cout << "[TEST 19] Pause Ceiling 2.0s Boundary Test (2500ms dropped vs 1900ms accepted)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    uint64_t cur_qpc = stuttometer::get_current_qpc();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(1234);
+
+    // Baseline frames
+    for (int i = 0; i < 10; ++i) {
+        benchmark.ingest_frame(1234, 16.67, cur_qpc);
+        cur_qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+    }
+
+    // 2500.0 ms frame -> dropped by pause ceiling
+    cur_qpc += stuttometer::ms_to_qpc_delta(2500.0, qpc_freq);
+    benchmark.ingest_frame(1234, 2500.0, cur_qpc);
+
+    auto summary_mid = benchmark.get_summary();
+    STUTTO_ASSERT(summary_mid.dropped_pause_frames == 1);
+    STUTTO_ASSERT(summary_mid.total_frames == 10);
+
+    // 1900.0 ms frame -> accepted into ring buffer (below 2000.0ms ceiling, pins gray zone)
+    cur_qpc += stuttometer::ms_to_qpc_delta(1900.0, qpc_freq);
+    benchmark.ingest_frame(1234, 1900.0, cur_qpc);
+
+    auto summary_final = benchmark.get_summary();
+    STUTTO_ASSERT(summary_final.dropped_pause_frames == 1);
+    STUTTO_ASSERT(summary_final.total_frames == 11);
+    STUTTO_ASSERT(std::abs(summary_final.frametimes.max_frametime_ms - 1900.0) < 0.1);
+
+    std::cout << "[TEST 19] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -692,8 +725,9 @@ int main() {
         test_cadence_standalone_fallback_state2();
         test_cadence_custom_context_and_session_stop();
         test_audio_glitch_separation();
+        test_pause_ceiling_2s_boundary();
 
-        std::cout << "\nAll 18 Session Benchmark tests PASSED successfully!\n";
+        std::cout << "\nAll 19 Session Benchmark tests PASSED successfully!\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\nTest suite failed with exception: " << ex.what() << "\n";

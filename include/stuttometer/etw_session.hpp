@@ -200,7 +200,7 @@ static inline PresentDeltaResult calculate_effective_present_duration(
     uint64_t previous_timestamp_qpc,
     uint64_t present_start_qpc,
     uint64_t qpc_freq,
-    uint64_t max_pause_ceiling_us = 10000000ULL // 10s ceiling for loading/Alt-Tab
+    uint64_t max_pause_ceiling_us = PAUSE_CEILING_US // 2.0s ceiling for loading/Alt-Tab
 ) noexcept {
     PresentDeltaResult result{};
     uint64_t api_dur_us = 0;

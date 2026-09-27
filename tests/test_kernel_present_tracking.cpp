@@ -65,7 +65,7 @@ static void test_kernel_frame_stall_trigger_and_upgrade() {
     STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::ARMED);
 
     // 3. Trigger Upgrade: CPU Present triggers first, GPU Frame Stall arrives during COLLECTING_POST
-    const uint64_t base_qpc2 = poll_qpc + stuttometer::ms_to_qpc_delta(2000.0, qpc_freq);
+    const uint64_t base_qpc2 = poll_qpc + stuttometer::ms_to_qpc_delta(1200.0, qpc_freq);
     STUTTO_ASSERT(engine.on_dxgi_present(100, 200, 6.0, base_qpc2, 0));
     STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::COLLECTING_POST);
 
@@ -87,7 +87,7 @@ static void test_kernel_frame_stall_trigger_and_upgrade() {
     STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::ARMED);
 
     // 4. Trigger Non-Downgrade: CPU Present triggers first with large 50.0ms stutter, minor GPU stall of 15.0ms arrives during COLLECTING_POST
-    const uint64_t base_qpc3 = poll_qpc2 + stuttometer::ms_to_qpc_delta(2000.0, qpc_freq);
+    const uint64_t base_qpc3 = poll_qpc2 + stuttometer::ms_to_qpc_delta(1200.0, qpc_freq);
     STUTTO_ASSERT(engine.on_dxgi_present(100, 200, 50.0, base_qpc3, 0));
     STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::COLLECTING_POST);
 

@@ -102,7 +102,7 @@ BannerRects compute_banner_rects(
     Gdiplus::RectF text_bounds;
     g.MeasureString(conf_str.c_str(), -1, &font_tag, Gdiplus::PointF(0.0f, 0.0f), &fmt_center, &text_bounds);
 
-    const float pill_w = std::max(130.0f * s, text_bounds.Width + 24.0f * s);
+    const float pill_w = std::max(104.0f * s, text_bounds.Width + 20.0f * s);
     const float pill_x = static_cast<float>(width) - side_margin - 16.0f * s - pill_w;
     Gdiplus::RectF rc_conf(pill_x, banner_row1_top_y, pill_w, 24.0f * s);
 
@@ -456,11 +456,17 @@ static void draw_card(
     const float row2_top_y = (total_loss > 0) ? (banner_y + 44.0f * s) : (banner_y + 54.0f * s);
     const float row3_top_y = banner_y + 68.0f * s;
 
-    double top_confidence = report.diagnoses.empty() ? 0.0 : report.diagnoses[0].confidence;
-    std::wstringstream conf_ss;
-    conf_ss << std::fixed << std::setprecision(0)
-            << std::lround(top_confidence * 100.0) << L"% CONFIDENCE";
-    std::wstring conf_str = conf_ss.str();
+    bool is_unconfirmed = report.diagnoses.empty() || report.diagnoses[0].confidence <= 0.0;
+    std::wstring conf_str;
+    if (is_unconfirmed) {
+        conf_str = L"UNCONFIRMED";
+    } else {
+        double top_confidence = report.diagnoses[0].confidence;
+        std::wstringstream conf_ss;
+        conf_ss << std::fixed << std::setprecision(0)
+                << std::lround(top_confidence * 100.0) << L"% CONFIDENCE";
+        conf_str = conf_ss.str();
+    }
 
     auto banner_rects = detail::compute_banner_rects(
         width, side_margin, row1_top_y, s,
@@ -505,9 +511,9 @@ static void draw_card(
         fill_rounded_rect(g, banner_rects.rc_conf, 6.0f * s, &br_conf_bg, &pen_conf);
 
         SolidBrush br_conf_txt(color_text_bright);
-        // Shift 1-2px down for visual vertical centering of uppercase label within pill
-        RectF rc_conf_txt(banner_rects.rc_conf.X, banner_rects.rc_conf.Y + 1.5f * s, banner_rects.rc_conf.Width, banner_rects.rc_conf.Height);
-        g.DrawString(conf_str.c_str(), -1, &font_tag, rc_conf_txt, &fmt_center, &br_conf_txt);
+        // Shift down for optical vertical centering of uppercase label within pill
+        RectF rc_conf_txt(banner_rects.rc_conf.X, banner_rects.rc_conf.Y + 0.5f * s, banner_rects.rc_conf.Width, banner_rects.rc_conf.Height);
+        g.DrawString(conf_str.c_str(), -1, &font_tag, rc_conf_txt, &fmt_center, is_unconfirmed ? &br_muted : &br_conf_txt);
     }
 
     // Summary (row 2 of blame banner)

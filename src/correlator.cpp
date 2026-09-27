@@ -387,7 +387,8 @@ DiagnosticReport CorrelationEngine::correlate(
                 break;
             case EventCategory::DXGKRNL_VRAM_PAGING:
                 ++report.event_counts.dxgkrnl_vram_paging;
-                if (rec.auxiliary_data >= (thresholds_.vram_demoted_threshold_mb * 1024ULL * 1024ULL)) {
+                if (rec.auxiliary_data >= (thresholds_.vram_demoted_threshold_mb * 1024ULL * 1024ULL) &&
+                    (rec.flags & EventFlags::VRAM_DEMOTED_COMMITMENT)) {
                     vram_candidates.push_back({ rec, offset_ms });
                 }
                 break;
@@ -860,12 +861,13 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = vram_candidates.front();
         const double max_demoted_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double duration_severity = std::min(1.0, max_demoted_mb / 50.0);
+        const double duration_severity = std::min(1.0, max_demoted_mb / 64.0);
         const double is_target_proc = (trigger.target_pid != 0 && worst.record.pid == trigger.target_pid) ? 1.0 
-                                    : (trigger.target_pid == 0 ? 0.6 : 0.2);
-        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 200.0));
+                                    : (trigger.target_pid == 0 ? 0.6 : 0.0); // 0.0 if explicitly non-target PID
+        const double temporal_proximity = std::max(0.0, 1.0 - (std::abs(worst.offset_ms) / 100.0));
 
-        const double confidence = std::min(0.95, 0.45 + (0.30 * duration_severity) + (0.15 * is_target_proc) + (0.10 * temporal_proximity));
+        // Base score is 0.15; reaches >= 0.30 only with meaningful target attribution or severe demotion
+        const double confidence = std::min(0.95, 0.15 + (0.35 * duration_severity) + (0.35 * is_target_proc) + (0.15 * temporal_proximity));
 
         Diagnosis diag;
         diag.hypothesis = "vram_exhaustion_paging_stall";

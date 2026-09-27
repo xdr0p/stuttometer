@@ -924,7 +924,7 @@ static void test_ui_ux_regressions() {
                 1200, 24.0f, 64.0f, 1.0f,
                 g, pSans, font_tag, L"92% CONFIDENCE"
             );
-            STUTTO_ASSERT(banner_std.rc_conf.Width >= 130.0f * s);
+            STUTTO_ASSERT(banner_std.rc_conf.Width >= 104.0f * s);
             float expected_x_std = 1200.0f - 24.0f * s - 16.0f * s - banner_std.rc_conf.Width;
             STUTTO_ASSERT(std::abs(banner_std.rc_conf.X - expected_x_std) < 0.01f);
             float expected_culprit_w = (banner_std.rc_conf.X - 16.0f * s) - banner_std.rc_culprit.X;
@@ -938,6 +938,86 @@ static void test_ui_ux_regressions() {
                           "Longer confidence label must result in wider pill");
             float expected_x_long = 1200.0f - 24.0f * s - 16.0f * s - banner_long.rc_conf.Width;
             STUTTO_ASSERT(std::abs(banner_long.rc_conf.X - expected_x_long) < 0.01f);
+
+            auto banner_unconf = detail::compute_banner_rects(
+                1200, 24.0f, 64.0f, 1.0f,
+                g, pSans, font_tag, L"UNCONFIRMED"
+            );
+            STUTTO_ASSERT(banner_unconf.rc_conf.Width >= 104.0f * s);
+            STUTTO_ASSERT(banner_unconf.rc_culprit.Width > 0.0f && "rc_culprit.Width must remain valid");
+
+            auto unconf_report = create_dummy_report();
+            unconf_report.diagnoses.clear();
+            auto unconf_bytes = CardRenderer::render_card_to_png_bytes(unconf_report, opts);
+            STUTTO_ASSERT(!unconf_bytes.empty());
+
+            HGLOBAL hMemUnconf = GlobalAlloc(GMEM_MOVEABLE, unconf_bytes.size());
+            STUTTO_ASSERT(hMemUnconf != nullptr);
+            void* pMemUnconf = GlobalLock(hMemUnconf);
+            std::memcpy(pMemUnconf, unconf_bytes.data(), unconf_bytes.size());
+            GlobalUnlock(hMemUnconf);
+
+            IStream* pStreamUnconf = nullptr;
+            hr = CreateStreamOnHGlobal(hMemUnconf, TRUE, &pStreamUnconf);
+            STUTTO_ASSERT(SUCCEEDED(hr) && pStreamUnconf != nullptr);
+
+            {
+                Gdiplus::Bitmap unconf_bmp(pStreamUnconf);
+                STUTTO_ASSERT(unconf_bmp.GetLastStatus() == Gdiplus::Ok);
+
+                auto is_muted_slate = [](const Gdiplus::Color& px) -> bool {
+                    return (px.GetR() >= 135 && px.GetR() <= 160 &&
+                            px.GetG() >= 150 && px.GetG() <= 175 &&
+                            px.GetB() >= 170 && px.GetB() <= 195);
+                };
+                int muted_count = 0;
+                for (int x = std::lround(banner_unconf.rc_conf.X); x <= std::lround(banner_unconf.rc_conf.GetRight()); ++x) {
+                    for (int y = std::lround(banner_unconf.rc_conf.Y); y <= std::lround(banner_unconf.rc_conf.GetBottom()); ++y) {
+                        Gdiplus::Color px;
+                        unconf_bmp.GetPixel(x, y, &px);
+                        if (is_muted_slate(px)) ++muted_count;
+                    }
+                }
+                STUTTO_ASSERT(muted_count >= 5 && "UNCONFIRMED pill must render ink in muted slate #94a3b8");
+            }
+            pStreamUnconf->Release();
+
+            // Also verify non-empty diagnoses with confidence <= 0.0 renders UNCONFIRMED
+            auto unconf_zero_report = create_dummy_report();
+            unconf_zero_report.diagnoses[0].confidence = 0.0;
+            auto unconf_zero_bytes = CardRenderer::render_card_to_png_bytes(unconf_zero_report, opts);
+            STUTTO_ASSERT(!unconf_zero_bytes.empty());
+
+            HGLOBAL hMemZero = GlobalAlloc(GMEM_MOVEABLE, unconf_zero_bytes.size());
+            STUTTO_ASSERT(hMemZero != nullptr);
+            void* pMemZero = GlobalLock(hMemZero);
+            std::memcpy(pMemZero, unconf_zero_bytes.data(), unconf_zero_bytes.size());
+            GlobalUnlock(hMemZero);
+
+            IStream* pStreamZero = nullptr;
+            hr = CreateStreamOnHGlobal(hMemZero, TRUE, &pStreamZero);
+            STUTTO_ASSERT(SUCCEEDED(hr) && pStreamZero != nullptr);
+
+            {
+                Gdiplus::Bitmap zero_bmp(pStreamZero);
+                STUTTO_ASSERT(zero_bmp.GetLastStatus() == Gdiplus::Ok);
+
+                auto is_muted_slate = [](const Gdiplus::Color& px) -> bool {
+                    return (px.GetR() >= 135 && px.GetR() <= 160 &&
+                            px.GetG() >= 150 && px.GetG() <= 175 &&
+                            px.GetB() >= 170 && px.GetB() <= 195);
+                };
+                int muted_zero_count = 0;
+                for (int x = std::lround(banner_unconf.rc_conf.X); x <= std::lround(banner_unconf.rc_conf.GetRight()); ++x) {
+                    for (int y = std::lround(banner_unconf.rc_conf.Y); y <= std::lround(banner_unconf.rc_conf.GetBottom()); ++y) {
+                        Gdiplus::Color px;
+                        zero_bmp.GetPixel(x, y, &px);
+                        if (is_muted_slate(px)) ++muted_zero_count;
+                    }
+                }
+                STUTTO_ASSERT(muted_zero_count >= 5 && "confidence <= 0.0 must also render UNCONFIRMED pill in muted slate #94a3b8");
+            }
+            pStreamZero->Release();
         }
 
         // 7. Upper Plot Amber Regression Guard

@@ -124,7 +124,7 @@ Click **Session Summary** in the top header to inspect real-time, session-wide f
 - **Continuous Lock-Free Ingestion:** Ingests every delivered frame (DXGI Present and Kernel Flip with canonical warm-up fallback) into a dedicated 262,144-slot seqlock ring buffer with zero runtime allocations.
 - **Pacing Metrics:** Computes mathematically rigorous Average FPS, 1% Low FPS, 0.1% Low FPS, and cumulative Net Stall Time.
 - **Cumulative Root-Cause Attribution:** Ranks cumulative stall time across diagnostic subsystems (DPC/ISR, Shader Compilation, VRAM Paging, Context Switches, etc.) and isolates offending driver modules (`dxgkrnl.sys`, `nvlddmkm.sys`, etc.).
-- **Pause & Loading Screen Filtering:** Frames $\ge 10\text{s}$ (alt-tabs, level loads) are automatically ignored so benchmarks reflect genuine active gameplay.
+- **Pause & Loading Screen Filtering:** Frames $\ge 2\text{s}$ (alt-tabs, level loads) are automatically ignored so benchmarks reflect genuine active gameplay.
 - **Export & Share:** One-click Markdown summary copying and structured JSON export.
 
 ### Settings & Configuration

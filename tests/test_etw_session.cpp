@@ -609,11 +609,17 @@ static void test_calculate_effective_present_duration() {
     STUTTO_ASSERT(r3.is_baseline_reset == false);
     STUTTO_ASSERT(r3.effective_dur_us == 50000); // 50.0ms true stutter duration
 
-    // 4. Alt-Tab / Long Pause Ceiling (> 10s pause)
-    uint64_t t4 = t3 + ms_to_qpc_delta(12000.0, qpc_freq); // 12 seconds later (exceeds 10s ceiling)
+    // 4. Alt-Tab / Long Pause Ceiling (> 2.0s pause)
+    uint64_t t4 = t3 + ms_to_qpc_delta(3000.0, qpc_freq); // 3 seconds later (exceeds 2s ceiling)
     uint64_t t4_start = t4 - ms_to_qpc_delta(0.2, qpc_freq);
     PresentDeltaResult r4 = calculate_effective_present_duration(t4, t3, t4_start, qpc_freq);
     STUTTO_ASSERT(r4.is_baseline_reset == true); // Must re-seed baseline without triggering false stutter
+
+    // 4b. 1.5s delta (does NOT exceed 2.0s ceiling -> is_baseline_reset == false)
+    uint64_t t4b = t3 + ms_to_qpc_delta(1500.0, qpc_freq);
+    uint64_t t4b_start = t4b - ms_to_qpc_delta(0.2, qpc_freq);
+    PresentDeltaResult r4b = calculate_effective_present_duration(t4b, t3, t4b_start, qpc_freq);
+    STUTTO_ASSERT(r4b.is_baseline_reset == false);
 
     // 5. API Duration Precedence (e.g. VSync wait took 25ms, delta was 5ms)
     uint64_t t5 = t4 + ms_to_qpc_delta(5.0, qpc_freq);
