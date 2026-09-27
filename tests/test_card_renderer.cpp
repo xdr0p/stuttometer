@@ -10,6 +10,7 @@
 
 #include <windows.h>
 #include <gdiplus.h>
+#include <locale.h>
 #include <iostream>
 #include <vector>
 #include <cstdint>
@@ -1399,6 +1400,7 @@ static void test_palette_and_theme() {
 }
 
 int main() {
+    _wsetlocale(LC_ALL, L"C");  // Pin C locale to match std::wstringstream behavior
     try {
         test_initialization();
         test_palette_and_theme();

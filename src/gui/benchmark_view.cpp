@@ -1,5 +1,6 @@
 #include "benchmark_view.hpp"
 #include "theme.hpp"
+#include "gui_string_utils.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
@@ -10,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <functional>
 
 namespace stuttometer::gui {
 
@@ -43,14 +45,131 @@ struct BenchmarkViewState {
     std::function<bool()> is_capturing_fn{nullptr};
 };
 
-static std::wstring to_wide(std::string_view utf8) {
-    if (utf8.empty()) return {};
-    int needed = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (needed <= 0) return {};
-    std::wstring result(needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), result.data(), needed);
-    return result;
+namespace {
+
+enum class ColumnAlign : uint8_t { Left, Center, Right };
+
+struct TableColumn {
+    const wchar_t* header;
+    int            width_px;
+    ColumnAlign    align;
+};
+
+struct RowCell {
+    std::wstring text;
+    COLORREF     color{RGB(226, 232, 240)};
+};
+
+UINT align_to_dt(ColumnAlign a) noexcept {
+    switch (a) {
+        case ColumnAlign::Center: return DT_CENTER;
+        case ColumnAlign::Right:  return DT_RIGHT;
+        case ColumnAlign::Left:
+        default:                  return DT_LEFT;
+    }
 }
+
+void draw_table(HDC hdc, const RECT& table_rc, int dpi,
+                const TableColumn* columns, size_t num_columns,
+                const std::vector<std::vector<RowCell>>& rows,
+                HFONT font_header, HFONT font_cell,
+                HBRUSH br_alt_row, HPEN pen_divider,
+                const std::function<HBRUSH(size_t)>& attr_stripe_fn,
+                const wchar_t* empty_msg = nullptr)
+{
+    auto scale = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+    const int pad      = scale(10);
+    const int row_h    = scale(26);
+    const int hdr_h    = scale(20);
+    const int sep_y    = scale(22);
+    const int v_top    = scale(2);
+    const int v_bot    = scale(18);
+    const int outer    = scale(16);
+    const int inner    = scale(8);
+    const int stripe_w = scale(3);
+
+    std::vector<std::pair<int,int>> col_bounds;
+    col_bounds.reserve(num_columns);
+
+    int cur_x = table_rc.left + outer;
+    const int table_inner_right = table_rc.right - outer;
+
+    int fixed_total = 0;
+    for (size_t i = 1; i < num_columns; ++i) fixed_total += columns[i].width_px;
+    const int col0_w = std::max(scale(150), (table_inner_right - cur_x) - fixed_total);
+
+    for (size_t i = 0; i < num_columns; ++i) {
+        const int w = (i == 0) ? col0_w : columns[i].width_px;
+        col_bounds.push_back({cur_x, cur_x + w});
+        cur_x += w;
+    }
+
+    // 1. Header (ALWAYS drawn)
+    const int hdr_y = table_rc.top + scale(38);
+    HGDIOBJ old_font = SelectObject(hdc, font_header);
+    SetTextColor(hdc, RGB(100, 116, 139));
+    for (size_t i = 0; i < num_columns; ++i) {
+        RECT rc = { col_bounds[i].first + pad, hdr_y,
+                    col_bounds[i].second - pad, hdr_y + hdr_h };
+        DrawTextW(hdc, columns[i].header, -1, &rc,
+                  align_to_dt(columns[i].align) | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // 2. Dividers (ALWAYS drawn)
+    HGDIOBJ old_pen = SelectObject(hdc, pen_divider);
+    for (size_t i = 0; i + 1 < num_columns; ++i) {
+        MoveToEx(hdc, col_bounds[i].second, hdr_y + v_top, NULL);
+        LineTo  (hdc, col_bounds[i].second, hdr_y + v_bot);
+    }
+    MoveToEx(hdc, table_rc.left + scale(12), hdr_y + sep_y, NULL);
+    LineTo  (hdc, table_rc.right - scale(12), hdr_y + sep_y);
+    SelectObject(hdc, old_pen);
+
+    // 3. Body: Either empty message or culprit rows
+    if (rows.empty()) {
+        if (empty_msg) {
+            SelectObject(hdc, font_cell);
+            SetTextColor(hdc, RGB(148, 163, 184));
+            RECT empty_rc = { table_rc.left + outer, hdr_y + scale(28),
+                              table_rc.right - outer, table_rc.bottom - scale(16) };
+            DrawTextW(hdc, empty_msg, -1, &empty_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    } else {
+        int row_y = hdr_y + scale(26);
+        SelectObject(hdc, font_cell);
+        for (size_t r = 0; r < rows.size(); ++r) {
+            if (row_y + row_h > table_rc.bottom - scale(8)) break;
+
+            if (r % 2 == 1) {
+                RECT rr = { table_rc.left + inner, row_y,
+                            table_rc.right - inner, row_y + row_h };
+                FillRect(hdc, &rr, br_alt_row);
+            }
+            if (attr_stripe_fn) {
+                HBRUSH stripe = attr_stripe_fn(r);
+                if (stripe) {
+                    RECT sr = { table_rc.left + inner, row_y,
+                                table_rc.left + inner + stripe_w, row_y + row_h };
+                    FillRect(hdc, &sr, stripe);
+                }
+            }
+            const auto& cells = rows[r];
+            for (size_t c = 0; c < cells.size() && c < num_columns; ++c) {
+                SetTextColor(hdc, cells[c].color);
+                RECT cr = { col_bounds[c].first + pad, row_y,
+                            col_bounds[c].second - pad, row_y + row_h };
+                DrawTextW(hdc, cells[c].text.c_str(), -1, &cr,
+                          align_to_dt(columns[c].align) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+            row_y += row_h;
+        }
+    }
+
+    SelectObject(hdc, old_font);
+}
+
+} // anonymous namespace
 
 static void update_button_states(BenchmarkViewState* state) {
     if (!state) return;
@@ -424,7 +543,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             if (!is_capturing && summary.total_frames == 0 && summary.target_process.empty() && summary.target_pid == 0) {
                 w_proc = L"No Active Capture Session";
             } else if (!summary.target_process.empty()) {
-                w_proc = to_wide(summary.target_process);
+                w_proc = utf8_to_wide(summary.target_process);
                 if (summary.target_pid != 0) {
                     w_proc += L" (PID: " + std::to_wstring(summary.target_pid) + L")";
                 }
@@ -669,130 +788,48 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             RECT tbl_title_rc = { table_rc.left + scale(16), table_rc.top + scale(12), table_rc.right - scale(16), table_rc.top + scale(32) };
             DrawTextW(mem_dc, L"Top Stutter Causes", -1, &tbl_title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-                // Column Headers & Table Geometry
-                int col_hdr_y = table_rc.top + scale(38);
-                int pad = scale(10);
+            const TableColumn columns[] = {
+                { L"HYPOTHESIS",  0,          ColumnAlign::Left   }, // Dynamically auto-stretched
+                { L"TOP DRIVER",  scale(180), ColumnAlign::Left   },
+                { L"COUNT",       scale(80),  ColumnAlign::Center },
+                { L"TOTAL STALL", scale(115), ColumnAlign::Right  },
+                { L"STALL %",     scale(75),  ColumnAlign::Right  },
+            };
 
-                // Rebalanced Column Geometry (Option A: Data-Matched Alignment Standard)
-                int col_w_driver = scale(180); // TOP DRIVER (fits single modules; compound pairs >23 chars cleanly ellipsize)
-                int col_w_count  = scale(80);  // COUNT (small integer)
-                int col_w_stall  = scale(115); // TOTAL STALL (e.g., "1245.8 ms")
-                int col_w_pct    = scale(75);  // STALL % ("100.0%" is ~42px, fits with 33px margin)
-                int right_fixed_total = col_w_driver + col_w_count + col_w_stall + col_w_pct;
+            std::vector<std::vector<RowCell>> rows;
+            rows.reserve(summary.culprits.size());
+            for (const auto& c : summary.culprits) {
+                wchar_t stl_buf[64]{};
+                wchar_t pct_buf[64]{};
+                wfmt(stl_buf, L"%.1f ms", c.total_stall_ms);
+                wfmt(pct_buf, L"%.1f%%", c.stall_pct);
+                rows.push_back({
+                    { utf8_to_wide(c.hypothesis) },
+                    { c.top_driver_module.empty() ? L"-" : utf8_to_wide(c.top_driver_module) },
+                    { std::to_wstring(c.count) },
+                    { stl_buf },
+                    { pct_buf },
+                });
+            }
 
-                int col0_left  = table_rc.left + scale(16);
-                int table_inner_right = table_rc.right - scale(16);
-                int available_table_w = table_inner_right - col0_left;
+            const wchar_t* empty_msg = (summary.total_frames == 0)
+                ? L"No session telemetry recorded yet."
+                : L"No stutters recorded in current session. Frame pacing is smooth.";
 
-                // Note: dialog is fixed-size (WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 840px base client width);
-                // col0_w is ~326px in practice at 96 DPI.
-                // The scale(150) lower bound is a defensive floor for col0 only — if a future refactor
-                // shrinks the dialog enough to trigger it, columns to the right will overflow the card
-                // border and the layout will require a proportional-scaling rework.
-                int col0_w     = std::max(scale(150), available_table_w - right_fixed_total);
-                int col0_right = col0_left + col0_w;
+            HBRUSH br_alt = CreateSolidBrush(RGB(34, 40, 54));
+            HPEN   pen_dv = CreatePen(PS_SOLID, 1, RGB(40, 48, 66));
+            auto attr_stripe = [&](size_t r) -> HBRUSH {
+                return (r < summary.culprits.size())
+                    ? get_attribution_brush(attribution_tag_for_hypothesis(summary.culprits[r].hypothesis))
+                    : get_attribution_brush(AttributionTag::UNKNOWN);
+            };
 
-                int col1_left  = col0_right;
-                int col1_right = col1_left + col_w_driver;
+            draw_table(mem_dc, table_rc, dpi, columns, 5, rows,
+                       state->font_small, state->font_regular,
+                       br_alt, pen_dv, attr_stripe, empty_msg);
 
-                int col2_left  = col1_right;
-                int col2_right = col2_left + col_w_count;
-
-                int col3_left  = col2_right;
-                int col3_right = col3_left + col_w_stall;
-
-                int col4_left  = col3_right;
-                int col4_right = col4_left + col_w_pct; // In the non-clamped case, this equals table_inner_right.
-
-                SelectObject(mem_dc, state->font_small);
-                SetTextColor(mem_dc, RGB(100, 116, 139));
-
-                RECT h0 = { col0_left + pad, col_hdr_y, col0_right - pad, col_hdr_y + scale(20) };
-                RECT h1 = { col1_left + pad, col_hdr_y, col1_right - pad, col_hdr_y + scale(20) };
-                RECT h2 = { col2_left + pad, col_hdr_y, col2_right - pad, col_hdr_y + scale(20) };
-                RECT h3 = { col3_left + pad, col_hdr_y, col3_right - pad, col_hdr_y + scale(20) };
-                RECT h4 = { col4_left + pad, col_hdr_y, col4_right - pad, col_hdr_y + scale(20) };
-
-                DrawTextW(mem_dc, L"HYPOTHESIS", -1, &h0, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                DrawTextW(mem_dc, L"TOP DRIVER", -1, &h1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                DrawTextW(mem_dc, L"COUNT", -1, &h2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                DrawTextW(mem_dc, L"TOTAL STALL", -1, &h3, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-                DrawTextW(mem_dc, L"STALL %", -1, &h4, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
-                // Subtle vertical column dividers in header
-                HPEN pen_div = CreatePen(PS_SOLID, 1, RGB(40, 48, 66));
-                HGDIOBJ old_pen = SelectObject(mem_dc, pen_div);
-
-                int v_top = col_hdr_y + scale(2);
-                int v_bot = col_hdr_y + scale(18);
-                int divs[] = { col0_right, col1_right, col2_right, col3_right };
-                for (int dx : divs) {
-                    MoveToEx(mem_dc, dx, v_top, NULL);
-                    LineTo(mem_dc, dx, v_bot);
-                }
-
-                // Horizontal dividing line below header
-                int sep_y = col_hdr_y + scale(22);
-                MoveToEx(mem_dc, table_rc.left + scale(12), sep_y, NULL);
-                LineTo(mem_dc, table_rc.right - scale(12), sep_y);
-
-                SelectObject(mem_dc, old_pen);
-                DeleteObject(pen_div);
-
-                // Table Rows
-                int row_y = col_hdr_y + scale(26);
-                int row_h = scale(26);
-
-                if (summary.culprits.empty()) {
-                    SelectObject(mem_dc, state->font_regular);
-                    SetTextColor(mem_dc, RGB(148, 163, 184));
-                    RECT empty_rc = { table_rc.left + scale(16), col_hdr_y + scale(28), table_rc.right - scale(16), table_rc.bottom - scale(16) };
-                    const wchar_t* empty_msg = (summary.total_frames == 0)
-                        ? L"No session telemetry recorded yet."
-                        : L"No stutters recorded in current session. Frame pacing is smooth.";
-                    DrawTextW(mem_dc, empty_msg, -1, &empty_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                } else {
-                    for (size_t i = 0; i < summary.culprits.size() && row_y + row_h <= table_rc.bottom - scale(8); ++i) {
-                        const auto& c = summary.culprits[i];
-
-                        if (i % 2 == 1) {
-                            RECT row_rc = { table_rc.left + scale(8), row_y, table_rc.right - scale(8), row_y + row_h };
-                            HBRUSH r_br = CreateSolidBrush(RGB(34, 40, 54));
-                            FillRect(mem_dc, &row_rc, r_br);
-                            DeleteObject(r_br);
-                        }
-
-                        AttributionTag tag = attribution_tag_for_hypothesis(c.hypothesis);
-                        RECT stripe_rc = { table_rc.left + scale(8), row_y, table_rc.left + scale(8) + scale(3), row_y + row_h };
-                        FillRect(mem_dc, &stripe_rc, get_attribution_brush(tag));
-
-                        SelectObject(mem_dc, state->font_regular);
-                        SetTextColor(mem_dc, RGB(226, 232, 240));
-
-                        std::wstring w_hyp = to_wide(c.hypothesis);
-                        std::wstring w_drv = c.top_driver_module.empty() ? L"-" : to_wide(c.top_driver_module);
-                        std::wstring w_cnt = std::to_wstring(c.count);
-
-                        wchar_t stl_buf[64];
-                        swprintf_s(stl_buf, L"%.1f ms", c.total_stall_ms);
-                        wchar_t pct_buf[64];
-                        swprintf_s(pct_buf, L"%.1f%%", c.stall_pct);
-
-                        RECT r0 = { col0_left + pad, row_y, col0_right - pad, row_y + row_h };
-                        RECT r1 = { col1_left + pad, row_y, col1_right - pad, row_y + row_h };
-                        RECT r2 = { col2_left + pad, row_y, col2_right - pad, row_y + row_h };
-                        RECT r3 = { col3_left + pad, row_y, col3_right - pad, row_y + row_h };
-                        RECT r4 = { col4_left + pad, row_y, col4_right - pad, row_y + row_h };
-
-                        DrawTextW(mem_dc, w_hyp.c_str(), -1, &r0, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                        DrawTextW(mem_dc, w_drv.c_str(), -1, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                        DrawTextW(mem_dc, w_cnt.c_str(), -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                        DrawTextW(mem_dc, stl_buf, -1, &r3, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-                        DrawTextW(mem_dc, pct_buf, -1, &r4, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
-                        row_y += row_h;
-                    }
-                }
+            DeleteObject(br_alt);
+            DeleteObject(pen_dv);
 
             // Blit buffer to screen
             BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);

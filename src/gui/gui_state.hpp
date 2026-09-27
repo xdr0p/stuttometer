@@ -1,6 +1,7 @@
 #pragma once
 
 #include "theme.hpp"
+#include "dark_controls.hpp"
 #include <stuttometer/gui_config.hpp>
 #include "gui_controller.hpp"
 #include "osd_toast.hpp"
@@ -33,14 +34,6 @@ constexpr int IDC_BTN_SESSION_SUMMARY = 1018;
 
 // Global Hotkeys
 constexpr int ID_HOTKEY_TOGGLE_CAPTURE = 9001;
-
-// Button Styling Categories
-enum class BtnStyle : INT_PTR {
-    PrimaryEmerald = 1,
-    DangerRed = 2,
-    SecondarySlate = 3,
-    QuickAction = 4
-};
 
 // Stored Report Item
 struct StutterRecord {

@@ -1,5 +1,6 @@
 #include "osd_toast.hpp"
 #include "theme.hpp"
+#include "gui_string_utils.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
 
 #include <mmsystem.h>
@@ -48,14 +49,7 @@ static HWND find_process_main_window(uint32_t target_pid) {
     return search.hwnd;
 }
 
-static std::wstring utf8_to_wide(std::string_view utf8) {
-    if (utf8.empty()) return {};
-    int needed = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (needed <= 0) return {};
-    std::wstring result(needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), result.data(), needed);
-    return result;
-}
+
 
 OsdToast::OsdToast() noexcept = default;
 

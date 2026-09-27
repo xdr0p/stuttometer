@@ -2,6 +2,7 @@
 #include "theme.hpp"
 #include "gui_state.hpp"
 #include "dark_controls.hpp"
+#include "gui_helpers.hpp"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -287,24 +288,34 @@ static void update_settings_dependencies(SettingsDialogState* state) {
     bool osd_enabled = (SendMessageW(state->h_chk_osd, BM_GETCHECK, 0, 0) == BST_CHECKED);
     EnableWindow(state->h_combo_osd_pos, osd_enabled ? TRUE : FALSE);
 
-    BOOL enable_adv = state->advanced_unlocked ? TRUE : FALSE;
-    EnableWindow(state->h_combo_tier, enable_adv);
-    EnableWindow(state->h_edit_pre_win, enable_adv);
-    EnableWindow(state->h_edit_post_win, enable_adv);
-    EnableWindow(state->h_edit_cooldown, enable_adv);
-    EnableWindow(state->h_combo_buffer, enable_adv);
-    EnableWindow(state->h_edit_dpc, enable_adv);
-    EnableWindow(state->h_edit_isr, enable_adv);
-    EnableWindow(state->h_edit_disk, enable_adv);
-    EnableWindow(state->h_edit_cswitch, enable_adv);
-    EnableWindow(state->h_edit_smi, enable_adv);
-    EnableWindow(state->h_edit_mem_alloc, enable_adv);
-    EnableWindow(state->h_edit_mem_trim, enable_adv);
-    EnableWindow(state->h_edit_mem_phys, enable_adv);
-    EnableWindow(state->h_edit_d3d12_pso, enable_adv);
-    EnableWindow(state->h_edit_vram_demoted, enable_adv);
-    EnableWindow(state->h_combo_trig_mode, enable_adv);
-    EnableWindow(state->h_edit_target_fps, enable_adv);
+    HWND SettingsDialogState::* const advanced_controls[] = {
+        &SettingsDialogState::h_combo_tier,
+        &SettingsDialogState::h_edit_pre_win,
+        &SettingsDialogState::h_edit_post_win,
+        &SettingsDialogState::h_edit_cooldown,
+        &SettingsDialogState::h_combo_buffer,
+        &SettingsDialogState::h_edit_dpc,
+        &SettingsDialogState::h_edit_isr,
+        &SettingsDialogState::h_edit_disk,
+        &SettingsDialogState::h_edit_cswitch,
+        &SettingsDialogState::h_edit_smi,
+        &SettingsDialogState::h_edit_mem_alloc,
+        &SettingsDialogState::h_edit_mem_trim,
+        &SettingsDialogState::h_edit_mem_phys,
+        &SettingsDialogState::h_edit_d3d12_pso,
+        &SettingsDialogState::h_edit_vram_demoted,
+        &SettingsDialogState::h_combo_trig_mode,
+        &SettingsDialogState::h_edit_target_fps,
+        &SettingsDialogState::h_chk_judder,
+    };
+    const BOOL enable_adv = state->advanced_unlocked ? TRUE : FALSE;
+    for (auto m : advanced_controls) {
+        HWND h = state->*m;
+        if (h) {
+            EnableWindow(h, enable_adv);
+            InvalidateRect(h, NULL, TRUE);
+        }
+    }
 
     int tm_sel = static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0));
     FrameTriggerMode mode = (tm_sel == 1) ? FrameTriggerMode::DYNAMIC_ONLY : ((tm_sel == 2) ? FrameTriggerMode::STATIC_ONLY : FrameTriggerMode::HYBRID);
@@ -315,8 +326,6 @@ static void update_settings_dependencies(SettingsDialogState* state) {
     bool enable_spike_edits = (state->advanced_unlocked && state->current_profile == PacingProfile::CUSTOM && mode != FrameTriggerMode::STATIC_ONLY);
     EnableWindow(state->h_edit_spike_mult, enable_spike_edits);
     EnableWindow(state->h_edit_min_delta, enable_spike_edits);
-
-    EnableWindow(state->h_chk_judder, enable_adv);
 
     if (mode == FrameTriggerMode::STATIC_ONLY) {
         SetWindowTextW(state->h_lbl_profile_hint, L"(N/A in Static Only mode)");
@@ -334,28 +343,10 @@ static void update_settings_dependencies(SettingsDialogState* state) {
         }
     }
 
-    InvalidateRect(state->h_combo_tier, NULL, TRUE);
-    InvalidateRect(state->h_combo_buffer, NULL, TRUE);
-    InvalidateRect(state->h_edit_pre_win, NULL, TRUE);
-    InvalidateRect(state->h_edit_post_win, NULL, TRUE);
-    InvalidateRect(state->h_edit_cooldown, NULL, TRUE);
-    InvalidateRect(state->h_edit_dpc, NULL, TRUE);
-    InvalidateRect(state->h_edit_isr, NULL, TRUE);
-    InvalidateRect(state->h_edit_disk, NULL, TRUE);
-    InvalidateRect(state->h_edit_cswitch, NULL, TRUE);
-    InvalidateRect(state->h_edit_smi, NULL, TRUE);
-    InvalidateRect(state->h_edit_mem_alloc, NULL, TRUE);
-    InvalidateRect(state->h_edit_mem_trim, NULL, TRUE);
-    InvalidateRect(state->h_edit_mem_phys, NULL, TRUE);
-    InvalidateRect(state->h_edit_d3d12_pso, NULL, TRUE);
-    InvalidateRect(state->h_edit_vram_demoted, NULL, TRUE);
-    InvalidateRect(state->h_combo_trig_mode, NULL, TRUE);
     InvalidateRect(state->h_combo_pacing_profile, NULL, TRUE);
-    InvalidateRect(state->h_edit_target_fps, NULL, TRUE);
     InvalidateRect(state->h_edit_spike_mult, NULL, TRUE);
     InvalidateRect(state->h_edit_min_delta, NULL, TRUE);
     InvalidateRect(state->h_lbl_profile_hint, NULL, TRUE);
-    InvalidateRect(state->h_chk_judder, NULL, TRUE);
 }
 
 static void toggle_advanced_settings(HWND hwnd, SettingsDialogState* state) {
@@ -612,57 +603,29 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             apply_control_dark_theme(state->h_hotkey_edit);
             SetWindowSubclass(state->h_hotkey_edit, SettingsHotkeySubclassProc, IDC_SET_HOTKEY_EDIT, reinterpret_cast<DWORD_PTR>(state));
 
-            state->h_chk_sound = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_SOUND, NULL, NULL);
-            SendMessageW(state->h_chk_sound, BM_SETCHECK, g_sound_cues_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-            apply_control_dark_theme(state->h_chk_sound);
+            state->h_chk_sound     = create_checkbox(hwnd, IDC_SET_CHK_SOUND,     g_sound_cues_enabled);
+            state->h_chk_redact    = create_checkbox(hwnd, IDC_SET_CHK_REDACT,    g_settings_config.redact);
+            state->h_chk_audio     = create_checkbox(hwnd, IDC_SET_CHK_AUDIO,     g_settings_config.enable_audio);
+            state->h_chk_auto_save = create_checkbox(hwnd, IDC_SET_CHK_AUTO_SAVE, !g_settings_config.output_dir.empty());
 
-            state->h_chk_redact = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_REDACT, NULL, NULL);
-            SendMessageW(state->h_chk_redact, BM_SETCHECK, g_settings_config.redact ? BST_CHECKED : BST_UNCHECKED, 0);
-            apply_control_dark_theme(state->h_chk_redact);
-
-            state->h_chk_audio = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_AUDIO, NULL, NULL);
-            SendMessageW(state->h_chk_audio, BM_SETCHECK, g_settings_config.enable_audio ? BST_CHECKED : BST_UNCHECKED, 0);
-            apply_control_dark_theme(state->h_chk_audio);
-
-            state->h_chk_auto_save = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_AUTO_SAVE, NULL, NULL);
-            SendMessageW(state->h_chk_auto_save, BM_SETCHECK, !g_settings_config.output_dir.empty() ? BST_CHECKED : BST_UNCHECKED, 0);
-            apply_control_dark_theme(state->h_chk_auto_save);
-
-            state->h_edit_auto_save = CreateWindowExW(0, L"EDIT", g_settings_config.output_dir.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_AUTO_SAVE, NULL, NULL);
+            state->h_edit_auto_save = CreateWindowExW(0, L"EDIT", g_settings_config.output_dir.c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
+                0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_AUTO_SAVE, NULL, NULL);
             SendMessageW(state->h_edit_auto_save, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             apply_control_dark_theme(state->h_edit_auto_save);
             SetWindowSubclass(state->h_edit_auto_save, EditCenteredSubclassProc, IDC_SET_EDIT_AUTO_SAVE, 0);
             SendMessageW(state->h_edit_auto_save, EM_SETCUEBANNER, (WPARAM)FALSE, (LPARAM)L"Default: %LOCALAPPDATA%\\Stuttometer\\Reports");
 
-            state->h_btn_browse_auto_save = CreateWindowExW(0, L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_BTN_BROWSE_AUTO_SAVE, NULL, NULL);
-            SetPropW(state->h_btn_browse_auto_save, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::QuickAction));
-            SetPropW(state->h_btn_browse_auto_save, L"OnCard", reinterpret_cast<HANDLE>(1));
-            SetWindowSubclass(state->h_btn_browse_auto_save, DarkButtonSubclassProc, IDC_SET_BTN_BROWSE_AUTO_SAVE, 0);
+            state->h_btn_browse_auto_save = create_owner_button(hwnd, IDC_SET_BTN_BROWSE_AUTO_SAVE, L"Browse", BtnStyle::QuickAction, true);
 
-            wchar_t num_buf[64]{};
+            state->h_chk_osd = create_checkbox(hwnd, IDC_SET_CHK_OSD, g_settings_config.enable_osd);
 
-            state->h_chk_osd = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_OSD, NULL, NULL);
-            SendMessageW(state->h_chk_osd, BM_SETCHECK, g_settings_config.enable_osd ? BST_CHECKED : BST_UNCHECKED, 0);
-            apply_control_dark_theme(state->h_chk_osd);
-
-            state->h_combo_osd_pos = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_OSD_POS, NULL, NULL);
-            SendMessageW(state->h_combo_osd_pos, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-            SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
-            SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
-            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Top-Right");
-            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Bottom-Right");
-            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Top-Left");
-            SendMessageW(state->h_combo_osd_pos, CB_ADDSTRING, 0, (LPARAM)L"Bottom-Left");
             int osd_pos_idx = static_cast<int>(g_settings_config.osd_position);
-            if (osd_pos_idx < 0 || osd_pos_idx > 3) osd_pos_idx = 0;
-            SendMessageW(state->h_combo_osd_pos, CB_SETCURSEL, osd_pos_idx, 0);
-            apply_control_dark_theme(state->h_combo_osd_pos);
-            SetWindowSubclass(state->h_combo_osd_pos, DarkComboSubclassProc, IDC_SET_COMBO_OSD_POS, 0);
+            state->h_combo_osd_pos = create_dropdown(hwnd, IDC_SET_COMBO_OSD_POS,
+                { L"Top-Right", L"Bottom-Right", L"Top-Left", L"Bottom-Left" },
+                (osd_pos_idx >= 0 && osd_pos_idx <= 3) ? osd_pos_idx : 0);
 
-            // Advanced Settings Safeguard Checkbox
-            state->h_chk_advanced = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_ADVANCED, NULL, NULL);
-            SendMessageW(state->h_chk_advanced, BM_SETCHECK, BST_UNCHECKED, 0);
-            apply_control_dark_theme(state->h_chk_advanced);
+            state->h_chk_advanced = create_checkbox(hwnd, IDC_SET_CHK_ADVANCED, false);
 
             // ETW Trace & Buffer Controls
             state->h_combo_tier = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_TIER, NULL, NULL);
@@ -677,23 +640,15 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             apply_control_dark_theme(state->h_combo_tier);
             SetWindowSubclass(state->h_combo_tier, DarkComboSubclassProc, IDC_SET_COMBO_TIER, 0);
 
-            swprintf_s(num_buf, L"%.1f", g_settings_config.window_pre_ms);
-            state->h_edit_pre_win = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_PRE_WIN, NULL, NULL);
-            SetWindowSubclass(state->h_edit_pre_win, EditCenteredSubclassProc, IDC_SET_EDIT_PRE_WIN, 0);
-            SendMessageW(state->h_edit_pre_win, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_pre_win);
-
-            swprintf_s(num_buf, L"%.1f", g_settings_config.window_post_ms);
-            state->h_edit_post_win = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_POST_WIN, NULL, NULL);
-            SetWindowSubclass(state->h_edit_post_win, EditCenteredSubclassProc, IDC_SET_EDIT_POST_WIN, 0);
-            SendMessageW(state->h_edit_post_win, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_post_win);
-
-            swprintf_s(num_buf, L"%.0f", g_settings_config.cooldown_ms);
-            state->h_edit_cooldown = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_COOLDOWN, NULL, NULL);
-            SetWindowSubclass(state->h_edit_cooldown, EditCenteredSubclassProc, IDC_SET_EDIT_COOLDOWN, 0);
-            SendMessageW(state->h_edit_cooldown, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_cooldown);
+            const NumericEditDef window_edits[] = {
+                { IDC_SET_EDIT_PRE_WIN,  g_settings_config.window_pre_ms,  L"%.1f" },
+                { IDC_SET_EDIT_POST_WIN, g_settings_config.window_post_ms, L"%.1f" },
+                { IDC_SET_EDIT_COOLDOWN, g_settings_config.cooldown_ms,    L"%.0f" },
+            };
+            HWND* window_handles[] = { &state->h_edit_pre_win, &state->h_edit_post_win, &state->h_edit_cooldown };
+            for (size_t i = 0; i < std::size(window_edits); ++i) {
+                *window_handles[i] = create_numeric_edit(hwnd, window_edits[i], g_font_ui_bold);
+            }
 
             state->h_combo_buffer = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_BUFFER, NULL, NULL);
             SendMessageW(state->h_combo_buffer, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
@@ -718,66 +673,28 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             apply_control_dark_theme(state->h_combo_buffer);
             SetWindowSubclass(state->h_combo_buffer, DarkComboSubclassProc, IDC_SET_COMBO_BUFFER, 0);
 
-            // Correlation Cutoff Controls
-            swprintf_s(num_buf, L"%u", g_settings_config.dpc_threshold_us);
-            state->h_edit_dpc = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_DPC, NULL, NULL);
-            SetWindowSubclass(state->h_edit_dpc, EditCenteredSubclassProc, IDC_SET_EDIT_DPC, 0);
-            SendMessageW(state->h_edit_dpc, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_dpc);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.isr_threshold_us);
-            state->h_edit_isr = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_ISR, NULL, NULL);
-            SetWindowSubclass(state->h_edit_isr, EditCenteredSubclassProc, IDC_SET_EDIT_ISR, 0);
-            SendMessageW(state->h_edit_isr, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_isr);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.disk_threshold_ms);
-            state->h_edit_disk = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_DISK, NULL, NULL);
-            SetWindowSubclass(state->h_edit_disk, EditCenteredSubclassProc, IDC_SET_EDIT_DISK, 0);
-            SendMessageW(state->h_edit_disk, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_disk);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.cswitch_preempt_ms);
-            state->h_edit_cswitch = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_CSWITCH, NULL, NULL);
-            SetWindowSubclass(state->h_edit_cswitch, EditCenteredSubclassProc, IDC_SET_EDIT_CSWITCH, 0);
-            SendMessageW(state->h_edit_cswitch, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_cswitch);
-
-            swprintf_s(num_buf, L"%.1f", g_settings_config.smi_severity_threshold_ms);
-            state->h_edit_smi = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_SMI, NULL, NULL);
-            SetWindowSubclass(state->h_edit_smi, EditCenteredSubclassProc, IDC_SET_EDIT_SMI, 0);
-            SendMessageW(state->h_edit_smi, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_smi);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.mem_alloc_threshold_mb);
-            state->h_edit_mem_alloc = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_MEM_ALLOC, NULL, NULL);
-            SetWindowSubclass(state->h_edit_mem_alloc, EditCenteredSubclassProc, IDC_SET_EDIT_MEM_ALLOC, 0);
-            SendMessageW(state->h_edit_mem_alloc, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_mem_alloc);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.mem_trim_threshold_mb);
-            state->h_edit_mem_trim = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_MEM_TRIM, NULL, NULL);
-            SetWindowSubclass(state->h_edit_mem_trim, EditCenteredSubclassProc, IDC_SET_EDIT_MEM_TRIM, 0);
-            SendMessageW(state->h_edit_mem_trim, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_mem_trim);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.mem_physical_latency_us);
-            state->h_edit_mem_phys = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_MEM_PHYS, NULL, NULL);
-            SetWindowSubclass(state->h_edit_mem_phys, EditCenteredSubclassProc, IDC_SET_EDIT_MEM_PHYS, 0);
-            SendMessageW(state->h_edit_mem_phys, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_mem_phys);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.d3d12_pso_threshold_ms);
-            state->h_edit_d3d12_pso = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_D3D12_PSO, NULL, NULL);
-            SetWindowSubclass(state->h_edit_d3d12_pso, EditCenteredSubclassProc, IDC_SET_EDIT_D3D12_PSO, 0);
-            SendMessageW(state->h_edit_d3d12_pso, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_d3d12_pso);
-
-            swprintf_s(num_buf, L"%u", g_settings_config.vram_demoted_threshold_mb);
-            state->h_edit_vram_demoted = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_VRAM_DEMOTED, NULL, NULL);
-            SetWindowSubclass(state->h_edit_vram_demoted, EditCenteredSubclassProc, IDC_SET_EDIT_VRAM_DEMOTED, 0);
-            SendMessageW(state->h_edit_vram_demoted, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_vram_demoted);
+            // 3. Correlation Cutoff Section
+            const NumericEditDef cutoff_edits[] = {
+                { IDC_SET_EDIT_DPC,          static_cast<double>(g_settings_config.dpc_threshold_us),         L"%u" },
+                { IDC_SET_EDIT_ISR,          static_cast<double>(g_settings_config.isr_threshold_us),         L"%u" },
+                { IDC_SET_EDIT_DISK,         static_cast<double>(g_settings_config.disk_threshold_ms),        L"%u" },
+                { IDC_SET_EDIT_CSWITCH,      static_cast<double>(g_settings_config.cswitch_preempt_ms),       L"%u" },
+                { IDC_SET_EDIT_SMI,          g_settings_config.smi_severity_threshold_ms,                     L"%.1f" },
+                { IDC_SET_EDIT_MEM_ALLOC,    static_cast<double>(g_settings_config.mem_alloc_threshold_mb),   L"%u" },
+                { IDC_SET_EDIT_MEM_TRIM,     static_cast<double>(g_settings_config.mem_trim_threshold_mb),    L"%u" },
+                { IDC_SET_EDIT_MEM_PHYS,     static_cast<double>(g_settings_config.mem_physical_latency_us),  L"%u" },
+                { IDC_SET_EDIT_D3D12_PSO,    static_cast<double>(g_settings_config.d3d12_pso_threshold_ms),   L"%u" },
+                { IDC_SET_EDIT_VRAM_DEMOTED, static_cast<double>(g_settings_config.vram_demoted_threshold_mb), L"%u" },
+            };
+            HWND* cutoff_handles[] = {
+                &state->h_edit_dpc, &state->h_edit_isr, &state->h_edit_disk,
+                &state->h_edit_cswitch, &state->h_edit_smi, &state->h_edit_mem_alloc,
+                &state->h_edit_mem_trim, &state->h_edit_mem_phys, &state->h_edit_d3d12_pso,
+                &state->h_edit_vram_demoted
+            };
+            for (size_t i = 0; i < std::size(cutoff_edits); ++i) {
+                *cutoff_handles[i] = create_numeric_edit(hwnd, cutoff_edits[i], g_font_ui_bold);
+            }
 
             // Frame Pacing & Dynamic Relative Trigger Controls
             state->h_combo_trig_mode = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_TRIG_MODE, NULL, NULL);
@@ -819,6 +736,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             apply_control_dark_theme(state->h_combo_pacing_profile);
             SetWindowSubclass(state->h_combo_pacing_profile, DarkComboSubclassProc, IDC_SET_COMBO_PACING_PROFILE, 0);
 
+            wchar_t num_buf[64]{};
             if (!g_settings_config.present_threshold_manual) {
                 wcscpy_s(num_buf, L"Auto");
             } else {
@@ -868,22 +786,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SendMessageW(state->h_lbl_profile_hint, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             apply_control_dark_theme(state->h_lbl_profile_hint);
 
-            state->h_chk_judder = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_CHK_JUDDER, NULL, NULL);
-            SendMessageW(state->h_chk_judder, BM_SETCHECK, g_settings_config.enable_judder_detection ? BST_CHECKED : BST_UNCHECKED, 0);
-            apply_control_dark_theme(state->h_chk_judder);
+            state->h_chk_judder = create_checkbox(hwnd, IDC_SET_CHK_JUDDER, g_settings_config.enable_judder_detection);
 
-            // Action Buttons
-            state->h_btn_reset = CreateWindowExW(0, L"BUTTON", L"Reset Defaults", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_BTN_RESET, NULL, NULL);
-            SetPropW(state->h_btn_reset, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
-            SetWindowSubclass(state->h_btn_reset, DarkButtonSubclassProc, IDC_SET_BTN_RESET, 0);
-
-            state->h_btn_cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_BTN_CANCEL, NULL, NULL);
-            SetPropW(state->h_btn_cancel, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
-            SetWindowSubclass(state->h_btn_cancel, DarkButtonSubclassProc, IDC_SET_BTN_CANCEL, 0);
-
-            state->h_btn_save = CreateWindowExW(0, L"BUTTON", L"Save & Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_BTN_SAVE, NULL, NULL);
-            SetPropW(state->h_btn_save, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::PrimaryEmerald));
-            SetWindowSubclass(state->h_btn_save, DarkButtonSubclassProc, IDC_SET_BTN_SAVE, 0);
+            // 5. Action Buttons Section
+            state->h_btn_reset  = create_owner_button(hwnd, IDC_SET_BTN_RESET,  L"Reset Defaults", BtnStyle::SecondarySlate);
+            state->h_btn_cancel = create_owner_button(hwnd, IDC_SET_BTN_CANCEL, L"Cancel",         BtnStyle::SecondarySlate);
+            state->h_btn_save   = create_owner_button(hwnd, IDC_SET_BTN_SAVE,   L"Save & Apply",   BtnStyle::PrimaryEmerald);
 
             if (!state->h_hotkey_edit || !state->h_chk_sound || !state->h_chk_redact ||
                 !state->h_chk_audio || !state->h_btn_save || !state->h_btn_cancel || !state->h_combo_pacing_profile) {
@@ -1633,22 +1541,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 else if (t_idx == 2) g_settings_config.provider_tier = "minimal";
                 else g_settings_config.provider_tier = "standard";
 
-                wchar_t buf[64]{};
-
-                GetWindowTextW(state->h_edit_pre_win, buf, 64);
-                std::wstring w_pre(buf); std::replace(w_pre.begin(), w_pre.end(), L',', L'.');
-                double v_pre = _wtof(w_pre.c_str());
-                g_settings_config.window_pre_ms = std::clamp(v_pre, 50.0, 1000.0);
-
-                GetWindowTextW(state->h_edit_post_win, buf, 64);
-                std::wstring w_post(buf); std::replace(w_post.begin(), w_post.end(), L',', L'.');
-                double v_post = _wtof(w_post.c_str());
-                g_settings_config.window_post_ms = std::clamp(v_post, 0.0, 200.0);
-
-                GetWindowTextW(state->h_edit_cooldown, buf, 64);
-                std::wstring w_cd(buf); std::replace(w_cd.begin(), w_cd.end(), L',', L'.');
-                double v_cd = _wtof(w_cd.c_str());
-                g_settings_config.cooldown_ms = std::clamp(v_cd, 100.0, 10000.0);
+                read_clamped_edit<double>  (state->h_edit_pre_win,       50.0,   1000.0,  g_settings_config.window_pre_ms);
+                read_clamped_edit<double>  (state->h_edit_post_win,      0.0,    200.0,   g_settings_config.window_post_ms);
+                read_clamped_edit<double>  (state->h_edit_cooldown,      100.0,  10000.0, g_settings_config.cooldown_ms);
 
                 int b_sel = static_cast<int>(SendMessageW(state->h_combo_buffer, CB_GETCURSEL, 0, 0));
                 LRESULT b_data = SendMessageW(state->h_combo_buffer, CB_GETITEMDATA, b_sel, 0);
@@ -1656,46 +1551,16 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     g_settings_config.buffer_slots = static_cast<uint32_t>(b_data);
                 }
 
-                GetWindowTextW(state->h_edit_dpc, buf, 64);
-                long v_dpc = _wtol(buf);
-                g_settings_config.dpc_threshold_us = static_cast<uint32_t>(std::clamp(v_dpc, 100L, 50000L));
-
-                GetWindowTextW(state->h_edit_isr, buf, 64);
-                long v_isr = _wtol(buf);
-                g_settings_config.isr_threshold_us = static_cast<uint32_t>(std::clamp(v_isr, 50L, 50000L));
-
-                GetWindowTextW(state->h_edit_disk, buf, 64);
-                long v_disk = _wtol(buf);
-                g_settings_config.disk_threshold_ms = static_cast<uint32_t>(std::clamp(v_disk, 1L, 1000L));
-
-                GetWindowTextW(state->h_edit_cswitch, buf, 64);
-                long v_cs = _wtol(buf);
-                g_settings_config.cswitch_preempt_ms = static_cast<uint32_t>(std::clamp(v_cs, 1L, 500L));
-
-                GetWindowTextW(state->h_edit_smi, buf, 64);
-                std::wstring w_smi(buf); std::replace(w_smi.begin(), w_smi.end(), L',', L'.');
-                double v_smi = _wtof(w_smi.c_str());
-                g_settings_config.smi_severity_threshold_ms = std::clamp(v_smi, 10.0, 100.0);
-
-                GetWindowTextW(state->h_edit_mem_alloc, buf, 64);
-                long v_mem_alloc = _wtol(buf);
-                g_settings_config.mem_alloc_threshold_mb = static_cast<uint32_t>(std::clamp(v_mem_alloc, 1L, 1024L));
-
-                GetWindowTextW(state->h_edit_mem_trim, buf, 64);
-                long v_mem_trim = _wtol(buf);
-                g_settings_config.mem_trim_threshold_mb = static_cast<uint32_t>(std::clamp(v_mem_trim, 1L, 1024L));
-
-                GetWindowTextW(state->h_edit_mem_phys, buf, 64);
-                long v_mem_phys = _wtol(buf);
-                g_settings_config.mem_physical_latency_us = static_cast<uint32_t>(std::clamp(v_mem_phys, 50L, 50000L));
-
-                GetWindowTextW(state->h_edit_d3d12_pso, buf, 64);
-                long v_d3d12 = _wtol(buf);
-                g_settings_config.d3d12_pso_threshold_ms = static_cast<uint32_t>(std::clamp(v_d3d12, 1L, 500L));
-
-                GetWindowTextW(state->h_edit_vram_demoted, buf, 64);
-                long v_vram = _wtol(buf);
-                g_settings_config.vram_demoted_threshold_mb = static_cast<uint32_t>(std::clamp(v_vram, 1L, 1024L));
+                read_clamped_edit<uint32_t>(state->h_edit_dpc,           100u,   50000u,  g_settings_config.dpc_threshold_us);
+                read_clamped_edit<uint32_t>(state->h_edit_isr,           50u,    50000u,  g_settings_config.isr_threshold_us);
+                read_clamped_edit<uint32_t>(state->h_edit_disk,          1u,     1000u,   g_settings_config.disk_threshold_ms);
+                read_clamped_edit<uint32_t>(state->h_edit_cswitch,       1u,     500u,    g_settings_config.cswitch_preempt_ms);
+                read_clamped_edit<double>  (state->h_edit_smi,           10.0,   100.0,   g_settings_config.smi_severity_threshold_ms);
+                read_clamped_edit<uint32_t>(state->h_edit_mem_alloc,     1u,     1024u,   g_settings_config.mem_alloc_threshold_mb);
+                read_clamped_edit<uint32_t>(state->h_edit_mem_trim,      1u,     1024u,   g_settings_config.mem_trim_threshold_mb);
+                read_clamped_edit<uint32_t>(state->h_edit_mem_phys,      50u,    50000u,  g_settings_config.mem_physical_latency_us);
+                read_clamped_edit<uint32_t>(state->h_edit_d3d12_pso,     1u,     500u,    g_settings_config.d3d12_pso_threshold_ms);
+                read_clamped_edit<uint32_t>(state->h_edit_vram_demoted,  1u,     1024u,   g_settings_config.vram_demoted_threshold_mb);
 
                 int tm_idx = static_cast<int>(SendMessageW(state->h_combo_trig_mode, CB_GETCURSEL, 0, 0));
                 if (tm_idx == 1) g_settings_config.frame_trigger_mode = FrameTriggerMode::DYNAMIC_ONLY;
@@ -1708,6 +1573,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
                 g_settings_config.pacing_profile = state->current_profile;
                 if (state->current_profile == PacingProfile::CUSTOM) {
+                    wchar_t buf[64]{};
                     GetWindowTextW(state->h_edit_spike_mult, buf, 64);
                     std::wstring w_sm(buf); std::replace(w_sm.begin(), w_sm.end(), L',', L'.');
                     double v_sm = _wtof(w_sm.c_str());
@@ -1878,55 +1744,54 @@ void settings_dialog_apply_fonts(HWND hDlg) {
     auto* state = reinterpret_cast<SettingsDialogState*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
     if (!state) return;
 
-    if (state->h_hotkey_edit) SendMessageW(state->h_hotkey_edit, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_chk_sound) SendMessageW(state->h_chk_sound, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_chk_redact) SendMessageW(state->h_chk_redact, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_chk_audio) SendMessageW(state->h_chk_audio, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_chk_auto_save) SendMessageW(state->h_chk_auto_save, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_edit_auto_save) SendMessageW(state->h_edit_auto_save, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_btn_browse_auto_save) SendMessageW(state->h_btn_browse_auto_save, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_chk_osd) SendMessageW(state->h_chk_osd, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_combo_osd_pos) {
-        SendMessageW(state->h_combo_osd_pos, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-        SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
-        SendMessageW(state->h_combo_osd_pos, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
+    struct FontEntry { HWND* handle; HFONT font; bool is_combo; };
+    const FontEntry entries[] = {
+        { &state->h_hotkey_edit,          g_font_ui_bold, false },
+        { &state->h_chk_sound,            g_font_ui,      false },
+        { &state->h_chk_redact,           g_font_ui,      false },
+        { &state->h_chk_audio,            g_font_ui,      false },
+        { &state->h_chk_auto_save,        g_font_ui,      false },
+        { &state->h_edit_auto_save,       g_font_ui,      false },
+        { &state->h_btn_browse_auto_save, g_font_ui_bold, false },
+        { &state->h_chk_osd,              g_font_ui,      false },
+        { &state->h_combo_osd_pos,        g_font_ui,      true  },
+        { &state->h_chk_advanced,         g_font_ui,      false },
+        { &state->h_combo_tier,           g_font_ui,      true  },
+        { &state->h_edit_pre_win,         g_font_ui_bold, false },
+        { &state->h_edit_post_win,        g_font_ui_bold, false },
+        { &state->h_edit_cooldown,        g_font_ui_bold, false },
+        { &state->h_combo_buffer,         g_font_ui,      true  },
+        { &state->h_edit_dpc,             g_font_ui_bold, false },
+        { &state->h_edit_isr,             g_font_ui_bold, false },
+        { &state->h_edit_disk,            g_font_ui_bold, false },
+        { &state->h_edit_cswitch,         g_font_ui_bold, false },
+        { &state->h_edit_smi,             g_font_ui_bold, false },
+        { &state->h_edit_mem_alloc,       g_font_ui_bold, false },
+        { &state->h_edit_mem_trim,        g_font_ui_bold, false },
+        { &state->h_edit_mem_phys,        g_font_ui_bold, false },
+        { &state->h_edit_d3d12_pso,       g_font_ui_bold, false },
+        { &state->h_edit_vram_demoted,    g_font_ui_bold, false },
+        { &state->h_combo_trig_mode,      g_font_ui,      true  },
+        { &state->h_combo_pacing_profile, g_font_ui,      true  }, // FIXED: Now scaled on DPI change
+        { &state->h_edit_target_fps,      g_font_ui_bold, false },
+        { &state->h_edit_spike_mult,      g_font_ui_bold, false },
+        { &state->h_edit_min_delta,       g_font_ui_bold, false },
+        { &state->h_lbl_profile_hint,     g_font_ui,      false },
+        { &state->h_chk_judder,           g_font_ui,      false },
+        { &state->h_btn_reset,            g_font_ui_bold, false },
+        { &state->h_btn_cancel,           g_font_ui_bold, false },
+        { &state->h_btn_save,             g_font_ui_bold, false },
+    };
+
+    for (const auto& e : entries) {
+        if (*e.handle) {
+            SendMessageW(*e.handle, WM_SETFONT, (WPARAM)e.font, TRUE);
+            if (e.is_combo) {
+                SendMessageW(*e.handle, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
+                SendMessageW(*e.handle, CB_SETITEMHEIGHT, (WPARAM)0,  (LPARAM)scale_dpi(22));
+            }
+        }
     }
-    if (state->h_chk_advanced) SendMessageW(state->h_chk_advanced, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_combo_tier) {
-        SendMessageW(state->h_combo_tier, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-        SendMessageW(state->h_combo_tier, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
-        SendMessageW(state->h_combo_tier, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
-    }
-    if (state->h_edit_pre_win) SendMessageW(state->h_edit_pre_win, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_post_win) SendMessageW(state->h_edit_post_win, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_cooldown) SendMessageW(state->h_edit_cooldown, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_combo_buffer) {
-        SendMessageW(state->h_combo_buffer, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-        SendMessageW(state->h_combo_buffer, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
-        SendMessageW(state->h_combo_buffer, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
-    }
-    if (state->h_edit_dpc) SendMessageW(state->h_edit_dpc, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_isr) SendMessageW(state->h_edit_isr, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_disk) SendMessageW(state->h_edit_disk, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_cswitch) SendMessageW(state->h_edit_cswitch, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_smi) SendMessageW(state->h_edit_smi, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_mem_alloc) SendMessageW(state->h_edit_mem_alloc, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_mem_trim) SendMessageW(state->h_edit_mem_trim, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_mem_phys) SendMessageW(state->h_edit_mem_phys, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_d3d12_pso) SendMessageW(state->h_edit_d3d12_pso, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_vram_demoted) SendMessageW(state->h_edit_vram_demoted, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_combo_trig_mode) {
-        SendMessageW(state->h_combo_trig_mode, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-        SendMessageW(state->h_combo_trig_mode, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
-        SendMessageW(state->h_combo_trig_mode, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
-    }
-    if (state->h_edit_target_fps) SendMessageW(state->h_edit_target_fps, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_spike_mult) SendMessageW(state->h_edit_spike_mult, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_edit_min_delta) SendMessageW(state->h_edit_min_delta, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_chk_judder) SendMessageW(state->h_chk_judder, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-    if (state->h_btn_reset) SendMessageW(state->h_btn_reset, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_btn_cancel) SendMessageW(state->h_btn_cancel, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (state->h_btn_save) SendMessageW(state->h_btn_save, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
 }
 
 } // namespace stuttometer::gui

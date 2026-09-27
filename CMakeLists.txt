@@ -123,6 +123,7 @@ add_executable(stuttometer_gui WIN32
   src/gui/theme.cpp
   src/gui/gui_state.cpp
   src/gui/dark_controls.cpp
+  src/gui/gui_helpers.cpp
   src/gui/export_utils.cpp
   src/gui/settings_dialog.cpp
   src/gui/gui_controller.cpp

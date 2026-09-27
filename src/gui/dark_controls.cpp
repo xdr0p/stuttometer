@@ -1,6 +1,7 @@
 #include "dark_controls.hpp"
 #include "theme.hpp"
 #include "gui_state.hpp"
+#include "gui_helpers.hpp"
 
 #include <algorithm>
 #include <string>
@@ -388,84 +389,17 @@ void draw_custom_button(LPDRAWITEMSTRUCT pdis) {
     FillRect(hdc, &rc, bg_parent);
 
     bool is_disabled = (pdis->itemState & ODS_DISABLED) != 0;
-    bool is_pressed = (pdis->itemState & ODS_SELECTED) != 0;
-    bool is_hovered = (GetPropW(pdis->hwndItem, L"Hovered") != nullptr) && !is_disabled;
+    bool is_pressed  = (pdis->itemState & ODS_SELECTED) != 0;
+    bool is_hovered  = (GetPropW(pdis->hwndItem, L"Hovered") != nullptr) && !is_disabled;
 
-    BtnStyle style = static_cast<BtnStyle>(reinterpret_cast<INT_PTR>(GetPropW(pdis->hwndItem, L"BtnStyle")));
-    if (style == static_cast<BtnStyle>(0)) {
-        style = BtnStyle::SecondarySlate;
-    }
+    BtnStyle style = static_cast<BtnStyle>(reinterpret_cast<INT_PTR>(
+        GetPropW(pdis->hwndItem, L"BtnStyle")));
+    if (style == static_cast<BtnStyle>(0)) style = BtnStyle::SecondarySlate;
 
-    HBRUSH br = g_theme.br_btn_slate;
-    HPEN pen = g_theme.pen_btn_slate;
-    COLORREF text_color = COLOR_TEXT_BRIGHT;
-
-    if (is_disabled) {
-        br = g_theme.br_btn_disabled;
-        pen = g_theme.pen_btn_disabled;
-        text_color = COLOR_TEXT_DIM;
-    } else {
-        switch (style) {
-            case BtnStyle::PrimaryEmerald:
-                if (is_pressed) {
-                    br = g_theme.br_btn_emerald_pressed;
-                    pen = g_theme.pen_btn_emerald_pressed;
-                    text_color = RGB(10, 24, 18);   // Keep text color consistent with normal/hover
-                } else if (is_hovered) {
-                    br = g_theme.br_btn_emerald_hover;
-                    pen = g_theme.pen_btn_emerald_hover;
-                    text_color = RGB(10, 24, 18);   // Dark slate on emerald-600 hover (4.8:1 WCAG AA)
-                } else {
-                    br = g_theme.br_btn_emerald;
-                    pen = g_theme.pen_btn_emerald;
-                    text_color = RGB(10, 24, 18);   // Dark slate on brand emerald-500 (7.5:1 WCAG AAA)
-                }
-                break;
-
-            case BtnStyle::DangerRed:
-                if (is_pressed) {
-                    br = g_theme.br_btn_danger_pressed;
-                    pen = g_theme.pen_btn_danger_pressed;
-                } else if (is_hovered) {
-                    br = g_theme.br_btn_danger_hover;
-                    pen = g_theme.pen_btn_danger_hover;
-                } else {
-                    br = g_theme.br_btn_danger;
-                    pen = g_theme.pen_btn_danger;
-                }
-                text_color = RGB(255, 255, 255);
-                break;
-
-            case BtnStyle::QuickAction:
-                if (is_pressed) {
-                    br = g_theme.br_btn_quick_pressed;
-                    pen = g_theme.pen_btn_quick_pressed;
-                } else if (is_hovered) {
-                    br = g_theme.br_btn_quick_hover;
-                    pen = g_theme.pen_btn_quick_hover;
-                } else {
-                    br = g_theme.br_btn_quick;
-                    pen = g_theme.pen_btn_quick;
-                }
-                text_color = COLOR_TEXT_PRI;
-                break;
-
-            case BtnStyle::SecondarySlate:
-            default:
-                if (is_pressed) {
-                    br = g_theme.br_btn_slate_pressed;
-                    pen = g_theme.pen_btn_slate_pressed;
-                } else if (is_hovered) {
-                    br = g_theme.br_btn_slate_hover;
-                    pen = g_theme.pen_btn_slate_hover;
-                } else {
-                    br = g_theme.br_btn_slate;
-                    pen = g_theme.pen_btn_slate;
-                }
-                text_color = COLOR_TEXT_PRI;
-                break;
-        }
-    }
+    const auto pal = resolve_button_palette(style, is_disabled, is_pressed, is_hovered);
+    HBRUSH   br         = pal.brush;
+    HPEN     pen        = pal.pen;
+    COLORREF text_color = pal.text_color;
 
     HBRUSH old_br = (HBRUSH)SelectObject(hdc, br);
     HPEN old_pen = (HPEN)SelectObject(hdc, pen);

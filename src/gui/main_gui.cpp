@@ -15,6 +15,7 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <shellapi.h>
+#include <locale.h>
 
 #include <vector>
 #include <deque>
@@ -1467,6 +1468,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // Win32 Application Entry Point
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int nCmdShow) {
+    _wsetlocale(LC_ALL, L"C");  // Pin C locale before any wfmt/vswprintf_s call
     HRESULT hr_com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (!stuttometer::gui::CardRenderer::initialize()) {
         OutputDebugStringA("[Stuttometer] Warning: CardRenderer::initialize() failed. Visual cards disabled.\n");

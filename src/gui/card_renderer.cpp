@@ -1,4 +1,5 @@
 #include "card_renderer.hpp"
+#include "gui_string_utils.hpp"
 #include "theme.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
 #include "stuttometer/version.hpp"
@@ -52,13 +53,31 @@ static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
     return -1;
 }
 
-static std::wstring to_wide_str(std::string_view utf8) {
-    if (utf8.empty()) return {};
-    int needed = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (needed <= 0) return {};
-    std::wstring result(needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), result.data(), needed);
-    return result;
+struct CachedFontMetrics {
+    float em_height{2048.0f};
+    float ascent_ratio{0.0f};
+    float line_spacing_ratio{0.0f};
+    bool  valid{false};
+};
+CachedFontMetrics g_sans_metrics{};
+
+void refresh_font_metrics(const Gdiplus::FontFamily* pSans) noexcept {
+    if (!pSans) pSans = Gdiplus::FontFamily::GenericSansSerif();
+    const UINT em = pSans->GetEmHeight(Gdiplus::FontStyleBold);
+    if (em > 0) {
+        g_sans_metrics.em_height = static_cast<float>(em);
+        g_sans_metrics.ascent_ratio = static_cast<float>(pSans->GetCellAscent(Gdiplus::FontStyleBold))
+                                    / g_sans_metrics.em_height;
+        g_sans_metrics.line_spacing_ratio = static_cast<float>(pSans->GetLineSpacing(Gdiplus::FontStyleBold))
+                                          / g_sans_metrics.em_height;
+        g_sans_metrics.valid = true;
+    }
+}
+
+[[nodiscard]] inline std::pair<int,int>
+compute_dib_dimensions(const CardRenderOptions& opts) noexcept {
+    return { static_cast<int>(std::lround(opts.base_width  * opts.dpi_scale)),
+             static_cast<int>(std::lround(opts.base_height * opts.dpi_scale)) };
 }
 
 namespace detail {
@@ -82,14 +101,19 @@ BannerRects compute_banner_rects(
         pSans = Gdiplus::FontFamily::GenericSansSerif();
     }
 
-    float em_h = static_cast<float>(pSans->GetEmHeight(Gdiplus::FontStyleBold));
-    if (em_h <= 0.0f) {
-        em_h = 2048.0f;
+    float ascent_ratio, line_spacing_ratio;
+    if (g_sans_metrics.valid) {
+        ascent_ratio       = g_sans_metrics.ascent_ratio;
+        line_spacing_ratio = g_sans_metrics.line_spacing_ratio;
+    } else {
+        float em_h = static_cast<float>(pSans->GetEmHeight(Gdiplus::FontStyleBold));
+        if (em_h <= 0.0f) em_h = 2048.0f;
+        ascent_ratio       = static_cast<float>(pSans->GetCellAscent(Gdiplus::FontStyleBold))  / em_h;
+        line_spacing_ratio = static_cast<float>(pSans->GetLineSpacing(Gdiplus::FontStyleBold)) / em_h;
     }
-
-    const float ascent_10 = (static_cast<float>(pSans->GetCellAscent(Gdiplus::FontStyleBold)) / em_h) * 10.0f * s;
-    const float line_spacing_10 = (static_cast<float>(pSans->GetLineSpacing(Gdiplus::FontStyleBold)) / em_h) * 10.0f * s;
-    const float ascent_18 = (static_cast<float>(pSans->GetCellAscent(Gdiplus::FontStyleBold)) / em_h) * 18.0f * s;
+    const float ascent_10       = ascent_ratio       * 10.0f * s;
+    const float line_spacing_10 = line_spacing_ratio * 10.0f * s;
+    const float ascent_18       = ascent_ratio       * 18.0f * s;
 
     Gdiplus::RectF rc_pill(side_margin + 16.0f * s, banner_row1_top_y, 160.0f * s, 24.0f * s);
     Gdiplus::RectF rc_pill_text(rc_pill.X + 22.0f * s, rc_pill.Y, rc_pill.Width - 26.0f * s, rc_pill.Height);
@@ -413,7 +437,7 @@ static void draw_card(
     // Version badge pill (rounded)
     {
         std::string ver = report.tool_version.empty() ? std::string(stuttometer::TOOL_VERSION) : report.tool_version;
-        std::wstring ver_badge = L"STUTTOMETER v" + to_wide_str(ver);
+        std::wstring ver_badge = L"STUTTOMETER v" + utf8_to_wide(ver);
         RectF rc_ver(side_margin, top_margin, 130.0f * s, 22.0f * s);
 
         SolidBrush br_ver_bg(Color(255, 30, 41, 59));
@@ -428,14 +452,14 @@ static void draw_card(
     {
         std::string proc_name = report.redacted ? "Process_REDACTED" : report.target_process;
         if (proc_name.empty()) proc_name = "System Telemetry Event";
-        std::wstring proc_w = L"Target: " + to_wide_str(proc_name);
+        std::wstring proc_w = L"Target: " + utf8_to_wide(proc_name);
         RectF rc_proc(side_margin + 138.0f * s, top_margin, 600.0f * s, 22.0f * s);
         g.DrawString(proc_w.c_str(), -1, &font_tag, rc_proc, &fmt_left, &br_label);
     }
 
     // Timestamp (right aligned)
     {
-        std::wstring time_w = to_wide_str(report.timestamp_utc.empty() ? "N/A" : report.timestamp_utc);
+        std::wstring time_w = utf8_to_wide(report.timestamp_utc.empty() ? "N/A" : report.timestamp_utc);
         RectF rc_time(width - side_margin - 300.0f * s, top_margin, 300.0f * s, 22.0f * s);
         g.DrawString(time_w.c_str(), -1, &font_mono, rc_time, &fmt_right, &br_muted);
     }
@@ -462,10 +486,12 @@ static void draw_card(
         conf_str = L"UNCONFIRMED";
     } else {
         double top_confidence = report.diagnoses[0].confidence;
-        std::wstringstream conf_ss;
-        conf_ss << std::fixed << std::setprecision(0)
-                << std::lround(top_confidence * 100.0) << L"% CONFIDENCE";
-        conf_str = conf_ss.str();
+        wchar_t conf_buf[32]{};
+        if (wfmt(conf_buf, L"%lld%% CONFIDENCE", static_cast<long long>(std::lround(top_confidence * 100.0))) <= 0) {
+            conf_str = L"0% CONFIDENCE";
+        } else {
+            conf_str = conf_buf;
+        }
     }
 
     auto banner_rects = detail::compute_banner_rects(
@@ -495,7 +521,7 @@ static void draw_card(
             culprit = get_redacted_module_name(culprit, true);
         }
         if (culprit.empty()) culprit = "Unattributed Anomaly";
-        std::wstring culprit_w = to_wide_str(culprit);
+        std::wstring culprit_w = utf8_to_wide(culprit);
 
         RectF rc_culprit = banner_rects.rc_culprit;
         // Shift down for visual vertical centering of 18px font within the 24px banner row
@@ -525,7 +551,7 @@ static void draw_card(
             auto ids = collect_report_ids(report);
             summary = redact_text_with_ids(summary, ids);
         }
-        std::wstring summary_w = to_wide_str(summary);
+        std::wstring summary_w = utf8_to_wide(summary);
         RectF rc_sum(side_margin + 16.0f * s, row2_top_y, content_w - 32.0f * s, 22.0f * s);
         g.DrawString(summary_w.c_str(), -1, &font_regular, rc_sum, &fmt_left, &br_label);
     }
@@ -533,12 +559,12 @@ static void draw_card(
     // Telemetry loss warning (amber alert)
     {
         if (total_loss > 0) {
-            std::wstringstream loss_ss;
-            loss_ss << L"[!] Telemetry Loss: " << total_loss << L" event(s) dropped upstream";
-            std::wstring loss_w = loss_ss.str();
+            wchar_t loss_buf[128]{};
+            int loss_len = wfmt(loss_buf, L"[!] Telemetry Loss: %llu event(s) dropped upstream",
+                                static_cast<unsigned long long>(total_loss));
             RectF rc_loss(side_margin + 16.0f * s, row3_top_y, content_w - 32.0f * s, 18.0f * s);
             SolidBrush br_loss(color_accent_amb);
-            g.DrawString(loss_w.c_str(), -1, &font_small_bold, rc_loss, &fmt_left, &br_loss);
+            g.DrawString(loss_buf, loss_len, &font_small_bold, rc_loss, &fmt_left, &br_loss);
         }
     }
 
@@ -581,13 +607,13 @@ static void draw_card(
             dur_main = L"Glitch (x" + std::to_wstring(gc) + L")";
             dur_sub  = L"Audio buffer underrun";
         } else {
-            std::wstringstream dss;
-            dss << std::fixed << std::setprecision(1) << report.trigger.duration_ms << L" ms";
-            dur_main = dss.str();
+            wchar_t dur_buf[32]{};
+            wfmt(dur_buf, L"%.1f ms", report.trigger.duration_ms);
+            dur_main = dur_buf;
 
-            std::wstringstream sss;
-            sss << std::fixed << std::setprecision(2) << report.trigger.spike_ratio << L"x spike ratio";
-            dur_sub = sss.str();
+            wchar_t ratio_buf[32]{};
+            wfmt(ratio_buf, L"%.2fx spike ratio", report.trigger.spike_ratio);
+            dur_sub = ratio_buf;
         }
 
         MetricSeverity sev = stuttometer::classify_severity(report.trigger, report.present_threshold_ms);
@@ -605,18 +631,17 @@ static void draw_card(
             fps_sub  = is_audio_event ? L"Audio-only event" : L"Zero frame duration";
             val_color = color_text_muted;
         } else if (report.trigger.baseline_fps <= 0.0) {
-            double stall_fps = 1000.0 / report.trigger.duration_ms;
-            std::wstringstream fss;
-            fss << L"N/A \u2192 " << std::fixed << std::setprecision(1) << stall_fps << L" FPS";
-            fps_main = fss.str();
+            const double stall_fps = 1000.0 / report.trigger.duration_ms;
+            wchar_t fps_buf[48]{};
+            wfmt(fps_buf, L"N/A \u2192 %.1f FPS", stall_fps);
+            fps_main = fps_buf;
             fps_sub  = L"Baseline framerate unavailable";
             val_color = color_text_bright;
         } else {
-            double stall_fps = 1000.0 / report.trigger.duration_ms;
-            std::wstringstream fss;
-            fss << std::fixed << std::setprecision(1) << report.trigger.baseline_fps
-                << L" \u2192 " << stall_fps << L" FPS";
-            fps_main = fss.str();
+            const double stall_fps = 1000.0 / report.trigger.duration_ms;
+            wchar_t fps_buf[48]{};
+            wfmt(fps_buf, L"%.1f \u2192 %.1f FPS", report.trigger.baseline_fps, stall_fps);
+            fps_main = fps_buf;
             fps_sub  = L"Framerate drop";
 
             double drop = (report.trigger.baseline_fps - stall_fps) / report.trigger.baseline_fps;
@@ -735,11 +760,10 @@ static void draw_card(
             float y_pos = plot_y + plot_h - static_cast<float>((ms_val / max_ms) * plot_h);
             g.DrawLine(&grid_pen, plot_x, y_pos, plot_x + plot_w, y_pos);
 
-            std::wstringstream ms_ss;
-            ms_ss << std::fixed << std::setprecision(1) << ms_val << L" ms";
-            std::wstring ms_str = ms_ss.str();
+            wchar_t ms_buf[32]{};
+            int ms_len = wfmt(ms_buf, L"%.1f ms", ms_val);
             RectF rc_lbl(side_margin + 4.0f * s, y_pos - 8.0f * s, 52.0f * s, 16.0f * s);
-            g.DrawString(ms_str.c_str(), -1, &font_mono, rc_lbl, &fmt_right, &br_muted);
+            g.DrawString(ms_buf, ms_len, &font_mono, rc_lbl, &fmt_right, &br_muted);
         }
 
         // Baseline avg reference line (subtle dotted slate, slate label)
@@ -858,9 +882,8 @@ static void draw_card(
             // ---- Floating peak callout badge ----
             {
                 double peak_dur = detail::compute_peak_duration(report);
-                std::wstringstream peak_ss;
-                peak_ss << std::fixed << std::setprecision(1) << peak_dur << L" ms";
-                std::wstring peak_str = peak_ss.str();
+                wchar_t peak_buf[32]{};
+                int peak_len = wfmt(peak_buf, L"%.1f ms", peak_dur);
 
                 float callout_w = 76.0f * s;
                 float callout_h = 24.0f * s;
@@ -896,7 +919,7 @@ static void draw_card(
                 SolidBrush br_peak_txt(color_accent_amb);
                 // Shift 1.0px down for optical vertical centering of 11px bold text inside the 24px badge
                 RectF rc_callout_txt(callout_x, callout_y + 1.0f * s, callout_w, callout_h);
-                g.DrawString(peak_str.c_str(), -1, &font_bold, rc_callout_txt, &fmt_center, &br_peak_txt);
+                g.DrawString(peak_buf, peak_len, &font_bold, rc_callout_txt, &fmt_center, &br_peak_txt);
             }
 
             // ---- Dynamic X-axis milestone labels ----
@@ -962,6 +985,9 @@ bool CardRenderer::initialize() noexcept {
         if (Gdiplus::GdiplusStartup(&g_gdiplus_token, &input, nullptr) == Gdiplus::Ok) {
             g_is_initialized = true;
             g_ever_initialized = true;
+            Gdiplus::FontFamily sans_family(L"Segoe UI");
+            refresh_font_metrics(sans_family.IsAvailable() ? &sans_family
+                                                           : Gdiplus::FontFamily::GenericSansSerif());
             return true;
         }
         return false;
@@ -975,6 +1001,7 @@ void CardRenderer::shutdown() noexcept {
         std::lock_guard<std::mutex> render_lock(g_render_mutex);
         std::lock_guard<std::mutex> init_lock(g_init_mutex);
         if (g_is_initialized) {
+            g_sans_metrics.valid = false;
             Gdiplus::GdiplusShutdown(g_gdiplus_token);
             g_is_initialized = false;
         }
@@ -1001,8 +1028,7 @@ std::vector<uint8_t> CardRenderer::render_card_to_png_bytes(
             return {};
         }
 
-        int final_w = static_cast<int>(std::lround(options.base_width * options.dpi_scale));
-        int final_h = static_cast<int>(std::lround(options.base_height * options.dpi_scale));
+        const auto [final_w, final_h] = compute_dib_dimensions(options);
         if (final_w <= 0 || final_h <= 0) {
             return {};
         }
@@ -1093,8 +1119,7 @@ std::vector<uint8_t> CardRenderer::render_card_to_dib_bytes(
             return {};
         }
 
-        int final_w = static_cast<int>(std::lround(options.base_width * options.dpi_scale));
-        int final_h = static_cast<int>(std::lround(options.base_height * options.dpi_scale));
+        const auto [final_w, final_h] = compute_dib_dimensions(options);
         if (final_w <= 0 || final_h <= 0) {
             return {};
         }

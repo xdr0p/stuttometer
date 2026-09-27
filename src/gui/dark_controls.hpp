@@ -5,6 +5,14 @@
 
 namespace stuttometer::gui {
 
+// Button Styling Categories (moved from gui_state.hpp to decouple helpers)
+enum class BtnStyle : INT_PTR {
+    PrimaryEmerald = 1,
+    DangerRed = 2,
+    SecondarySlate = 3,
+    QuickAction = 4
+};
+
 // Common helper: Dynamically vertically centers text in multiline edit controls based on font metrics
 void apply_edit_centered_padding(HWND hwnd, HFONT hFont = nullptr);
 
