@@ -357,40 +357,40 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
         const size_t start_idx = valid_count - N;
 
         // Pass 1: Sanity Filter (< 100.0 ms)
-        std::vector<double> pass1;
-        pass1.reserve(N);
+        double buf1[64];
+        size_t n1 = 0;
         for (size_t i = start_idx; i < valid_count; ++i) {
-            if (scratch_buffer_[i] < 100.0) {
-                pass1.push_back(scratch_buffer_[i]);
+            if (scratch_buffer_[i] < 100.0 && n1 < 64) {
+                buf1[n1++] = scratch_buffer_[i];
             }
         }
 
-        if (pass1.size() < 8) {
+        if (n1 < 8) {
             summary.rolling_baseline_ms = sum_dur_ms / valid_count;
         } else {
-            std::sort(pass1.begin(), pass1.end());
-            const double median_t1 = (pass1.size() % 2 == 1)
-                ? pass1[pass1.size() / 2]
-                : (pass1[pass1.size() / 2 - 1] + pass1[pass1.size() / 2]) / 2.0;
+            std::sort(buf1, buf1 + n1);
+            auto median_of_sorted = [](const double* arr, size_t n) noexcept -> double {
+                return (n % 2 == 1)
+                    ? arr[n / 2]
+                    : (arr[n / 2 - 1] + arr[n / 2]) / 2.0;
+            };
+            const double median_t1 = median_of_sorted(buf1, n1);
 
             // Pass 2: Median-Referenced Clean Baseline (exclude > 1.4 * median_t1)
-            std::vector<double> pass2;
-            pass2.reserve(pass1.size());
+            double buf2[64];
+            size_t n2 = 0;
             const double threshold_pass2 = 1.4 * median_t1;
-            for (double d : pass1) {
-                if (d <= threshold_pass2) {
-                    pass2.push_back(d);
+            for (size_t i = 0; i < n1; ++i) {
+                if (buf1[i] <= threshold_pass2 && n2 < 64) {
+                    buf2[n2++] = buf1[i];
                 }
             }
 
-            if (pass2.size() < 8) {
+            if (n2 < 8) {
                 summary.rolling_baseline_ms = median_t1;
             } else {
-                std::sort(pass2.begin(), pass2.end());
-                const double median_t2 = (pass2.size() % 2 == 1)
-                    ? pass2[pass2.size() / 2]
-                    : (pass2[pass2.size() / 2 - 1] + pass2[pass2.size() / 2]) / 2.0;
-                summary.rolling_baseline_ms = median_t2;
+                // Invariant: buf2 is a monotonic subsequence (prefix) of sorted buf1, so it is strictly sorted.
+                summary.rolling_baseline_ms = median_of_sorted(buf2, n2);
             }
         }
 

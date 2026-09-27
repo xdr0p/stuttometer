@@ -705,6 +705,32 @@ static void test_pause_ceiling_2s_boundary() {
     std::cout << "[TEST 19] PASSED\n";
 }
 
+static void test_standalone_fallback_denominator_invariant() {
+    std::cout << "[TEST 20] Standalone Fallback Denominator Invariant Test...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    uint64_t qpc = stuttometer::get_current_qpc();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(100);
+
+    // 13 frames at 150.0 ms (>= 100.0 ms, excluded by Pass 1 filter)
+    for (int i = 0; i < 13; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(150.0, qpc_freq);
+        benchmark.ingest_frame(100, 150.0, qpc);
+    }
+    // 7 frames at 10.0 ms (< 100.0 ms, accepted by Pass 1 filter, n1 = 7 < 8)
+    for (int i = 0; i < 7; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+        benchmark.ingest_frame(100, 10.0, qpc);
+    }
+
+    auto summary = benchmark.get_summary();
+    STUTTO_ASSERT(summary.total_frames == 20);
+    // sum_dur_ms = 13 * 150.0 + 7 * 10.0 = 2020.0 ms
+    // Expected: 2020.0 / 20 = 101.0 ms (NOT 2020.0 / 7 = 288.57 ms)
+    STUTTO_ASSERT(std::abs(summary.rolling_baseline_ms - 101.0) < 1e-3);
+    std::cout << "[TEST 20] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -726,6 +752,7 @@ int main() {
         test_cadence_custom_context_and_session_stop();
         test_audio_glitch_separation();
         test_pause_ceiling_2s_boundary();
+        test_standalone_fallback_denominator_invariant();
 
         std::cout << "\nAll 19 Session Benchmark tests PASSED successfully!\n";
         return 0;
