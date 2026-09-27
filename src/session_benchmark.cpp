@@ -396,19 +396,11 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
 
         summary.rolling_fps = (summary.rolling_baseline_ms > 0.0) ? (1000.0 / summary.rolling_baseline_ms) : 0.0;
 
-        double eff_mult = snap_spike_mult;
-        double eff_delta = snap_min_delta;
-        if (snap_profile == PacingProfile::AUTO_ADAPTIVE) {
-            auto params = compute_adaptive_pacing_params(summary.rolling_baseline_ms);
-            eff_mult = params.spike_multiplier;
-            eff_delta = params.min_spike_delta_ms;
-        } else if (snap_profile == PacingProfile::HIGH_REFRESH) {
-            eff_mult = HIGH_REFRESH_SPIKE_MULTIPLIER;
-            eff_delta = HIGH_REFRESH_MIN_DELTA_MS;
-        } else if (snap_profile == PacingProfile::CONSERVATIVE) {
-            eff_mult = CONSERVATIVE_SPIKE_MULTIPLIER;
-            eff_delta = CONSERVATIVE_MIN_DELTA_MS;
-        }
+        const auto params = resolve_pacing_params(
+            snap_profile, summary.rolling_baseline_ms, snap_spike_mult, snap_min_delta
+        );
+        const double eff_mult = params.spike_multiplier;
+        const double eff_delta = params.min_spike_delta_ms;
 
         summary.estimated_dynamic_floor_ms = std::max(
             summary.rolling_baseline_ms * eff_mult,

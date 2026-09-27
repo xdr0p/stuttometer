@@ -171,20 +171,11 @@ bool TriggerEngine::evaluate_frame_pacing_common(
     reset_frame_stats(default_stats, timestamp_qpc);
 
     bool upsert_ok = pacing_table_.upsert(key, default_stats, [&](RollingFrameStats& stats) {
-        double eff_mult = config_.spike_multiplier;
-        double eff_delta = config_.min_spike_delta_ms;
-        if (config_.pacing_profile == PacingProfile::AUTO_ADAPTIVE) {
-            const double current_mean = calculate_mean_ms(stats);
-            auto params = compute_adaptive_pacing_params(current_mean);
-            eff_mult = params.spike_multiplier;
-            eff_delta = params.min_spike_delta_ms;
-        } else if (config_.pacing_profile == PacingProfile::HIGH_REFRESH) {
-            eff_mult = HIGH_REFRESH_SPIKE_MULTIPLIER;
-            eff_delta = HIGH_REFRESH_MIN_DELTA_MS;
-        } else if (config_.pacing_profile == PacingProfile::CONSERVATIVE) {
-            eff_mult = CONSERVATIVE_SPIKE_MULTIPLIER;
-            eff_delta = CONSERVATIVE_MIN_DELTA_MS;
-        }
+        const auto params = resolve_pacing_params(
+            config_.pacing_profile, calculate_mean_ms(stats), config_.spike_multiplier, config_.min_spike_delta_ms
+        );
+        const double eff_mult = params.spike_multiplier;
+        const double eff_delta = params.min_spike_delta_ms;
 
         out_pacing_res = evaluate_frame_pacing(
             stats,

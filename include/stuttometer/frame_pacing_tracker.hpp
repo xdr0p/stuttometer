@@ -147,6 +147,25 @@ struct AdaptivePacingParams {
     return { mult, delta };
 }
 
+[[nodiscard]] inline AdaptivePacingParams resolve_pacing_params(
+    PacingProfile profile,
+    double baseline_mean_ms,
+    double custom_mult,
+    double custom_delta
+) noexcept {
+    switch (profile) {
+        case PacingProfile::AUTO_ADAPTIVE:
+            return compute_adaptive_pacing_params(baseline_mean_ms);
+        case PacingProfile::HIGH_REFRESH:
+            return { HIGH_REFRESH_SPIKE_MULTIPLIER, HIGH_REFRESH_MIN_DELTA_MS };
+        case PacingProfile::CONSERVATIVE:
+            return { CONSERVATIVE_SPIKE_MULTIPLIER, CONSERVATIVE_MIN_DELTA_MS };
+        case PacingProfile::CUSTOM:
+        default:
+            return { custom_mult, custom_delta };
+    }
+}
+
 // 64-slot lock-free circular buffer with candidate adaptation
 struct alignas(64) RollingFrameStats {
     uint32_t durations_us[64]{0};         // Bytes 0..255   (Cache lines 0-3)
@@ -425,17 +444,9 @@ inline FramePacingResult evaluate_frame_pacing(
     res.baseline_fps = (mean_ms > 0.0) ? (1000.0 / mean_ms) : 0.0;
     res.spike_ratio = (mean_ms > 0.0) ? (dur_ms / mean_ms) : 1.0;
 
-    if (profile == PacingProfile::AUTO_ADAPTIVE) {
-        const auto params = compute_adaptive_pacing_params(mean_ms);
-        spike_multiplier = params.spike_multiplier;
-        min_spike_delta_ms = params.min_spike_delta_ms;
-    } else if (profile == PacingProfile::HIGH_REFRESH) {
-        spike_multiplier = HIGH_REFRESH_SPIKE_MULTIPLIER;
-        min_spike_delta_ms = HIGH_REFRESH_MIN_DELTA_MS;
-    } else if (profile == PacingProfile::CONSERVATIVE) {
-        spike_multiplier = CONSERVATIVE_SPIKE_MULTIPLIER;
-        min_spike_delta_ms = CONSERVATIVE_MIN_DELTA_MS;
-    }
+    const auto params = resolve_pacing_params(profile, mean_ms, spike_multiplier, min_spike_delta_ms);
+    spike_multiplier = params.spike_multiplier;
+    min_spike_delta_ms = params.min_spike_delta_ms;
 
     // In HYBRID mode, once the baseline is established (>= 8 samples), lift the static ceiling above
     // the observed mean if and only if the threshold would otherwise fire on normal-cadence frames.
