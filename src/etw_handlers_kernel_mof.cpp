@@ -111,7 +111,10 @@ void EtwSessionManager::handle_nt_cswitch_event(PEVENT_RECORD p_event, EtwEventR
             if (so.pid == 0 || so.pid == ctx.pid) {
                 if (ctx.timestamp >= so.qpc) {
                     const uint64_t dur_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - so.qpc, qpc_freq_));
-                    rec.duration_us = (dur_us <= 10000000ULL) ? static_cast<uint32_t>(dur_us) : 10000000U;
+                    // CSwitch intentionally saturates at 10s. A >10s CSwitch is a catastrophic stall.
+                    rec.duration_us = (dur_us <= KERNEL_SINGLE_EVENT_CAP_US)
+                        ? static_cast<uint32_t>(dur_us)
+                        : static_cast<uint32_t>(KERNEL_SINGLE_EVENT_CAP_US);
                 }
                 if (so.wait_state == 5 || so.wait_state == 4) {
                     rec.flags |= EventFlags::CSWITCH_VOLUNTARY;
@@ -217,12 +220,12 @@ void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRec
                 const uint64_t delta_qpc = ctx.timestamp - sync_qpc;
                 const uint64_t q = delta_qpc / qpc_freq_;
                 const uint64_t r = delta_qpc % qpc_freq_;
-                const uint64_t delta_100ns = (q * 10000000ULL) + ((r * 10000000ULL) / qpc_freq_);
+                const uint64_t delta_100ns = (q * FILETIME_TICKS_PER_SEC) + ((r * FILETIME_TICKS_PER_SEC) / qpc_freq_);
                 const uint64_t end_ft = sync_utc + delta_100ns;
                 if (end_ft >= initial_time_ft) {
                     uint64_t dur_100ns = end_ft - initial_time_ft;
                     uint64_t dur_us = dur_100ns / 10;
-                    if (dur_us <= 10000000ULL) {
+                    if (dur_us <= KERNEL_SINGLE_EVENT_CAP_US) {
                         rec.duration_us = static_cast<uint32_t>(dur_us);
                     }
                 }

@@ -48,7 +48,7 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
     }
     rec.auxiliary_data = glitch_type;
     const double dur_ms = (missed_vblanks >= 1) ? (missed_vblanks * vblank_ms) : vblank_ms;
-    rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1000.0, 10000000.0));
+    rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1000.0, static_cast<double>(KERNEL_SINGLE_EVENT_CAP_US)));
 
     bool is_dedup = false;
     const uint64_t dedup_window_qpc = ms_to_qpc_delta(50.0, qpc_freq_);
@@ -122,7 +122,7 @@ void EtwSessionManager::handle_antimalware_event(PEVENT_RECORD p_event, EtwEvent
         if (in_flight_scans_.find_and_erase(scan_key, scan_data)) {
             if (ctx.timestamp >= scan_data.start_qpc) {
                 const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - scan_data.start_qpc, qpc_freq_));
-                if (delta_us <= 10000000ULL) {
+                if (delta_us <= KERNEL_SINGLE_EVENT_CAP_US) {
                     rec.duration_us = static_cast<uint32_t>(delta_us);
                 }
             }

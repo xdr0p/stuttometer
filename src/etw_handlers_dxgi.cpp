@@ -49,7 +49,7 @@ void EtwSessionManager::handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord&
 
             last_present_table_.insert(swapchain_key, { ctx.timestamp, ctx.pid, ctx.tid });
 
-            uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, 10000000ULL));
+            uint32_t clamped_dur_us = static_cast<uint32_t>(std::min(delta_res.effective_dur_us, KERNEL_SINGLE_EVENT_CAP_US));
             rec.duration_us = clamped_dur_us;
             flight_recorder_.push(rec);
 
@@ -119,12 +119,8 @@ void EtwSessionManager::handle_d3d12_event(PEVENT_RECORD p_event, EtwEventRecord
         } else if (op == 2 || ctx.event_id == 64 || ctx.event_id == 156 || ctx.event_id == 158) { // win:Stop
             PsoInFlight pso_data{};
             if (in_flight_pso_table_.find_and_erase(pso_key, pso_data)) {
-                if (ctx.timestamp >= pso_data.start_qpc) {
-                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - pso_data.start_qpc, qpc_freq_));
-                    if (delta_us <= 10000000ULL) {
-                        rec.duration_us = static_cast<uint32_t>(delta_us);
-                    }
-                }
+                rec.duration_us = clamped_qpc_delta_us(
+                    ctx.timestamp, pso_data.start_qpc, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
                 if (flags == EventFlags::NONE) {
                     flags = pso_data.flags;
                 }
