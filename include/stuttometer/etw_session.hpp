@@ -307,6 +307,17 @@ static inline uint64_t make_pso_key(uint32_t tid, uint64_t pso_ptr) noexcept {
     return (k == 0) ? 1ULL : k;
 }
 
+// Clamped QPC-delta -> microseconds. Returns 0 if end < start, or if the delta
+// exceeds cap_us. Zero-alloc, noexcept. Used by every kernel-duration handler
+// EXCEPT CSwitch (see etw_handlers_kernel_mof.cpp: CSwitch saturates, does not zero).
+[[nodiscard]] inline uint32_t clamped_qpc_delta_us(
+    uint64_t end_qpc, uint64_t start_qpc, uint64_t qpc_freq, uint64_t cap_us
+) noexcept {
+    if (end_qpc < start_qpc) return 0;
+    const uint64_t d = static_cast<uint64_t>(qpc_delta_to_us(end_qpc - start_qpc, qpc_freq));
+    return (d <= cap_us) ? static_cast<uint32_t>(d) : 0U;
+}
+
 class NdjsonWriter;
 
 class EtwSessionManager {
@@ -438,6 +449,12 @@ private:
     void handle_nt_cswitch_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
     void handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
     void handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+
+    // Hot-path emission helpers. Zero-allocation, lock-free:
+    // emit_event: flight recorder (if include_in_flight) + NDJSON writer
+    void emit_event(const EtwEventRecord& rec, bool include_in_flight = true) noexcept;
+    // emit_ndjson_only: NDJSON writer only (explicit semantic marker for un-retained stream fidelity)
+    void emit_ndjson_only(const EtwEventRecord& rec) noexcept;
 
     std::atomic<NdjsonWriter*> ndjson_writer_{nullptr};
 

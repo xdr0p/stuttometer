@@ -29,6 +29,21 @@ constexpr uint64_t ETW_KEYWORD_D3D12_DEFAULT            = 0x0000000000000C80ULL;
 constexpr uint64_t ETW_KEYWORD_KERNEL_MEMORY_DEFAULT    = 0x0000000000000280ULL; // WS_SWAP (0x80) | PHYSICAL_ALLOC (0x200)
 constexpr uint64_t ETW_KEYWORD_KERNEL_PROCESS_DEFAULT   = 0x0000000000000010ULL; // WINEVENT_KEYWORD_PROCESS (0x10)
 
+void EtwSessionManager::emit_event(const EtwEventRecord& rec, bool include_in_flight) noexcept {
+    if (include_in_flight) {
+        flight_recorder_.push(rec);
+    }
+    if (NdjsonWriter* w = ndjson_writer_.load(std::memory_order_relaxed)) {
+        w->push(rec);
+    }
+}
+
+void EtwSessionManager::emit_ndjson_only(const EtwEventRecord& rec) noexcept {
+    if (NdjsonWriter* w = ndjson_writer_.load(std::memory_order_relaxed)) {
+        w->push(rec);
+    }
+}
+
 EtwSessionManager::EtwSessionManager(
     FlightRecorder& flight_recorder,
     TriggerEngine& trigger_engine,
