@@ -498,25 +498,30 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
             all_hyp.push_back(std::move(stat));
         }
 
-        std::sort(all_hyp.begin(), all_hyp.end(), [](const HypothesisAttributionStat& a, const HypothesisAttributionStat& b) {
+        constexpr auto cmp = [](const HypothesisAttributionStat& a, const HypothesisAttributionStat& b) {
             if (a.total_stall_ms != b.total_stall_ms) {
                 return a.total_stall_ms > b.total_stall_ms;
             }
             return a.count > b.count;
-        });
+        };
 
-        if (all_hyp.size() <= 5) {
+        constexpr size_t TOP_N = 5;
+        if (all_hyp.size() <= TOP_N) {
+            std::sort(all_hyp.begin(), all_hyp.end(), cmp);
             summary.culprits = std::move(all_hyp);
         } else {
-            summary.culprits.assign(all_hyp.begin(), all_hyp.begin() + 5);
+            std::partial_sort(all_hyp.begin(), all_hyp.begin() + TOP_N, all_hyp.end(), cmp);
+            summary.culprits.assign(all_hyp.begin(), all_hyp.begin() + TOP_N);
+
             uint32_t other_count = 0;
             double other_stall = 0.0;
             double other_conf_sum = 0.0;
-            for (size_t i = 5; i < all_hyp.size(); ++i) {
+            for (size_t i = TOP_N; i < all_hyp.size(); ++i) {
                 other_count += all_hyp[i].count;
                 other_stall += all_hyp[i].total_stall_ms;
                 other_conf_sum += all_hyp[i].avg_confidence_pct * all_hyp[i].count;
             }
+
             HypothesisAttributionStat other;
             other.hypothesis = "Other";
             other.top_driver_module = "";

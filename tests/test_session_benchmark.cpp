@@ -731,6 +731,38 @@ static void test_standalone_fallback_denominator_invariant() {
     std::cout << "[TEST 20] PASSED\n";
 }
 
+static void test_top_5_boundary_six_hypotheses() {
+    std::cout << "[TEST 21] Top-5 Boundary (6 Hypotheses) Test...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(1234);
+
+    const double stalls[6] = { 100.0, 80.0, 60.0, 40.0, 20.0, 10.0 };
+    for (int i = 0; i < 6; ++i) {
+        stuttometer::DiagnosticReport r;
+        r.trigger.target_pid = 1234;
+        r.trigger.duration_ms = stalls[i];
+        stuttometer::Diagnosis d;
+        d.hypothesis = "hyp_" + std::to_string(i + 1);
+        d.confidence = 0.80;
+        r.diagnoses.push_back(d);
+        benchmark.ingest_report(r);
+    }
+
+    auto summary = benchmark.get_summary();
+    STUTTO_ASSERT(summary.culprits.size() == 6);
+    for (size_t i = 0; i < 5; ++i) {
+        STUTTO_ASSERT(summary.culprits[i].hypothesis == "hyp_" + std::to_string(i + 1));
+        STUTTO_ASSERT(std::abs(summary.culprits[i].total_stall_ms - stalls[i]) < 1e-3);
+    }
+    STUTTO_ASSERT(summary.culprits[5].hypothesis == "Other");
+    STUTTO_ASSERT(summary.culprits[5].count == 1);
+    STUTTO_ASSERT(std::abs(summary.culprits[5].total_stall_ms - 10.0) < 1e-3);
+    STUTTO_ASSERT(std::abs(summary.culprits[5].avg_confidence_pct - 80.0) < 1e-3);
+    STUTTO_ASSERT(summary.culprits[5].top_driver_module.empty());
+    std::cout << "[TEST 21] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -753,8 +785,9 @@ int main() {
         test_audio_glitch_separation();
         test_pause_ceiling_2s_boundary();
         test_standalone_fallback_denominator_invariant();
+        test_top_5_boundary_six_hypotheses();
 
-        std::cout << "\nAll 19 Session Benchmark tests PASSED successfully!\n";
+        std::cout << "\nAll 21 Session Benchmark tests PASSED successfully!\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\nTest suite failed with exception: " << ex.what() << "\n";
