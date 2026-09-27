@@ -5,33 +5,37 @@
 
 namespace stuttometer {
 
-void EtwSessionManager::handle_kernel_memory_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+namespace {
+[[nodiscard]] constexpr bool valid_trim_target(uint32_t pid) noexcept {
+    return pid != 0 && pid != 4; // 0 = System Idle, 4 = System
+}
+} // namespace
+
+void EtwSessionManager::handle_kernel_memory_event(
+    PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx
+) noexcept {
     if (ctx.event_id == 4) { // WorkingSetOutSwap Start
         rec.category = static_cast<uint16_t>(EventCategory::MEM_WORKING_SET_TRIM);
-
         if (p_event->UserDataLength >= 4 && p_event->UserData) {
             uint32_t target_proc = 0;
             std::memcpy(&target_proc, p_event->UserData, sizeof(uint32_t));
-            if (target_proc != 0 && target_proc != 4) {
-                WorkingSetTrimInFlight trim_entry{};
-                trim_entry.start_qpc = ctx.timestamp;
-                trim_entry.pid = target_proc;
-                // WorkingSetOutSwap Start/Stop is keyed on target PID only.
-                // NT memory management serializes trims per-process under Vm.WorkingSetMutex
-                // (one working set per process), whereas ETW Start and Stop can be emitted on
-                // different kernel worker threads or with TID 0.
-                // A duplicate Start silently overwrites the prior in-flight entry (see
-                // FixedInFlightTable::insert); the subsequent Stop correlates against the newer Start.
-                const uint64_t trim_key = static_cast<uint64_t>(target_proc);
-                in_flight_ws_trims_.insert(trim_key, trim_entry);
+            if (valid_trim_target(target_proc)) {
+                // PID-keyed: NT memory management serializes trims per-process under
+                // Vm.WorkingSetMutex (one working set per process), whereas ETW Start
+                // and Stop can be emitted on different kernel worker threads or with
+                // TID 0. A duplicate Start silently overwrites the prior in-flight entry.
+                WorkingSetTrimInFlight entry{};
+                entry.start_qpc = ctx.timestamp;
+                entry.pid = target_proc;
+                in_flight_ws_trims_.insert(static_cast<uint64_t>(target_proc), entry);
             }
         }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
-    } else if (ctx.event_id == 5) { // WorkingSetOutSwap Stop
+        emit_ndjson_only(rec);
+        return;
+    }
+    if (ctx.event_id == 5) { // WorkingSetOutSwap Stop
         rec.category = static_cast<uint16_t>(EventCategory::MEM_WORKING_SET_TRIM);
-
+        bool data_ok = false;
         if (p_event->UserDataLength >= 16 && p_event->UserData) {
             const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
             uint32_t target_proc = 0;
@@ -44,29 +48,21 @@ void EtwSessionManager::handle_kernel_memory_event(PEVENT_RECORD p_event, EtwEve
             rec.flags = EventFlags::MEM_WS_TRIM_OUTSWAP;
 
             WorkingSetTrimInFlight start_entry{};
-            // WorkingSetOutSwap Start/Stop is keyed on target PID only.
-            // NT memory management serializes trims per-process under Vm.WorkingSetMutex
-            // (one working set per process), whereas ETW Start and Stop can be emitted on
-            // different kernel worker threads or with TID 0.
-            // A duplicate Start silently overwrites the prior in-flight entry (see
-            // FixedInFlightTable::insert); the subsequent Stop correlates against the newer Start.
-            const uint64_t trim_key = static_cast<uint64_t>(target_proc);
-            if (target_proc != 0 && target_proc != 4 && in_flight_ws_trims_.find_and_erase(trim_key, start_entry)) {
-                if (ctx.timestamp >= start_entry.start_qpc) {
-                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - start_entry.start_qpc, qpc_freq_));
-                    if (delta_us <= 10000000ULL) {
-                        rec.duration_us = static_cast<uint32_t>(delta_us);
-                    }
-                }
+            if (valid_trim_target(target_proc) &&
+                in_flight_ws_trims_.find_and_erase(
+                    static_cast<uint64_t>(target_proc), start_entry)) {
+                rec.duration_us = clamped_qpc_delta_us(
+                    ctx.timestamp, start_entry.start_qpc, qpc_freq_,
+                    KERNEL_SINGLE_EVENT_CAP_US);
             }
-            flight_recorder_.push(rec);
+            data_ok = true;
         }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
-    } else if (ctx.event_id == 10 || ctx.event_id == 11) { // MdlAllocation (10) or ContAllocation (11)
+        emit_event(rec, data_ok);
+        return;
+    }
+    if (ctx.event_id == 10 || ctx.event_id == 11) { // Mdl / Cont Allocation
         rec.category = static_cast<uint16_t>(EventCategory::MEM_PHYSICAL_ALLOC);
-
+        bool data_ok = false;
         if (p_event->UserDataLength >= 16 && p_event->UserData) {
             const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
             uint64_t dur_us = 0;
@@ -74,16 +70,15 @@ void EtwSessionManager::handle_kernel_memory_event(PEVENT_RECORD p_event, EtwEve
             std::memcpy(&dur_us, raw + 0, sizeof(uint64_t));
             std::memcpy(&total_bytes, raw + 8, sizeof(uint64_t));
 
-            if (dur_us <= 10000000ULL) {
-                rec.duration_us = static_cast<uint32_t>(dur_us);
-            }
+            // Payload-supplied duration (NOT a QPC delta). Cap applies to raw field.
+            rec.duration_us = (dur_us <= KERNEL_SINGLE_EVENT_CAP_US)
+                ? static_cast<uint32_t>(dur_us) : 0U;
             rec.auxiliary_data = total_bytes;
             rec.flags = EventFlags::MEM_PHYSICAL_CONTIGUOUS;
-            flight_recorder_.push(rec);
+            data_ok = true;
         }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+        emit_event(rec, data_ok);
+        return;
     }
 }
 

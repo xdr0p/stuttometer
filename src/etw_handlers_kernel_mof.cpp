@@ -7,76 +7,69 @@
 
 namespace stuttometer {
 
-void EtwSessionManager::handle_nt_dpc_isr_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
-    // DPC Completion
-    if (ctx.opcode == KERNEL_OPCODE_DPC_CLASSIC || ctx.event_id == KERNEL_OPCODE_DPC_CLASSIC || 
-        ctx.opcode == KERNEL_OPCODE_DPC || ctx.event_id == KERNEL_OPCODE_DPC || 
-        ctx.opcode == KERNEL_OPCODE_TIMER || ctx.event_id == KERNEL_OPCODE_TIMER || 
-        (p_event->EventHeader.EventDescriptor.Task == 1 && ctx.opcode == 2)) {
-        rec.category = static_cast<uint16_t>(EventCategory::DPC);
-
-        if (p_event->UserDataLength >= 12 && p_event->UserData) {
-            uint64_t initial_time = 0;
-            uint64_t routine = 0;
-            if (p_event->UserDataLength == 12) {
-                uint32_t initial_time_32 = 0;
-                std::memcpy(&initial_time_32, p_event->UserData, sizeof(uint32_t));
-                initial_time = initial_time_32;
-                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 4, sizeof(uint64_t));
-            } else if (p_event->UserDataLength >= 16) {
-                std::memcpy(&initial_time, p_event->UserData, sizeof(uint64_t));
-                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
-            }
-            if (initial_time > 0 || routine > 0) {
-                rec.payload.routine_addr = routine;
-                rec.auxiliary_data = routine;
-                if (ctx.timestamp >= initial_time) {
-                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - initial_time, qpc_freq_));
-                    if (delta_us <= 10000000ULL) {
-                        rec.duration_us = static_cast<uint32_t>(delta_us);
-                    }
-                }
-                flight_recorder_.push(rec);
-            }
-        }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+namespace {
+// Shared DPC/ISR completion unpack. Handles 12-byte (32-bit InitialTime) and
+// >=16-byte (64-bit InitialTime) MOF schemas. Malformed 13..15-byte payloads are
+// rejected (mirrors original silent-drop contract — no over-read).
+[[nodiscard]] inline bool unpack_dpc_isr(
+    const EVENT_RECORD* ev, uint64_t& out_initial_time, uint64_t& out_routine
+) noexcept {
+    if (!ev->UserData || ev->UserDataLength < 12) return false;
+    const auto* raw = static_cast<const uint8_t*>(ev->UserData);
+    if (ev->UserDataLength == 12) {
+        uint32_t t32 = 0;
+        std::memcpy(&t32, raw, sizeof(uint32_t));
+        out_initial_time = t32;
+        std::memcpy(&out_routine, raw + 4, sizeof(uint64_t));
+        return true;
     }
-    // ISR Completion
-    else if (ctx.opcode == KERNEL_OPCODE_ISR_CLASSIC || ctx.event_id == KERNEL_OPCODE_ISR_CLASSIC || (p_event->EventHeader.EventDescriptor.Task == 2 && ctx.opcode == 2)) {
-        rec.category = static_cast<uint16_t>(EventCategory::ISR);
-
-        if (p_event->UserDataLength >= 12 && p_event->UserData) {
-            uint64_t initial_time = 0;
-            uint64_t routine = 0;
-            if (p_event->UserDataLength == 12) {
-                uint32_t initial_time_32 = 0;
-                std::memcpy(&initial_time_32, p_event->UserData, sizeof(uint32_t));
-                initial_time = initial_time_32;
-                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 4, sizeof(uint64_t));
-            } else if (p_event->UserDataLength >= 16) {
-                std::memcpy(&initial_time, p_event->UserData, sizeof(uint64_t));
-                std::memcpy(&routine, static_cast<const uint8_t*>(p_event->UserData) + 8, sizeof(uint64_t));
-            }
-            if (initial_time > 0 || routine > 0) {
-                rec.payload.routine_addr = routine;
-                rec.auxiliary_data = routine;
-                if (ctx.timestamp >= initial_time) {
-                    const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - initial_time, qpc_freq_));
-                    if (delta_us <= 10000000ULL) {
-                        rec.duration_us = static_cast<uint32_t>(delta_us);
-                    }
-                }
-                flight_recorder_.push(rec);
-            }
-        }
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+    if (ev->UserDataLength >= 16) {
+        std::memcpy(&out_initial_time, raw, sizeof(uint64_t));
+        std::memcpy(&out_routine, raw + 8, sizeof(uint64_t));
+        return true;
     }
-    // Kernel Profile / Sampled Profile (Opcode 46 / PerfInfo Sample)
-    else if (ctx.opcode == 46 || (p_event->EventHeader.EventDescriptor.Task == 7 && ctx.opcode == 2)) {
+    return false;
+}
+
+// 100ns intervals per second for QPC -> FILETIME conversion (NOT a duration cap).
+constexpr uint64_t FILETIME_TICKS_PER_SEC = 10'000'000ULL;
+} // namespace
+
+void EtwSessionManager::handle_nt_dpc_isr_event(
+    PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx
+) noexcept {
+    const auto& d = p_event->EventHeader.EventDescriptor;
+
+    const bool is_dpc =
+        ctx.opcode == KERNEL_OPCODE_DPC_CLASSIC || ctx.event_id == KERNEL_OPCODE_DPC_CLASSIC ||
+        ctx.opcode == KERNEL_OPCODE_DPC         || ctx.event_id == KERNEL_OPCODE_DPC ||
+        ctx.opcode == KERNEL_OPCODE_TIMER       || ctx.event_id == KERNEL_OPCODE_TIMER ||
+        (d.Task == 1 && ctx.opcode == 2);
+
+    const bool is_isr =
+        ctx.opcode == KERNEL_OPCODE_ISR_CLASSIC || ctx.event_id == KERNEL_OPCODE_ISR_CLASSIC ||
+        (d.Task == 2 && ctx.opcode == 2);
+
+    if (is_dpc || is_isr) {
+        rec.category = static_cast<uint16_t>(is_dpc ? EventCategory::DPC : EventCategory::ISR);
+
+        uint64_t initial_time = 0;
+        uint64_t routine = 0;
+        const bool data_ok =
+            unpack_dpc_isr(p_event, initial_time, routine) &&
+            (initial_time > 0 || routine > 0);
+
+        if (data_ok) {
+            rec.payload.routine_addr = routine;
+            rec.auxiliary_data = routine;
+            rec.duration_us = clamped_qpc_delta_us(
+                ctx.timestamp, initial_time, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
+        }
+        emit_event(rec, data_ok);
+        return;
+    }
+
+    if (ctx.opcode == 46 || (d.Task == 7 && ctx.opcode == 2)) { // Sampled Profile
         rec.category = static_cast<uint16_t>(EventCategory::PROFILE);
         if (p_event->UserDataLength >= sizeof(uint64_t) && p_event->UserData) {
             uint64_t ip = 0;
@@ -84,10 +77,7 @@ void EtwSessionManager::handle_nt_dpc_isr_event(PEVENT_RECORD p_event, EtwEventR
             rec.payload.routine_addr = ip;
             rec.auxiliary_data = ip;
         }
-        flight_recorder_.push(rec);
-
-        NdjsonWriter* writer = ndjson_writer_.load(std::memory_order_relaxed);
-        if (writer) writer->push(rec);
+        emit_event(rec);
     }
 }
 
@@ -181,12 +171,8 @@ void EtwSessionManager::handle_nt_disk_event(PEVENT_RECORD p_event, EtwEventReco
                 if (disk_data.pid != 0) {
                     rec.pid = disk_data.pid;
                     rec.tid = disk_data.tid;
-                    if (ctx.timestamp >= disk_data.start_qpc) {
-                        const uint64_t delta_us = static_cast<uint64_t>(qpc_delta_to_us(ctx.timestamp - disk_data.start_qpc, qpc_freq_));
-                        if (delta_us <= 3000000ULL) {
-                            rec.duration_us = static_cast<uint32_t>(delta_us);
-                        }
-                    }
+                    rec.duration_us = clamped_qpc_delta_us(
+                        ctx.timestamp, disk_data.start_qpc, qpc_freq_, DISK_SINGLE_EVENT_CAP_US);
                 } else {
                     rec.duration_us = 0;
                 }
