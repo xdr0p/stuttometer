@@ -218,13 +218,6 @@ bool TriggerEngine::evaluate_frame_pacing_common(
         }
     }
 
-    fprintf(stderr, "[D-B] upsert_ok=%d is_stutter=%d reason=%d dur=%.3f thr=%.3f mode=%d\n",
-            (int)upsert_ok,
-            (int)out_pacing_res.is_stutter,
-            (int)out_pacing_res.reason,
-            duration_ms,
-            effective_static_threshold,
-            (int)config_.frame_trigger_mode);
     return out_pacing_res.is_stutter;
 }
 
