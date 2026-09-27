@@ -97,6 +97,18 @@ struct BenchmarkSummary {
     std::string to_markdown() const;
 };
 
+namespace benchmark_detail {
+    [[nodiscard]] constexpr inline uint64_t pack_target_state(uint32_t pid, uint32_t epoch) noexcept {
+        return (static_cast<uint64_t>(pid) << 32) | static_cast<uint64_t>(epoch);
+    }
+    [[nodiscard]] constexpr inline uint32_t unpack_pid(uint64_t packed) noexcept {
+        return static_cast<uint32_t>(packed >> 32);
+    }
+    [[nodiscard]] constexpr inline uint32_t unpack_epoch(uint64_t packed) noexcept {
+        return static_cast<uint32_t>(packed & 0xFFFFFFFFULL);
+    }
+} // namespace benchmark_detail
+
 class SessionBenchmark {
 public:
     static constexpr size_t RING_CAPACITY = 262144;

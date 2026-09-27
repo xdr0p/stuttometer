@@ -176,8 +176,8 @@ void SessionBenchmark::ingest_frame(uint32_t pid, double duration_ms, uint64_t t
     }
 
     const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
-    const uint32_t target_pid = static_cast<uint32_t>(cur_state >> 32);
-    const uint32_t current_epoch = static_cast<uint32_t>(cur_state & 0xFFFFFFFFULL);
+    const uint32_t target_pid = benchmark_detail::unpack_pid(cur_state);
+    const uint32_t current_epoch = benchmark_detail::unpack_epoch(cur_state);
 
     // Note N-1: Accept-all when target_pid == 0 (waiting for target mode or pure monitor-all)
     if (target_pid != 0 && pid != target_pid) {
@@ -206,7 +206,7 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
     std::lock_guard<std::mutex> lock(attribution_mutex_);
 
     const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
-    const uint32_t target_pid = static_cast<uint32_t>(cur_state >> 32);
+    const uint32_t target_pid = benchmark_detail::unpack_pid(cur_state);
 
     if (target_pid != 0 && report.trigger.target_pid != 0 && report.trigger.target_pid != target_pid) {
         return;
@@ -289,7 +289,7 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
         current_head = head_.load(std::memory_order_acquire);
         if (current_head < start_head) {
             const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
-            const uint32_t snap_pid = static_cast<uint32_t>(cur_state >> 32);
+            const uint32_t snap_pid = benchmark_detail::unpack_pid(cur_state);
             BenchmarkSummary empty_summary{};
             empty_summary.redacted = redact;
             empty_summary.is_monitor_all = (snap_pid == 0);
@@ -308,8 +308,8 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
     // Reading snap_epoch after current_head means it may reflect a newer epoch if a reset raced 
     // with the scan, in which case old-epoch slots are safely excluded by the epoch check (Resolves M-10-3)
     const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
-    const uint32_t snap_epoch = static_cast<uint32_t>(cur_state & 0xFFFFFFFFULL);
-    const uint32_t snap_pid = static_cast<uint32_t>(cur_state >> 32);
+    const uint32_t snap_epoch = benchmark_detail::unpack_epoch(cur_state);
+    const uint32_t snap_pid = benchmark_detail::unpack_pid(cur_state);
 
     double sum_dur_ms = 0.0;
     for (uint64_t ticket = scan_start; ticket < current_head; ++ticket) {
@@ -595,9 +595,9 @@ void SessionBenchmark::retarget(uint32_t new_pid) {
     std::lock_guard<std::mutex> attr_lock(attribution_mutex_);
 
     const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
-    const uint32_t cur_epoch = static_cast<uint32_t>(cur_state & 0xFFFFFFFFULL);
+    const uint32_t cur_epoch = benchmark_detail::unpack_epoch(cur_state);
     const uint32_t next_epoch = cur_epoch + 1;
-    const uint64_t new_state = (static_cast<uint64_t>(new_pid) << 32) | next_epoch;
+    const uint64_t new_state = benchmark_detail::pack_target_state(new_pid, next_epoch);
 
     clear_attribution_locked();
     has_live_telemetry_.store(false, std::memory_order_release);
@@ -612,10 +612,10 @@ void SessionBenchmark::reset() {
     std::lock_guard<std::mutex> attr_lock(attribution_mutex_);
 
     const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
-    const uint32_t cur_pid = static_cast<uint32_t>(cur_state >> 32);
-    const uint32_t cur_epoch = static_cast<uint32_t>(cur_state & 0xFFFFFFFFULL);
+    const uint32_t cur_pid = benchmark_detail::unpack_pid(cur_state);
+    const uint32_t cur_epoch = benchmark_detail::unpack_epoch(cur_state);
     const uint32_t next_epoch = cur_epoch + 1;
-    const uint64_t new_state = (static_cast<uint64_t>(cur_pid) << 32) | next_epoch;
+    const uint64_t new_state = benchmark_detail::pack_target_state(cur_pid, next_epoch);
 
     clear_attribution_locked();
     has_live_telemetry_.store(false, std::memory_order_release);
