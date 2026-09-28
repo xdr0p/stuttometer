@@ -4,6 +4,7 @@
 #include <string>
 #include <nlohmann/json.hpp>
 #include <stuttometer/frame_pacing_tracker.hpp>
+#include <stuttometer/constants.hpp>
 
 namespace stuttometer {
 
@@ -18,11 +19,11 @@ struct GuiConfig {
     // Window & Timing
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{16.67};
+    double present_threshold_ms{DEFAULT_60HZ_VBLANK_MS};
     double cooldown_ms{1000.0};
     bool enable_audio{true};
     std::string provider_tier{"standard"};
-    uint32_t buffer_slots{262144};
+    uint32_t buffer_slots{DEFAULT_BUFFER_SLOTS};
 
     // Correlation Diagnostic Thresholds
     uint32_t dpc_threshold_us{1000};

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <string_view>
 #include "frame_pacing_tracker.hpp"
+#include "constants.hpp"
 #include "fixed_table.hpp"
 
 namespace stuttometer {
@@ -77,7 +78,7 @@ static_assert(std::is_trivially_copyable_v<TriggerInfo>, "TriggerInfo must be tr
 struct TriggerConfig {
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{16.67};
+    double present_threshold_ms{DEFAULT_60HZ_VBLANK_MS};
     double vblank_interval_ms{0.0};
     bool audio_trigger_enabled{true};
     double cooldown_ms{1000.0};
@@ -90,7 +91,7 @@ struct TriggerConfig {
     double spike_multiplier{2.0};
     double min_spike_delta_ms{4.0};
     bool enable_judder_detection{true};
-    double judder_swing_ratio{0.35};
+    double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
 };
 
 class TriggerEngine {

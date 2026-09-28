@@ -1,6 +1,7 @@
 #include "gui_controller.hpp"
 #include "gui_state.hpp"
 #include "stuttometer/csv_exporter.hpp"
+#include "stuttometer/constants.hpp"
 #include <psapi.h>
 #include <algorithm>
 #include <iomanip>
@@ -271,7 +272,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         etw_config.enable_d3d12 = (config.provider_tier != "minimal");
         etw_config.enable_kernel_memory = (config.provider_tier != "minimal");
 
-        const uint32_t requested_slots = (config.buffer_slots >= 65536) ? std::min(config.buffer_slots, 1048576U) : 262144;
+        const uint32_t requested_slots = (config.buffer_slots >= MIN_BUFFER_SLOTS) ? std::min(config.buffer_slots, MAX_BUFFER_SLOTS) : DEFAULT_BUFFER_SLOTS;
         const uint32_t slots = compute_recommended_buffer_slots(etw_config, requested_slots);
         if (slots > requested_slots) {
             std::cout << "[STUTTOMETER] Notice: Buffer capacity increased to 262,144 slots for active providers.\n";

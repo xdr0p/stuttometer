@@ -661,7 +661,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 { L"131,072 slots (~8 MB RAM)", 131072 },
                 { L"262,144 slots (~16 MB RAM) [Default]", 262144 },
                 { L"524,288 slots (~33 MB RAM)", 524288 },
-                { L"1,048,576 slots (~67 MB RAM)", 1048576 }
+                { L"1,048,576 slots (~67 MB RAM)", MAX_BUFFER_SLOTS }
             };
             int buf_sel_idx = 2;
             for (int i = 0; i < 5; ++i) {
@@ -1486,11 +1486,11 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 std::replace(w_fps_input.begin(), w_fps_input.end(), L',', L'.');
 
                 bool new_present_manual = false;
-                double new_present_threshold_ms = 16.67;
+                double new_present_threshold_ms = stuttometer::DEFAULT_60HZ_VBLANK_MS;
 
                 if (w_fps_input.empty() || _wcsicmp(w_fps_input.c_str(), L"Auto") == 0) {
                     new_present_manual = false;
-                    new_present_threshold_ms = 16.67;
+                    new_present_threshold_ms = stuttometer::DEFAULT_60HZ_VBLANK_MS;
                 } else {
                     wchar_t* end_ptr = nullptr;
                     _locale_t c_locale = _create_locale(LC_ALL, "C");
@@ -1547,7 +1547,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
                 int b_sel = static_cast<int>(SendMessageW(state->h_combo_buffer, CB_GETCURSEL, 0, 0));
                 LRESULT b_data = SendMessageW(state->h_combo_buffer, CB_GETITEMDATA, b_sel, 0);
-                if (b_data >= 65536 && b_data <= 1048576) {
+                if (b_data >= MIN_BUFFER_SLOTS && b_data <= MAX_BUFFER_SLOTS) {
                     g_settings_config.buffer_slots = static_cast<uint32_t>(b_data);
                 }
 

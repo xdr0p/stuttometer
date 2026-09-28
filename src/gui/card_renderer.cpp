@@ -751,7 +751,7 @@ static void draw_card(
         if (max_ms > 5000.0) max_ms = 5000.0;
 
         // Horizontal gridlines
-        const double grid_steps[] = { 16.67, 33.33, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0 };
+        const double grid_steps[] = { stuttometer::DEFAULT_60HZ_VBLANK_MS, 33.33, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0 };
         Pen grid_pen(Color(255, 30, 41, 59), 1.0f);
         grid_pen.SetDashStyle(DashStyleDash);
 

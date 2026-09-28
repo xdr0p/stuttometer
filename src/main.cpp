@@ -9,6 +9,8 @@
 
 #include "stuttometer/cli_parser.hpp"
 #include "stuttometer/version.hpp"
+#include "stuttometer/constants.hpp"
+#include "stuttometer/internal/gui_constants.hpp"
 #include <iostream>
 #include <iomanip>
 #include <atomic>
@@ -234,11 +236,13 @@ int main(int argc, char** argv) {
                   << disp_info.refresh_rate_hz << " Hz (vblank: " 
                   << std::fixed << std::setprecision(2) << disp_info.vblank_interval_ms << " ms)\n";
     } else {
-        std::cout << "[STUTTOMETER] Notice: Display refresh detection unavailable; defaulting to 60.0 Hz (16.67 ms).\n";
+        std::cout << "[STUTTOMETER] Notice: Display refresh detection unavailable; defaulting to 60.0 Hz ("
+                  << stuttometer::DEFAULT_60HZ_VBLANK_MS << " ms).\n";
     }
-    if (config.present_threshold_manual && (present_threshold_ms > 2.0 * disp_info.vblank_interval_ms)) {
+    if (config.present_threshold_manual && (present_threshold_ms > stuttometer::VBLANK_WARNING_FACTOR * disp_info.vblank_interval_ms)) {
         std::cout << "[STUTTOMETER] Notice: Configured stutter threshold (" 
-                  << std::fixed << std::setprecision(1) << present_threshold_ms << " ms) is >2.0x "
+                  << std::fixed << std::setprecision(1) << present_threshold_ms << " ms) is >"
+                  << std::setprecision(1) << stuttometer::VBLANK_WARNING_FACTOR << "x "
                   << "the detected display refresh interval ("
                   << disp_info.vblank_interval_ms << " ms, "
                   << std::setprecision(0) << disp_info.refresh_rate_hz << " Hz). "
@@ -324,7 +328,7 @@ int main(int argc, char** argv) {
 
         ++loop_counter;
 
-        if (verbose && loop_counter % 500 == 0) {
+        if (verbose && loop_counter % stuttometer::gui_constants::VERBOSE_LOG_INTERVAL_LOOPS == 0) {
             std::cout << "[VERBOSE] Head: " << flight_recorder.current_head() 
                       << " | Upstream Lost Events: " << session_mgr.events_lost()
                       << " | Lost Buffers: " << session_mgr.buffers_lost()
@@ -344,11 +348,11 @@ int main(int argc, char** argv) {
             try {
                 // Synchronously flush active buffers and deterministically drain post-trigger window
                 session_mgr.flush_buffers();
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_BUDGET_MS);
                 while (session_mgr.last_processed_qpc() < to_qpc && std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_STEP_MS));
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_STEP_MS));
 
                 uint64_t drops = 0;
                 auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);
@@ -420,7 +424,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::gui_constants::SESSION_LOOP_SLEEP_MS));
     }
 
     if (watcher_thread.joinable()) {

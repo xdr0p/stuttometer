@@ -15,6 +15,7 @@
 #include <evntcons.h>
 
 #include "event_types.hpp"
+#include "constants.hpp"
 #include "flight_recorder.hpp"
 #include "trigger_engine.hpp"
 #include "fixed_table.hpp"
@@ -486,7 +487,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> last_processed_qpc_{0};
-    std::atomic<uint64_t> recent_dwm_glitches_qpc_[16]{};
+    std::atomic<uint64_t> recent_dwm_glitches_qpc_[DWM_DEDUP_BUFFER_SIZE]{};
     std::atomic<uint32_t> recent_dwm_glitch_idx_{0};
     std::atomic<uint64_t> sync_time_utc_{0};
     std::atomic<uint64_t> sync_time_qpc_{0};

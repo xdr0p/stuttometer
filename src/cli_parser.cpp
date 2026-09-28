@@ -13,7 +13,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     double window_pre_ms = 250.0;
     double window_post_ms = 30.0;
-    double present_threshold_ms = 16.67;
+    double present_threshold_ms = DEFAULT_60HZ_VBLANK_MS;
     bool enable_audio = true;
     double cooldown_ms = 1000.0;
     uint32_t dpc_threshold_us = 1000;
@@ -26,7 +26,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     uint32_t mem_alloc_threshold_mb = 16;
     uint32_t mem_trim_threshold_mb = 4;
     uint32_t mem_physical_latency_us = 1000;
-    uint32_t buffer_slots = 262144;
+    uint32_t buffer_slots = DEFAULT_BUFFER_SLOTS;
     uint32_t target_pid = 0;
     std::string target_process_name;
     std::string output_file;
@@ -51,7 +51,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (50-1000, default: 250)");
     app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (0-200, default: 30)");
-    app.add_option("--present-threshold-ms", present_threshold_ms, "DXGI Present stutter threshold in ms (2.0-200.0, default: 16.67)");
+    app.add_option("--present-threshold-ms", present_threshold_ms, "DXGI Present stutter threshold in ms (2.0-200.0, default: 16.67)"); // DEFAULT_60HZ_VBLANK_MS
     app.add_option("--trigger-mode", trigger_mode_str, "Frame trigger mode: hybrid, dynamic, static (default: hybrid)");
     app.add_option("--pacing-profile", pacing_profile_str, "Pacing sensitivity profile: auto, high-refresh, conservative (default: auto)");
     app.add_flag("--high-refresh", high_refresh_preset, "Alias for --pacing-profile high-refresh");
@@ -71,7 +71,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     app.add_option("--mem-alloc-threshold-mb", mem_alloc_threshold_mb, "VirtualAlloc commit stall threshold in MB (1-1024, default: 16)");
     app.add_option("--mem-trim-threshold-mb", mem_trim_threshold_mb, "Working set out-swap trim threshold in MB (1-1024, default: 4)");
     app.add_option("--mem-physical-latency-us", mem_physical_latency_us, "Physical memory / MDL allocation latency threshold in us (50-50000, default: 1000)");
-    app.add_option("--buffer-slots", buffer_slots, "Ring buffer capacity in slots (65536-1048576, default: 262144)");
+    app.add_option("--buffer-slots", buffer_slots, "Ring buffer capacity in slots (65536-1048576, default: 262144)"); // MAX_BUFFER_SLOTS
     app.add_option("--target-pid", target_pid, "Target Process ID to monitor (default: 0 = monitor all)");
     app.add_option("--target-process", target_process_name, "Target process name substring (e.g. Game.exe)");
     app.add_option("--output", output_file, "Output file path for JSON reports (overwritten on each trigger if max-reports != 1; use --output-dir to save all reports)");
@@ -240,8 +240,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         err << "[STUTTOMETER] Error: --mem-physical-latency-us must be between 50 and 50000 us.\n";
         return CliParseResult::EXIT_ERROR;
     }
-    if (buffer_slots < 65536 || buffer_slots > 1048576) {
-        err << "[STUTTOMETER] Error: --buffer-slots must be between 65536 and 1048576.\n";
+    if (buffer_slots < MIN_BUFFER_SLOTS || buffer_slots > MAX_BUFFER_SLOTS) {
+        err << "[STUTTOMETER] Error: --buffer-slots must be between " << MIN_BUFFER_SLOTS << " and " << MAX_BUFFER_SLOTS << ".\n";
         return CliParseResult::EXIT_ERROR;
     }
 

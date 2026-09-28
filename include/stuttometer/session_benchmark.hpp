@@ -175,7 +175,7 @@ private:
 
     // Pacing context & live telemetry
     std::atomic<PacingProfile> pacing_profile_{PacingProfile::AUTO_ADAPTIVE};
-    std::atomic<double> present_threshold_ms_{16.67};
+    std::atomic<double> present_threshold_ms_{DEFAULT_60HZ_VBLANK_MS};
     std::atomic<double> spike_multiplier_{2.0};
     std::atomic<double> min_spike_delta_ms_{4.0};
     std::atomic<bool> has_live_telemetry_{false};

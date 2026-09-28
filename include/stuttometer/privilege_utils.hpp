@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <filesystem>
+#include "constants.hpp"
 
 namespace stuttometer {
 
@@ -35,7 +36,7 @@ bool is_supported_windows_build();
 // Display refresh rate and physical vblank cadence query
 struct DisplayRefreshInfo {
     double refresh_rate_hz{60.0};
-    double vblank_interval_ms{16.67};
+    double vblank_interval_ms{DEFAULT_60HZ_VBLANK_MS};
     bool query_succeeded{false};
 };
 [[nodiscard]] DisplayRefreshInfo query_display_refresh_info(uint32_t target_pid = 0) noexcept;

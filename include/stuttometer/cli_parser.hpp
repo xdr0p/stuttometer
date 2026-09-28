@@ -1,6 +1,7 @@
 #pragma once
 
 #include "stuttometer/frame_pacing_tracker.hpp"
+#include "stuttometer/constants.hpp"
 #include <string>
 #include <cstdint>
 #include <cstddef>
@@ -17,7 +18,7 @@ enum class CliParseResult {
 struct CliConfig {
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{16.67};
+    double present_threshold_ms{DEFAULT_60HZ_VBLANK_MS};
     bool enable_audio{true};
     double cooldown_ms{1000.0};
     uint32_t dpc_threshold_us{1000};
@@ -30,7 +31,7 @@ struct CliConfig {
     uint32_t mem_alloc_threshold_mb{16};
     uint32_t mem_trim_threshold_mb{4};
     uint32_t mem_physical_latency_us{1000};
-    uint32_t buffer_slots{262144};
+    uint32_t buffer_slots{DEFAULT_BUFFER_SLOTS};
     uint32_t target_pid{0};
     std::string target_process_name;
     std::string output_file;

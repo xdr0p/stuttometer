@@ -28,7 +28,7 @@ namespace detail {
     using MetricSeverity = stuttometer::MetricSeverity;
 
     [[nodiscard]] inline MetricSeverity classify_stall(
-        double dur_ms, double spike_ratio, double drop, bool is_audio, uint32_t glitches, double present_threshold_ms = 16.67
+        double dur_ms, double spike_ratio, double drop, bool is_audio, uint32_t glitches, double present_threshold_ms = stuttometer::DEFAULT_60HZ_VBLANK_MS
     ) {
         if (is_audio) {
             return (glitches > 0) ? MetricSeverity::DANGER : MetricSeverity::NORMAL;
