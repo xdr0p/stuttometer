@@ -5,6 +5,7 @@
 #include <sstream>
 #include <vector>
 #include <string>
+#include <cmath>
 
 using namespace stuttometer;
 
@@ -201,6 +202,120 @@ static void test_range_validations() {
     std::cout << "  -> Range validations verified.\n";
 }
 
+static bool is_integer_option(std::string_view name) {
+    return name == "--dpc-threshold-us" ||
+           name == "--isr-threshold-us" ||
+           name == "--disk-threshold-ms" ||
+           name == "--cswitch-threshold-ms" ||
+           name == "--d3d12-pso-threshold-ms" ||
+           name == "--vram-threshold-mb" ||
+           name == "--mem-alloc-threshold-mb" ||
+           name == "--mem-trim-threshold-mb" ||
+           name == "--mem-physical-latency-us" ||
+           name == "--buffer-slots";
+}
+
+static std::string format_cli_val(double val, bool is_int) {
+    if (is_int) {
+        return std::to_string(static_cast<int64_t>(val));
+    }
+    std::ostringstream oss;
+    oss << val;
+    return oss.str();
+}
+
+static double get_cli_eps(std::string_view name) {
+    if (is_integer_option(name)) return 1.0;
+    if (name == "--judder-swing-ratio") return 0.05;
+    if (name == "--spike-multiplier" || name == "--min-spike-delta-ms" || name == "--present-threshold-ms") return 0.1;
+    if (name == "--smi-threshold-ms") return 0.5;
+    return 1.0;
+}
+
+static void test_cli_ranges_table() {
+    std::cout << "[TEST] Testing CLI_RANGES comprehensive boundary and range validation...\n";
+
+    for (const auto& r : CLI_RANGES) {
+        const bool is_int = is_integer_option(r.name);
+        const double eps = get_cli_eps(r.name);
+
+        // 1. Direct unit checks on validate_option_range
+        {
+            std::ostringstream err;
+            STUTTO_ASSERT(validate_option_range(err, r.name, r.min_val, r.min_val, r.max_val, r.unit));
+            STUTTO_ASSERT(err.str().empty());
+        }
+        {
+            std::ostringstream err;
+            STUTTO_ASSERT(validate_option_range(err, r.name, r.max_val, r.min_val, r.max_val, r.unit));
+            STUTTO_ASSERT(err.str().empty());
+        }
+        {
+            std::ostringstream err;
+            STUTTO_ASSERT(!validate_option_range(err, r.name, r.min_val - eps, r.min_val, r.max_val, r.unit));
+            std::string err_str = err.str();
+            STUTTO_ASSERT(err_str.find(r.name) != std::string::npos);
+            STUTTO_ASSERT(err_str.find("must be between") != std::string::npos);
+        }
+        {
+            std::ostringstream err;
+            STUTTO_ASSERT(!validate_option_range(err, r.name, r.max_val + eps, r.min_val, r.max_val, r.unit));
+            std::string err_str = err.str();
+            STUTTO_ASSERT(err_str.find(r.name) != std::string::npos);
+            STUTTO_ASSERT(err_str.find("must be between") != std::string::npos);
+        }
+
+        // 2. Integration via parse_cli_args
+        const std::string min_str = format_cli_val(r.min_val, is_int);
+        const std::string max_str = format_cli_val(r.max_val, is_int);
+        const std::string below_str = format_cli_val(r.min_val - eps, is_int);
+        const std::string above_str = format_cli_val(r.max_val + eps, is_int);
+
+        // Min bound CLI test
+        {
+            const char* argv[] = { "stuttometer.exe", r.name, min_str.c_str() };
+            CliConfig config;
+            std::ostringstream out, err;
+            auto res = parse_cli_args(3, argv, config, out, err);
+            STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+            STUTTO_ASSERT(std::abs(r.getter(config) - r.min_val) < 0.001);
+        }
+
+        // Max bound CLI test
+        {
+            const char* argv[] = { "stuttometer.exe", r.name, max_str.c_str() };
+            CliConfig config;
+            std::ostringstream out, err;
+            auto res = parse_cli_args(3, argv, config, out, err);
+            STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+            STUTTO_ASSERT(std::abs(r.getter(config) - r.max_val) < 0.001);
+        }
+
+        // Below min CLI test
+        {
+            const char* argv[] = { "stuttometer.exe", r.name, below_str.c_str() };
+            CliConfig config;
+            std::ostringstream out, err;
+            auto res = parse_cli_args(3, argv, config, out, err);
+            STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+            STUTTO_ASSERT(err.str().find(r.name) != std::string::npos || err.str().find("must be between") != std::string::npos);
+        }
+
+        // Above max CLI test
+        {
+            const char* argv[] = { "stuttometer.exe", r.name, above_str.c_str() };
+            CliConfig config;
+            std::ostringstream out, err;
+            auto res = parse_cli_args(3, argv, config, out, err);
+            STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+            STUTTO_ASSERT(err.str().find(r.name) != std::string::npos);
+            STUTTO_ASSERT(err.str().find("must be between") != std::string::npos);
+        }
+    }
+
+    std::cout << "  -> All 18 CLI_RANGES bounds and boundary violations verified successfully.\n";
+}
+
 static void test_help_flags() {
     std::cout << "[TEST] Testing -h and --help flags (NB4)...\n";
 
@@ -292,6 +407,7 @@ int main() {
         test_precedence_explicit_override();
         test_version_and_self_check();
         test_range_validations();
+        test_cli_ranges_table();
         test_help_flags();
         test_manual_threshold_flags();
 
