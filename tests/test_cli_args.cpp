@@ -2,6 +2,8 @@
 #include "stuttometer/cli_parser.hpp"
 #include "stuttometer/version.hpp"
 #include "stuttometer/internal/process_watcher.hpp"
+#include "stuttometer/privilege_utils.hpp"
+#include <windows.h>
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -9,6 +11,128 @@
 #include <cmath>
 #include <chrono>
 #include <thread>
+#include <algorithm>
+#include <new>
+#include <cstdlib>
+
+static thread_local bool g_disallow_allocations = false;
+static thread_local bool g_allocation_detected = false;
+
+void* operator new(size_t size) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete(void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete(void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void* operator new[](size_t size) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete[](void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete[](void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    return std::malloc(size);
+}
+
+void operator delete(void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
+
+void* operator new[](size_t size, const std::nothrow_t&) noexcept {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    return std::malloc(size);
+}
+
+void operator delete[](void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
+
+#if defined(__cpp_aligned_new)
+void* operator new(size_t size, std::align_val_t al) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size, static_cast<size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<size_t>(al), size);
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete(void* p, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+void operator delete(void* p, size_t, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+void* operator new[](size_t size, std::align_val_t al) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size, static_cast<size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<size_t>(al), size);
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete[](void* p, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+void operator delete[](void* p, size_t, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+#endif
 
 using namespace stuttometer;
 
@@ -474,6 +598,187 @@ static void test_process_watcher_lifecycle() {
     std::cout << "  -> ProcessWatcher lifecycle and query interface PASSED.\n";
 }
 
+static void test_process_watcher_parity() {
+    std::cout << "[TEST] Testing ProcessWatcher parity with resolve_process_name_to_pid...\n";
+
+    wchar_t self_path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, self_path, MAX_PATH);
+    STUTTO_ASSERT(len > 0);
+
+    std::string self_full_backslash = stuttometer::utf16_to_utf8(self_path);
+    std::string self_full_forward = self_full_backslash;
+    std::replace(self_full_forward.begin(), self_full_forward.end(), '\\', '/');
+
+    size_t last_slash = self_full_backslash.find_last_of('\\');
+    std::string self_name_exe = (last_slash != std::string::npos) ? self_full_backslash.substr(last_slash + 1) : self_full_backslash;
+    std::string self_name_no_exe = self_name_exe;
+    if (self_name_no_exe.length() > 4 && _stricmp(self_name_no_exe.c_str() + self_name_no_exe.length() - 4, ".exe") == 0) {
+        self_name_no_exe = self_name_no_exe.substr(0, self_name_no_exe.length() - 4);
+    }
+
+    std::string self_prefix = (self_name_no_exe.length() > 3) ? self_name_no_exe.substr(0, self_name_no_exe.length() - 2) : self_name_no_exe;
+    std::string self_substr = (self_name_no_exe.length() > 4) ? self_name_no_exe.substr(1, self_name_no_exe.length() - 2) : self_name_no_exe;
+
+    std::string self_drive_relative = (self_full_backslash.length() >= 2 && self_full_backslash[1] == ':')
+                                          ? self_full_backslash.substr(0, 2) + self_name_exe
+                                          : self_name_exe;
+    std::string self_long_path = "C:\\" + std::string(220, 'a') + "\\..\\" + self_name_exe;
+
+    std::vector<std::string> test_variants = {
+        self_name_exe,
+        self_name_no_exe,
+        self_full_backslash,
+        self_full_forward,
+        self_prefix,
+        self_substr,
+        self_drive_relative,
+        self_long_path,
+        "stutto_nonexistent_proc_987654321.exe",
+        ""
+    };
+
+    stuttometer::ProcessWatcher watcher;
+    for (size_t i = 0; i < test_variants.size(); ++i) {
+        const auto& variant = test_variants[i];
+        bool ok = false;
+        for (int retry = 0; retry < 2; ++retry) {
+            uint32_t expected_pid = stuttometer::resolve_process_name_to_pid(variant);
+            watcher.set_target_for_test(variant);
+            uint32_t watcher_pid = watcher.find_target_pid_snapshot();
+            if (expected_pid == watcher_pid) {
+                if (i < 8) {
+                    if (expected_pid != 0) {
+                        ok = true;
+                        break;
+                    }
+                } else {
+                    if (expected_pid == 0) {
+                        ok = true;
+                        break;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        STUTTO_ASSERT_MSG(ok, ("Parity mismatch for variant: " + variant).c_str());
+    }
+
+    std::cout << "  -> ProcessWatcher parity verified across " << test_variants.size() << " target variants.\n";
+}
+
+static void test_process_watcher_cadence() {
+    std::cout << "[TEST] Testing ProcessWatcher adaptive cadence (50ms waiting vs ~2000ms attached)...\n";
+
+    std::atomic<bool> is_waiting_flag{true};
+    stuttometer::WatcherCallbacks cb;
+    cb.user_data = &is_waiting_flag;
+    cb.is_waiting = [](void* ud) -> bool {
+        return static_cast<std::atomic<bool>*>(ud)->load(std::memory_order_relaxed);
+    };
+
+    stuttometer::ProcessWatcher watcher;
+    watcher.start("stutto_cadence_test_proc_987654321.exe", cb);
+    STUTTO_ASSERT(watcher.is_running());
+
+    // Verify set_target_for_test rejects modification while running to prevent data races
+    STUTTO_ASSERT(!watcher.set_target_for_test("other.exe"));
+
+    // 1. Waiting mode (~50ms cadence)
+    is_waiting_flag.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    uint64_t c0 = watcher.get_poll_count_for_test();
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    uint64_t c1 = watcher.get_poll_count_for_test();
+    uint64_t delta_waiting = c1 - c0;
+    STUTTO_ASSERT(delta_waiting >= 1 && delta_waiting <= 5);
+
+    // 2. Attached mode (~2000ms cadence)
+    is_waiting_flag.store(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    uint64_t c2 = watcher.get_poll_count_for_test();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    uint64_t c3 = watcher.get_poll_count_for_test();
+    uint64_t delta_attached = c3 - c2;
+    STUTTO_ASSERT(delta_attached <= 1);
+
+    watcher.stop();
+    STUTTO_ASSERT(!watcher.is_running());
+
+    std::cout << "  -> ProcessWatcher adaptive cadence verified (waiting delta: " 
+              << delta_waiting << ", attached delta: " << delta_attached << ").\n";
+}
+
+static void test_process_watcher_zero_allocation() {
+    std::cout << "[TEST] Testing ProcessWatcher zero-allocation in find_target_pid_snapshot...\n";
+
+    stuttometer::ProcessWatcher watcher;
+    wchar_t self_path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, self_path, MAX_PATH);
+    STUTTO_ASSERT(len > 0);
+    std::string self_full = stuttometer::utf16_to_utf8(self_path);
+    size_t last_slash = self_full.find_last_of('\\');
+    std::string self_name = (last_slash != std::string::npos) ? self_full.substr(last_slash + 1) : "test_cli_args.exe";
+
+    std::string self_name_no_exe = self_name;
+    if (self_name_no_exe.length() > 4 && _stricmp(self_name_no_exe.c_str() + self_name_no_exe.length() - 4, ".exe") == 0) {
+        self_name_no_exe = self_name_no_exe.substr(0, self_name_no_exe.length() - 4);
+    }
+    std::string self_prefix = (self_name_no_exe.length() > 3) ? self_name_no_exe.substr(0, self_name_no_exe.length() - 2) : self_name_no_exe;
+    std::string self_substr = (self_name_no_exe.length() > 4) ? self_name_no_exe.substr(1, self_name_no_exe.length() - 2) : self_name_no_exe;
+
+    // Warm-up call (page-in code / CRT tables)
+    watcher.set_target_for_test(self_name);
+    uint32_t warm_pid = watcher.find_target_pid_snapshot();
+    STUTTO_ASSERT(warm_pid != 0);
+
+    // 1. Pass 1: Exact match zero-allocation
+    watcher.set_target_for_test(self_name);
+    g_allocation_detected = false;
+    g_disallow_allocations = true;
+    uint32_t pid_exact = watcher.find_target_pid_snapshot();
+    g_disallow_allocations = false;
+    STUTTO_ASSERT(pid_exact == warm_pid);
+    STUTTO_ASSERT(!g_allocation_detected);
+
+    // 2. Pass 2: Prefix match zero-allocation
+    watcher.set_target_for_test(self_prefix);
+    g_allocation_detected = false;
+    g_disallow_allocations = true;
+    uint32_t pid_prefix = watcher.find_target_pid_snapshot();
+    g_disallow_allocations = false;
+    STUTTO_ASSERT(pid_prefix != 0);
+    STUTTO_ASSERT(!g_allocation_detected);
+
+    // 3. Pass 3: Substring match zero-allocation
+    watcher.set_target_for_test(self_substr);
+    g_allocation_detected = false;
+    g_disallow_allocations = true;
+    uint32_t pid_substr = watcher.find_target_pid_snapshot();
+    g_disallow_allocations = false;
+    STUTTO_ASSERT(pid_substr != 0);
+    STUTTO_ASSERT(!g_allocation_detected);
+
+    // 4. Non-existent process (exhaustive full-snapshot scan across all passes)
+    watcher.set_target_for_test("stutto_nonexistent_proc_987654321.exe");
+    g_allocation_detected = false;
+    g_disallow_allocations = true;
+    uint32_t pid_none = watcher.find_target_pid_snapshot();
+    g_disallow_allocations = false;
+    STUTTO_ASSERT(pid_none == 0);
+    STUTTO_ASSERT(!g_allocation_detected);
+
+    // 5. Empty target
+    watcher.set_target_for_test("");
+    g_allocation_detected = false;
+    g_disallow_allocations = true;
+    uint32_t pid_empty = watcher.find_target_pid_snapshot();
+    g_disallow_allocations = false;
+    STUTTO_ASSERT(pid_empty == 0);
+    STUTTO_ASSERT(!g_allocation_detected);
+
+    std::cout << "  -> ProcessWatcher find_target_pid_snapshot zero dynamic allocation verified across all matching passes and full table scans.\n";
+}
+
 int main() {
     try {
         test_pacing_profile_parsing();
@@ -487,6 +792,9 @@ int main() {
         test_help_flags();
         test_manual_threshold_flags();
         test_process_watcher_lifecycle();
+        test_process_watcher_parity();
+        test_process_watcher_cadence();
+        test_process_watcher_zero_allocation();
 
         std::cout << "\n[ALL CLI ARGS TESTS PASSED]\n";
         return 0;

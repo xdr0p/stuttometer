@@ -74,6 +74,8 @@ enum class PacingProfile : uint8_t {
     CUSTOM        = 3
 };
 
+inline constexpr double DEFAULT_SPIKE_MULTIPLIER      = 2.0;
+inline constexpr double DEFAULT_MIN_SPIKE_DELTA_MS    = 4.0;
 inline constexpr double HIGH_REFRESH_SPIKE_MULTIPLIER = 1.4;
 inline constexpr double HIGH_REFRESH_MIN_DELTA_MS     = 1.5;
 inline constexpr double CONSERVATIVE_SPIKE_MULTIPLIER = 2.0;

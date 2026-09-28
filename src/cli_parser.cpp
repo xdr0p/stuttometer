@@ -41,18 +41,23 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     std::string trigger_mode_str = "hybrid";
     std::string pacing_profile_str;
     bool high_refresh_preset = false;
-    double spike_multiplier = 2.0;
-    double min_spike_delta_ms = 4.0;
+    double spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
+    double min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     bool enable_judder = true;
-    double judder_swing_ratio = 0.35;
+    double judder_swing_ratio = pacing_tuning::DEFAULT_JUDDER_SWING_RATIO;
     std::string dump_events_path;
     size_t dump_max_mb = 100;
     size_t dump_max_files = 3;
     std::string export_csv_path;
 
+    char present_thresh_help[128];
+    std::snprintf(present_thresh_help, sizeof(present_thresh_help),
+                  "DXGI Present stutter threshold in ms (2.0-200.0, default: %.2f)",
+                  DEFAULT_60HZ_VBLANK_MS);
+
     app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (50-1000, default: 250)");
     app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (0-200, default: 30)");
-    app.add_option("--present-threshold-ms", present_threshold_ms, "DXGI Present stutter threshold in ms (2.0-200.0, default: 16.67)"); // DEFAULT_60HZ_VBLANK_MS
+    app.add_option("--present-threshold-ms", present_threshold_ms, present_thresh_help);
     app.add_option("--trigger-mode", trigger_mode_str, "Frame trigger mode: hybrid, dynamic, static (default: hybrid)");
     app.add_option("--pacing-profile", pacing_profile_str, "Pacing sensitivity profile: auto, high-refresh, conservative (default: auto)");
     app.add_flag("--high-refresh", high_refresh_preset, "Alias for --pacing-profile high-refresh");
@@ -151,8 +156,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     // Assign multiplier & delta based on resolved profile
     if (resolved_profile == PacingProfile::AUTO_ADAPTIVE) {
-        spike_multiplier = 2.0;
-        min_spike_delta_ms = 4.0;
+        spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
+        min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     } else if (resolved_profile == PacingProfile::HIGH_REFRESH) {
         spike_multiplier = HIGH_REFRESH_SPIKE_MULTIPLIER;
         min_spike_delta_ms = HIGH_REFRESH_MIN_DELTA_MS;
@@ -160,8 +165,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         spike_multiplier = CONSERVATIVE_SPIKE_MULTIPLIER;
         min_spike_delta_ms = CONSERVATIVE_MIN_DELTA_MS;
     } else if (resolved_profile == PacingProfile::CUSTOM) {
-        if (!has_spike_mult) spike_multiplier = 2.0;
-        if (!has_min_delta) min_spike_delta_ms = 4.0;
+        if (!has_spike_mult) spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
+        if (!has_min_delta) min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     }
 
     // Notice when --trigger-mode static is combined with pacing profile

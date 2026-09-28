@@ -44,8 +44,8 @@ struct CliConfig {
     bool run_self_check{false};
     std::string trigger_mode_str{"hybrid"};
     PacingProfile pacing_profile{PacingProfile::AUTO_ADAPTIVE};
-    double spike_multiplier{2.0};
-    double min_spike_delta_ms{4.0};
+    double spike_multiplier{DEFAULT_SPIKE_MULTIPLIER};
+    double min_spike_delta_ms{DEFAULT_MIN_SPIKE_DELTA_MS};
     bool enable_judder{true};
     double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
     std::string dump_events_path;

@@ -531,7 +531,8 @@ static void test_flight_recorder_capacity_extremes() {
         }
     }
 
-    std::cout << "  -> FlightRecorder capacity extremes (64 and 1048576 slots) PASSED.\n";
+    std::cout << "  -> FlightRecorder capacity extremes (64 and "
+              << stuttometer::MAX_BUFFER_SLOTS << " slots) PASSED.\n";
 }
 
 int main() {

@@ -38,12 +38,24 @@ public:
     void stop();
     bool is_running() const noexcept { return is_running_.load(std::memory_order_acquire); }
 
+    // Public for synchronous zero-allocation test validation
+    // noexcept: all Win32 calls + stack math, no dynamic allocation-capable operations
+    uint32_t find_target_pid_snapshot() const noexcept;
+    uint64_t get_poll_count_for_test() const noexcept { return poll_count_for_test_.load(std::memory_order_relaxed); }
+    bool set_target_for_test(std::string_view target_process);
+
 private:
     void worker_loop(WatcherCallbacks callbacks);
     void stop_locked();
+    bool prepare_target(std::string_view target_process);
 
     std::mutex watcher_mutex_;
     std::string target_process_;
+    std::wstring target_wide_;
+    std::wstring target_wide_exe_;
+    std::wstring target_wide_lower_;
+    bool target_has_exe_{false};
+    std::atomic<uint64_t> poll_count_for_test_{0};
     std::thread worker_thread_;
     std::atomic<bool> stop_flag_{false};
     std::atomic<bool> is_running_{false};

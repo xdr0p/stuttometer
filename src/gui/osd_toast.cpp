@@ -23,6 +23,9 @@ struct ProcessWindowSearch {
     HWND hwnd{nullptr};
 };
 
+// MIN_WINDOW_DIMENSION_PX (100 px) filters out microscopic tooltip / offscreen helper windows for OSD overlay.
+// Note: gui_controller.cpp uses a distinct zero-size check because the process-selection ComboBox is the primary UI,
+// whereas OSD filtering targets tooltip/offscreen helper windows.
 // Locates the process's primary viewport window by filtering out message-only,
 // zero-sized, invisible tray helper, or tooltip windows via a >100x100px rect heuristic.
 static BOOL CALLBACK EnumProcessWindowsProc(HWND hwnd, LPARAM lParam) {
