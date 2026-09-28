@@ -184,77 +184,27 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     }
 
     // CLI Range and Option Validation (after profile resolution, per NM7)
-    if (window_pre_ms < 50.0 || window_pre_ms > 1000.0) {
-        err << "[STUTTOMETER] Error: --window-ms must be between 50.0 and 1000.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (window_post_ms < 0.0 || window_post_ms > 200.0) {
-        err << "[STUTTOMETER] Error: --post-trigger-ms must be between 0.0 and 200.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (present_threshold_ms < 2.0 || present_threshold_ms > 200.0) {
-        err << "[STUTTOMETER] Error: --present-threshold-ms must be between 2.0 and 200.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (cooldown_ms < 100.0 || cooldown_ms > 10000.0) {
-        err << "[STUTTOMETER] Error: --cooldown-ms must be between 100.0 and 10000.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (dpc_threshold_us < 100 || dpc_threshold_us > 50000) {
-        err << "[STUTTOMETER] Error: --dpc-threshold-us must be between 100 and 50000 us.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (isr_threshold_us < 50 || isr_threshold_us > 50000) {
-        err << "[STUTTOMETER] Error: --isr-threshold-us must be between 50 and 50000 us.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (disk_threshold_ms < 1 || disk_threshold_ms > 1000) {
-        err << "[STUTTOMETER] Error: --disk-threshold-ms must be between 1 and 1000 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (cswitch_preempt_ms < 1 || cswitch_preempt_ms > 500) {
-        err << "[STUTTOMETER] Error: --cswitch-threshold-ms must be between 1 and 500 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (smi_severity_threshold_ms < 10.0 || smi_severity_threshold_ms > 100.0) {
-        err << "[STUTTOMETER] Error: --smi-threshold-ms must be between 10.0 and 100.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (d3d12_pso_threshold_ms < 1 || d3d12_pso_threshold_ms > 500) {
-        err << "[STUTTOMETER] Error: --d3d12-pso-threshold-ms must be between 1 and 500 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (vram_demoted_threshold_mb < 1 || vram_demoted_threshold_mb > 1024) {
-        err << "[STUTTOMETER] Error: --vram-threshold-mb must be between 1 and 1024 MB.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (mem_alloc_threshold_mb < 1 || mem_alloc_threshold_mb > 1024) {
-        err << "[STUTTOMETER] Error: --mem-alloc-threshold-mb must be between 1 and 1024 MB.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (mem_trim_threshold_mb < 1 || mem_trim_threshold_mb > 1024) {
-        err << "[STUTTOMETER] Error: --mem-trim-threshold-mb must be between 1 and 1024 MB.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (mem_physical_latency_us < 50 || mem_physical_latency_us > 50000) {
-        err << "[STUTTOMETER] Error: --mem-physical-latency-us must be between 50 and 50000 us.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (buffer_slots < MIN_BUFFER_SLOTS || buffer_slots > MAX_BUFFER_SLOTS) {
-        err << "[STUTTOMETER] Error: --buffer-slots must be between " << MIN_BUFFER_SLOTS << " and " << MAX_BUFFER_SLOTS << ".\n";
-        return CliParseResult::EXIT_ERROR;
-    }
+    CliConfig temp_config;
+    temp_config.window_pre_ms = window_pre_ms;
+    temp_config.window_post_ms = window_post_ms;
+    temp_config.present_threshold_ms = present_threshold_ms;
+    temp_config.cooldown_ms = cooldown_ms;
+    temp_config.dpc_threshold_us = dpc_threshold_us;
+    temp_config.isr_threshold_us = isr_threshold_us;
+    temp_config.disk_threshold_ms = disk_threshold_ms;
+    temp_config.cswitch_preempt_ms = cswitch_preempt_ms;
+    temp_config.smi_severity_threshold_ms = smi_severity_threshold_ms;
+    temp_config.d3d12_pso_threshold_ms = d3d12_pso_threshold_ms;
+    temp_config.vram_demoted_threshold_mb = vram_demoted_threshold_mb;
+    temp_config.mem_alloc_threshold_mb = mem_alloc_threshold_mb;
+    temp_config.mem_trim_threshold_mb = mem_trim_threshold_mb;
+    temp_config.mem_physical_latency_us = mem_physical_latency_us;
+    temp_config.buffer_slots = buffer_slots;
+    temp_config.spike_multiplier = spike_multiplier;
+    temp_config.min_spike_delta_ms = min_spike_delta_ms;
+    temp_config.judder_swing_ratio = judder_swing_ratio;
 
-    if (spike_multiplier < 1.2 || spike_multiplier > 10.0) {
-        err << "[STUTTOMETER] Error: --spike-multiplier must be between 1.2 and 10.0.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (min_spike_delta_ms < 1.0 || min_spike_delta_ms > 50.0) {
-        err << "[STUTTOMETER] Error: --min-spike-delta-ms must be between 1.0 and 50.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (judder_swing_ratio < 0.1 || judder_swing_ratio > 0.9) {
-        err << "[STUTTOMETER] Error: --judder-swing-ratio must be between 0.1 and 0.9.\n";
+    if (!validate_all_cli_ranges(err, temp_config)) {
         return CliParseResult::EXIT_ERROR;
     }
 
