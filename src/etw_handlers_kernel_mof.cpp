@@ -1,8 +1,9 @@
 #include <algorithm>
 #include <cstring>
+#include "stuttometer/constants.hpp"
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
-#include "etw_kernel_opcodes.hpp"
+#include "stuttometer/internal/etw_kernel_opcodes.hpp"
 
 namespace stuttometer {
 
@@ -259,7 +260,7 @@ void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRec
             rec.auxiliary_data = region_size;
             rec.flags = (alloc_flags & MEM_COMMIT) ? EventFlags::MEM_ALLOC_COMMIT : EventFlags::NONE;
 
-            data_ok = region_size >= (4 * 1024 * 1024ULL) && (alloc_flags & (MEM_COMMIT | MEM_RESET | MEM_LARGE_PAGES)) != 0;
+            data_ok = region_size >= VIRTUAL_ALLOC_MIN_SEVERE_BYTES && (alloc_flags & (MEM_COMMIT | MEM_RESET | MEM_LARGE_PAGES)) != 0;
         }
         emit_event(rec, data_ok);
         return;

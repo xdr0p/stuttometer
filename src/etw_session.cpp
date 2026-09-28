@@ -7,9 +7,10 @@
 #include <cstring>
 #include <cassert>
 #include "stuttometer/etw_session.hpp"
+#include "stuttometer/constants.hpp"
 #include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
-#include "etw_kernel_opcodes.hpp"
+#include "stuttometer/internal/etw_kernel_opcodes.hpp"
 #include <tdh.h>
 
 namespace stuttometer {
@@ -99,10 +100,10 @@ SessionStartResult EtwSessionManager::start() {
         p_user_props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
         p_user_props->Wnode.ClientContext = 1; // QPC Clock
         p_user_props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        p_user_props->FlushTimer = 1;
-        p_user_props->BufferSize = 128;
-        p_user_props->MinimumBuffers = 16;
-        p_user_props->MaximumBuffers = 64;
+        p_user_props->FlushTimer = ETW_FLUSH_TIMER_SEC;
+        p_user_props->BufferSize = ETW_BUFFER_SIZE_KB;
+        p_user_props->MinimumBuffers = ETW_MIN_BUFFERS;
+        p_user_props->MaximumBuffers = ETW_MAX_BUFFERS;
         p_user_props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
 
         ControlTraceW(0, user_session_name.c_str(), p_user_props, EVENT_TRACE_CONTROL_STOP);
@@ -113,10 +114,10 @@ SessionStartResult EtwSessionManager::start() {
         p_user_props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
         p_user_props->Wnode.ClientContext = 1;
         p_user_props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        p_user_props->FlushTimer = 1;
-        p_user_props->BufferSize = 128;
-        p_user_props->MinimumBuffers = 16;
-        p_user_props->MaximumBuffers = 64;
+        p_user_props->FlushTimer = ETW_FLUSH_TIMER_SEC;
+        p_user_props->BufferSize = ETW_BUFFER_SIZE_KB;
+        p_user_props->MinimumBuffers = ETW_MIN_BUFFERS;
+        p_user_props->MaximumBuffers = ETW_MAX_BUFFERS;
         p_user_props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
 
         TRACEHANDLE local_user_handle = 0;
@@ -234,10 +235,10 @@ SessionStartResult EtwSessionManager::start() {
         p_kernel_props->Wnode.ClientContext = 1; // QPC Clock
         p_kernel_props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
         p_kernel_props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        p_kernel_props->FlushTimer = 1;
-        p_kernel_props->BufferSize = 128;
-        p_kernel_props->MinimumBuffers = 16;
-        p_kernel_props->MaximumBuffers = 64;
+        p_kernel_props->FlushTimer = ETW_FLUSH_TIMER_SEC;
+        p_kernel_props->BufferSize = ETW_BUFFER_SIZE_KB;
+        p_kernel_props->MinimumBuffers = ETW_MIN_BUFFERS;
+        p_kernel_props->MaximumBuffers = ETW_MAX_BUFFERS;
         p_kernel_props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
 
         ULONG flags = 0;
@@ -409,14 +410,14 @@ void EtwSessionManager::active_flush_worker_loop() {
     auto p_props = reinterpret_cast<PEVENT_TRACE_PROPERTIES>(props_buf);
 
     const auto interval = std::chrono::milliseconds(config_.flush_interval_ms);
-    const uint64_t present_max_age_qpc = ms_to_qpc_delta(5000.0, qpc_freq_);
-    const uint64_t disk_max_age_qpc = ms_to_qpc_delta(3000.0, qpc_freq_);
-    const uint64_t scan_max_age_qpc = ms_to_qpc_delta(12000.0, qpc_freq_);
-    const uint64_t thread_max_age_qpc = ms_to_qpc_delta(5000.0, qpc_freq_);
-    const uint64_t tid_pid_max_age_qpc = ms_to_qpc_delta(15000.0, qpc_freq_);
-    const uint64_t last_present_max_age_qpc = ms_to_qpc_delta(30000.0, qpc_freq_);
-    const uint64_t pso_max_age_qpc = ms_to_qpc_delta(12000.0, qpc_freq_);
-    const uint64_t ws_trim_max_age_qpc = ms_to_qpc_delta(12000.0, qpc_freq_);
+    const uint64_t present_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::PRESENT_TABLE, qpc_freq_);
+    const uint64_t disk_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::DISK_TABLE, qpc_freq_);
+    const uint64_t scan_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::SCAN_TABLE, qpc_freq_);
+    const uint64_t thread_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::THREAD_TABLE, qpc_freq_);
+    const uint64_t tid_pid_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::TID_PID_TABLE, qpc_freq_);
+    const uint64_t last_present_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::PRESENT_AND_FLIP_TABLE, qpc_freq_);
+    const uint64_t pso_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::PSO_TABLE, qpc_freq_);
+    const uint64_t ws_trim_max_age_qpc = ms_to_qpc_delta(eviction_age_ms::WS_TRIM_TABLE, qpc_freq_);
     uint64_t loop_counter = 0;
     uint64_t last_resync_qpc = sync_time_qpc_.load(std::memory_order_relaxed);
 

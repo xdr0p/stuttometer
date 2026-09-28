@@ -1,4 +1,5 @@
 #include <cstring>
+#include "stuttometer/constants.hpp"
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
@@ -43,7 +44,7 @@ void EtwSessionManager::handle_kernel_memory_event(
             std::memcpy(&pages_processed, raw + 8, sizeof(uint64_t));
 
             rec.pid = target_proc;
-            rec.auxiliary_data = pages_processed * 4096ULL;
+            rec.auxiliary_data = pages_processed * PAGE_SIZE_BYTES;
             rec.flags = EventFlags::MEM_WS_TRIM_OUTSWAP;
 
             WorkingSetTrimInFlight start_entry{};

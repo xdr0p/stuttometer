@@ -1,4 +1,5 @@
 #include "stuttometer/trigger_engine.hpp"
+#include "stuttometer/constants.hpp"
 #include "stuttometer/session_benchmark.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include <algorithm>
@@ -13,7 +14,7 @@ TriggerEngine::TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq)
     , gpu_pre_window_qpc_(ms_to_qpc_delta(std::max(config.window_pre_ms, std::clamp(config.window_pre_ms * 1.5, 250.0, 1200.0)), qpc_freq))
     , post_window_qpc_(ms_to_qpc_delta(config.window_post_ms, qpc_freq))
     , cooldown_qpc_(ms_to_qpc_delta(config.cooldown_ms, qpc_freq))
-    , watchdog_qpc_(ms_to_qpc_delta(5000.0, qpc_freq)) // 5.0s recovery
+    , watchdog_qpc_(ms_to_qpc_delta(TRIGGER_WATCHDOG_MS, qpc_freq)) // 5.0s recovery
     , last_target_pid_(config.target_pid)
 {
     const bool waiting = (!config.target_process_name.empty() && config.target_pid == 0);
@@ -305,7 +306,7 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
 
 bool TriggerEngine::on_dwm_glitch(uint32_t /*pid*/, uint32_t /*tid*/, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
     const double vb = vblank_interval_ms();
-    const double vblank_ms = (vb > 0.0) ? vb : 16.67;
+    const double vblank_ms = (vb > 0.0) ? vb : DEFAULT_60HZ_VBLANK_MS;
     const double jitter_guard = std::max(0.5, vblank_ms * 0.05);
     const double effective_threshold = std::max(1.0, vblank_ms - jitter_guard);
 

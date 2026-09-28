@@ -351,21 +351,21 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
             summary.estimated_binding_floor_ms = summary.static_floor_ms;
             summary.binding_floor_source = BindingFloorSource::STATIC;
         }
-    } else if (valid_count >= 8) {
-        // State 2: Standalone Fallback (valid_count >= 8)
-        const size_t N = std::min<size_t>(valid_count, 64);
+    } else if (valid_count >= bench_tuning::FALLBACK_MIN_SAMPLES) {
+        // State 2: Standalone Fallback (valid_count >= bench_tuning::FALLBACK_MIN_SAMPLES)
+        const size_t N = std::min<size_t>(valid_count, bench_tuning::FALLBACK_WINDOW_SIZE);
         const size_t start_idx = valid_count - N;
 
-        // Pass 1: Sanity Filter (< 100.0 ms)
-        double buf1[64];
+        // Pass 1: Sanity Filter (< bench_tuning::FALLBACK_PASS1_SANITY_MS)
+        double buf1[bench_tuning::FALLBACK_WINDOW_SIZE];
         size_t n1 = 0;
         for (size_t i = start_idx; i < valid_count; ++i) {
-            if (scratch_buffer_[i] < 100.0 && n1 < 64) {
+            if (scratch_buffer_[i] < bench_tuning::FALLBACK_PASS1_SANITY_MS && n1 < bench_tuning::FALLBACK_WINDOW_SIZE) {
                 buf1[n1++] = scratch_buffer_[i];
             }
         }
 
-        if (n1 < 8) {
+        if (n1 < bench_tuning::FALLBACK_MIN_SAMPLES) {
             summary.rolling_baseline_ms = sum_dur_ms / valid_count;
         } else {
             std::sort(buf1, buf1 + n1);
@@ -376,17 +376,17 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
             };
             const double median_t1 = median_of_sorted(buf1, n1);
 
-            // Pass 2: Median-Referenced Clean Baseline (exclude > 1.4 * median_t1)
-            double buf2[64];
+            // Pass 2: Median-Referenced Clean Baseline (exclude > bench_tuning::FALLBACK_PASS2_MEDIAN_FACTOR * median_t1)
+            double buf2[bench_tuning::FALLBACK_WINDOW_SIZE];
             size_t n2 = 0;
-            const double threshold_pass2 = 1.4 * median_t1;
+            const double threshold_pass2 = bench_tuning::FALLBACK_PASS2_MEDIAN_FACTOR * median_t1;
             for (size_t i = 0; i < n1; ++i) {
-                if (buf1[i] <= threshold_pass2 && n2 < 64) {
+                if (buf1[i] <= threshold_pass2 && n2 < bench_tuning::FALLBACK_WINDOW_SIZE) {
                     buf2[n2++] = buf1[i];
                 }
             }
 
-            if (n2 < 8) {
+            if (n2 < bench_tuning::FALLBACK_MIN_SAMPLES) {
                 summary.rolling_baseline_ms = median_t1;
             } else {
                 // Invariant: buf2 is a monotonic subsequence (prefix) of sorted buf1, so it is strictly sorted.

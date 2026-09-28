@@ -9,11 +9,12 @@
 namespace stuttometer {
 
 CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_config, std::ostream& out, std::ostream& err) {
+    // Future Profile Roadmap: User-defined thresholds can be ingested via JSON configuration profiles (e.g. --profile simracing.json).
     CLI::App app{"Stuttometer - Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"};
 
     double window_pre_ms = 250.0;
     double window_post_ms = 30.0;
-    double present_threshold_ms = 16.67;
+    double present_threshold_ms = DEFAULT_60HZ_VBLANK_MS;
     bool enable_audio = true;
     double cooldown_ms = 1000.0;
     uint32_t dpc_threshold_us = 1000;
@@ -26,7 +27,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     uint32_t mem_alloc_threshold_mb = 16;
     uint32_t mem_trim_threshold_mb = 4;
     uint32_t mem_physical_latency_us = 1000;
-    uint32_t buffer_slots = 262144;
+    uint32_t buffer_slots = DEFAULT_BUFFER_SLOTS;
     uint32_t target_pid = 0;
     std::string target_process_name;
     std::string output_file;
@@ -40,18 +41,23 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     std::string trigger_mode_str = "hybrid";
     std::string pacing_profile_str;
     bool high_refresh_preset = false;
-    double spike_multiplier = 2.0;
-    double min_spike_delta_ms = 4.0;
+    double spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
+    double min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     bool enable_judder = true;
-    double judder_swing_ratio = 0.35;
+    double judder_swing_ratio = pacing_tuning::DEFAULT_JUDDER_SWING_RATIO;
     std::string dump_events_path;
     size_t dump_max_mb = 100;
     size_t dump_max_files = 3;
     std::string export_csv_path;
 
+    char present_thresh_help[128];
+    std::snprintf(present_thresh_help, sizeof(present_thresh_help),
+                  "DXGI Present stutter threshold in ms (2.0-200.0, default: %.2f)",
+                  DEFAULT_60HZ_VBLANK_MS);
+
     app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (50-1000, default: 250)");
     app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (0-200, default: 30)");
-    app.add_option("--present-threshold-ms", present_threshold_ms, "DXGI Present stutter threshold in ms (2.0-200.0, default: 16.67)");
+    app.add_option("--present-threshold-ms", present_threshold_ms, present_thresh_help);
     app.add_option("--trigger-mode", trigger_mode_str, "Frame trigger mode: hybrid, dynamic, static (default: hybrid)");
     app.add_option("--pacing-profile", pacing_profile_str, "Pacing sensitivity profile: auto, high-refresh, conservative (default: auto)");
     app.add_flag("--high-refresh", high_refresh_preset, "Alias for --pacing-profile high-refresh");
@@ -71,7 +77,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     app.add_option("--mem-alloc-threshold-mb", mem_alloc_threshold_mb, "VirtualAlloc commit stall threshold in MB (1-1024, default: 16)");
     app.add_option("--mem-trim-threshold-mb", mem_trim_threshold_mb, "Working set out-swap trim threshold in MB (1-1024, default: 4)");
     app.add_option("--mem-physical-latency-us", mem_physical_latency_us, "Physical memory / MDL allocation latency threshold in us (50-50000, default: 1000)");
-    app.add_option("--buffer-slots", buffer_slots, "Ring buffer capacity in slots (65536-1048576, default: 262144)");
+    app.add_option("--buffer-slots", buffer_slots, "Ring buffer capacity in slots (65536-1048576, default: 262144)"); // MAX_BUFFER_SLOTS
     app.add_option("--target-pid", target_pid, "Target Process ID to monitor (default: 0 = monitor all)");
     app.add_option("--target-process", target_process_name, "Target process name substring (e.g. Game.exe)");
     app.add_option("--output", output_file, "Output file path for JSON reports (overwritten on each trigger if max-reports != 1; use --output-dir to save all reports)");
@@ -150,8 +156,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     // Assign multiplier & delta based on resolved profile
     if (resolved_profile == PacingProfile::AUTO_ADAPTIVE) {
-        spike_multiplier = 2.0;
-        min_spike_delta_ms = 4.0;
+        spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
+        min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     } else if (resolved_profile == PacingProfile::HIGH_REFRESH) {
         spike_multiplier = HIGH_REFRESH_SPIKE_MULTIPLIER;
         min_spike_delta_ms = HIGH_REFRESH_MIN_DELTA_MS;
@@ -159,8 +165,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         spike_multiplier = CONSERVATIVE_SPIKE_MULTIPLIER;
         min_spike_delta_ms = CONSERVATIVE_MIN_DELTA_MS;
     } else if (resolved_profile == PacingProfile::CUSTOM) {
-        if (!has_spike_mult) spike_multiplier = 2.0;
-        if (!has_min_delta) min_spike_delta_ms = 4.0;
+        if (!has_spike_mult) spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
+        if (!has_min_delta) min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     }
 
     // Notice when --trigger-mode static is combined with pacing profile
@@ -184,77 +190,27 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     }
 
     // CLI Range and Option Validation (after profile resolution, per NM7)
-    if (window_pre_ms < 50.0 || window_pre_ms > 1000.0) {
-        err << "[STUTTOMETER] Error: --window-ms must be between 50.0 and 1000.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (window_post_ms < 0.0 || window_post_ms > 200.0) {
-        err << "[STUTTOMETER] Error: --post-trigger-ms must be between 0.0 and 200.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (present_threshold_ms < 2.0 || present_threshold_ms > 200.0) {
-        err << "[STUTTOMETER] Error: --present-threshold-ms must be between 2.0 and 200.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (cooldown_ms < 100.0 || cooldown_ms > 10000.0) {
-        err << "[STUTTOMETER] Error: --cooldown-ms must be between 100.0 and 10000.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (dpc_threshold_us < 100 || dpc_threshold_us > 50000) {
-        err << "[STUTTOMETER] Error: --dpc-threshold-us must be between 100 and 50000 us.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (isr_threshold_us < 50 || isr_threshold_us > 50000) {
-        err << "[STUTTOMETER] Error: --isr-threshold-us must be between 50 and 50000 us.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (disk_threshold_ms < 1 || disk_threshold_ms > 1000) {
-        err << "[STUTTOMETER] Error: --disk-threshold-ms must be between 1 and 1000 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (cswitch_preempt_ms < 1 || cswitch_preempt_ms > 500) {
-        err << "[STUTTOMETER] Error: --cswitch-threshold-ms must be between 1 and 500 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (smi_severity_threshold_ms < 10.0 || smi_severity_threshold_ms > 100.0) {
-        err << "[STUTTOMETER] Error: --smi-threshold-ms must be between 10.0 and 100.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (d3d12_pso_threshold_ms < 1 || d3d12_pso_threshold_ms > 500) {
-        err << "[STUTTOMETER] Error: --d3d12-pso-threshold-ms must be between 1 and 500 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (vram_demoted_threshold_mb < 1 || vram_demoted_threshold_mb > 1024) {
-        err << "[STUTTOMETER] Error: --vram-threshold-mb must be between 1 and 1024 MB.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (mem_alloc_threshold_mb < 1 || mem_alloc_threshold_mb > 1024) {
-        err << "[STUTTOMETER] Error: --mem-alloc-threshold-mb must be between 1 and 1024 MB.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (mem_trim_threshold_mb < 1 || mem_trim_threshold_mb > 1024) {
-        err << "[STUTTOMETER] Error: --mem-trim-threshold-mb must be between 1 and 1024 MB.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (mem_physical_latency_us < 50 || mem_physical_latency_us > 50000) {
-        err << "[STUTTOMETER] Error: --mem-physical-latency-us must be between 50 and 50000 us.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (buffer_slots < 65536 || buffer_slots > 1048576) {
-        err << "[STUTTOMETER] Error: --buffer-slots must be between 65536 and 1048576.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
+    CliConfig temp_config;
+    temp_config.window_pre_ms = window_pre_ms;
+    temp_config.window_post_ms = window_post_ms;
+    temp_config.present_threshold_ms = present_threshold_ms;
+    temp_config.cooldown_ms = cooldown_ms;
+    temp_config.dpc_threshold_us = dpc_threshold_us;
+    temp_config.isr_threshold_us = isr_threshold_us;
+    temp_config.disk_threshold_ms = disk_threshold_ms;
+    temp_config.cswitch_preempt_ms = cswitch_preempt_ms;
+    temp_config.smi_severity_threshold_ms = smi_severity_threshold_ms;
+    temp_config.d3d12_pso_threshold_ms = d3d12_pso_threshold_ms;
+    temp_config.vram_demoted_threshold_mb = vram_demoted_threshold_mb;
+    temp_config.mem_alloc_threshold_mb = mem_alloc_threshold_mb;
+    temp_config.mem_trim_threshold_mb = mem_trim_threshold_mb;
+    temp_config.mem_physical_latency_us = mem_physical_latency_us;
+    temp_config.buffer_slots = buffer_slots;
+    temp_config.spike_multiplier = spike_multiplier;
+    temp_config.min_spike_delta_ms = min_spike_delta_ms;
+    temp_config.judder_swing_ratio = judder_swing_ratio;
 
-    if (spike_multiplier < 1.2 || spike_multiplier > 10.0) {
-        err << "[STUTTOMETER] Error: --spike-multiplier must be between 1.2 and 10.0.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (min_spike_delta_ms < 1.0 || min_spike_delta_ms > 50.0) {
-        err << "[STUTTOMETER] Error: --min-spike-delta-ms must be between 1.0 and 50.0 ms.\n";
-        return CliParseResult::EXIT_ERROR;
-    }
-    if (judder_swing_ratio < 0.1 || judder_swing_ratio > 0.9) {
-        err << "[STUTTOMETER] Error: --judder-swing-ratio must be between 0.1 and 0.9.\n";
+    if (!validate_all_cli_ranges(err, temp_config)) {
         return CliParseResult::EXIT_ERROR;
     }
 

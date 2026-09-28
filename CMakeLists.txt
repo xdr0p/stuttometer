@@ -69,13 +69,14 @@ add_library(stuttometer_core STATIC
   src/csv_exporter.cpp
   src/ndjson_writer.cpp
   src/cli_parser.cpp
-  src/etw_kernel_opcodes.hpp
+  include/stuttometer/internal/etw_kernel_opcodes.hpp
   src/etw_handlers_dxgi.cpp
   src/etw_handlers_dxgkrnl.cpp
   src/etw_handlers_user_providers.cpp
   src/etw_handlers_memory.cpp
   src/etw_handlers_kernel_mof.cpp
   src/gui_config.cpp
+  src/process_watcher.cpp
 )
 
 target_include_directories(stuttometer_core

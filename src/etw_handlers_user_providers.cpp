@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string_view>
+#include "stuttometer/constants.hpp"
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
@@ -34,7 +35,7 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
 
     const double vblank_ms = (trigger_engine_.vblank_interval_ms() > 0.0) 
         ? trigger_engine_.vblank_interval_ms() 
-        : 16.67;
+        : DEFAULT_60HZ_VBLANK_MS;
     uint32_t glitch_type = 0;
     uint32_t missed_vblanks = 0;
     if (p_event->UserDataLength >= 8 && p_event->UserData) {
@@ -44,11 +45,11 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
     }
     rec.auxiliary_data = glitch_type;
     const double dur_ms = (missed_vblanks >= 1) ? (missed_vblanks * vblank_ms) : vblank_ms;
-    rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1000.0, static_cast<double>(KERNEL_SINGLE_EVENT_CAP_US)));
+    rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, DWM_MIN_GLITCH_DURATION_US, static_cast<double>(KERNEL_SINGLE_EVENT_CAP_US)));
 
     bool is_dedup = false;
-    const uint64_t dedup_window_qpc = ms_to_qpc_delta(50.0, qpc_freq_);
-    for (size_t i = 0; i < 16; ++i) {
+    const uint64_t dedup_window_qpc = ms_to_qpc_delta(DWM_DEDUP_WINDOW_MS, qpc_freq_);
+    for (size_t i = 0; i < DWM_DEDUP_BUFFER_SIZE; ++i) {
         uint64_t recent_ts = recent_dwm_glitches_qpc_[i].load(std::memory_order_acquire);
         if (recent_ts > 0) {
             const uint64_t delta_qpc = (ctx.timestamp >= recent_ts) ? (ctx.timestamp - recent_ts) : (recent_ts - ctx.timestamp);
@@ -62,7 +63,7 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
     if (is_dedup) {
         rec.flags |= EventFlags::DWM_GLITCH_DEDUPLICATED;
     } else {
-        uint32_t slot = (recent_dwm_glitch_idx_.fetch_add(1, std::memory_order_relaxed)) & 15;
+        uint32_t slot = (recent_dwm_glitch_idx_.fetch_add(1, std::memory_order_relaxed)) & (DWM_DEDUP_BUFFER_SIZE - 1);
         recent_dwm_glitches_qpc_[slot].store(ctx.timestamp, std::memory_order_release);
     }
 

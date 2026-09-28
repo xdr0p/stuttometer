@@ -11,10 +11,12 @@
 
 namespace stuttometer {
 
+inline constexpr double MIN_ATTRIBUTION_CONFIDENCE = 0.30;
+
 struct CorrelateOptions {
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{16.67};
+    double present_threshold_ms{DEFAULT_60HZ_VBLANK_MS};
     double hardware_vblank_ms{0.0};
     std::string provider_tier{"standard"};
     bool redact{false};
@@ -123,16 +125,16 @@ enum class AttributionTag {
 enum class MetricSeverity : uint8_t { NORMAL = 0, WARNING = 1, DANGER = 2 };
 
 [[nodiscard]] inline MetricSeverity compute_duration_severity_fallback(
-    double duration_ms, double ref_ms = 16.67
+    double duration_ms, double ref_ms = DEFAULT_60HZ_VBLANK_MS
 ) noexcept {
-    const double ref = (ref_ms > 0.0) ? ref_ms : 16.67;
+    const double ref = (ref_ms > 0.0) ? ref_ms : DEFAULT_60HZ_VBLANK_MS;
     if (duration_ms >= (3.0 * ref)) return MetricSeverity::DANGER;
     if (duration_ms >= (1.5 * ref)) return MetricSeverity::WARNING;
     return MetricSeverity::NORMAL;
 }
 
 [[nodiscard]] AttributionTag attribution_tag_for_hypothesis(std::string_view hypothesis) noexcept;
-[[nodiscard]] MetricSeverity classify_severity(const TriggerInfo& trigger, double present_threshold_ms = 16.67) noexcept;
+[[nodiscard]] MetricSeverity classify_severity(const TriggerInfo& trigger, double present_threshold_ms = DEFAULT_60HZ_VBLANK_MS) noexcept;
 
 constexpr std::string_view attribution_to_string(AttributionTag tag) noexcept {
     switch (tag) {
@@ -164,7 +166,7 @@ struct DiagnosticReport {
 
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
-    double present_threshold_ms{16.67};
+    double present_threshold_ms{DEFAULT_60HZ_VBLANK_MS};
     double hardware_vblank_ms{0.0};
     std::string provider_tier{"standard"};
     bool redacted{false};

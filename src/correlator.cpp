@@ -1,4 +1,5 @@
 #include "stuttometer/correlator.hpp"
+#include "stuttometer/internal/severity_scales.hpp"
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -181,7 +182,7 @@ MetricSeverity classify_severity(const TriggerInfo& trigger, double present_thre
 
 AttributionResult compute_attribution(const DiagnosticReport& report, uint32_t cached_dwm_pid) {
     try {
-        if (report.diagnoses.empty() || report.diagnoses[0].confidence < 0.30) {
+        if (report.diagnoses.empty() || report.diagnoses[0].confidence < MIN_ATTRIBUTION_CONFIDENCE) {
             return AttributionResult{
                 .tag = AttributionTag::UNKNOWN,
                 .pid = 0,
@@ -509,8 +510,8 @@ DiagnosticReport CorrelationEngine::correlate(
         });
 
         const auto& worst = dpc_candidates.front();
-        const double duration_severity = detail::severity_linear(worst.record.duration_us, 3000.0);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 150.0);
+        const double duration_severity = detail::severity_linear(worst.record.duration_us, detail::severity::DPC_ISR_SCALE_US);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::DPC_ISR_WINDOW_MS);
         const double core_match = detail::core_affinity(worst.record.cpu_index, trigger.cpu_index, 0.5);
 
         // Weights sum to 0.98 max (0.40 base + 0.35 duration + 0.15 temporal + 0.08 core)
@@ -548,9 +549,9 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = disk_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = detail::severity_linear(lat_ms, 60.0);
+        const double duration_severity = detail::severity_linear(lat_ms, detail::severity::DISK_IO_SCALE_MS);
         const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.5, 0.0);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::GENERAL_WINDOW_MS);
 
         const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.35, duration_severity, 0.15, is_target_proc, 0.10, temporal_proximity);
 
@@ -585,8 +586,8 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = cswitch_candidates.front();
         const double preempt_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = detail::severity_linear(preempt_ms, 20.0);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 100.0);
+        const double duration_severity = detail::severity_linear(preempt_ms, detail::severity::CSWITCH_SCALE_MS);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::CSWITCH_WINDOW_MS);
         const double core_match = detail::core_affinity(worst.record.cpu_index, trigger.cpu_index, (trigger.target_tid != 0 ? 0.5 : 0.4));
         const double confidence = detail::confidence_weighted(trigger.target_tid != 0 ? 0.40 : 0.35, 0.0, 1.0, 0.30, duration_severity, 0.10, temporal_proximity, 0.05, core_match);
 
@@ -668,12 +669,15 @@ DiagnosticReport CorrelationEngine::correlate(
         Diagnosis diag;
         diag.hypothesis = "gpu_pipeline_stall";
 
-        const double raw_conf = 0.60 + std::min(trigger.duration_ms / 100.0, 0.30);
+        const double raw_conf = detail::severity::gpu_stall::CONFIDENCE_BASE + 
+            std::min(trigger.duration_ms / detail::severity::gpu_stall::DURATION_DIVISOR_MS, detail::severity::gpu_stall::CONFIDENCE_BONUS_CAP);
         const bool is_dxgi_relative_spike =
             (trigger.source == TriggerSource::DXGI_PRESENT_STUTTER &&
              trigger.reason == TriggerReason::RELATIVE_SPIKE);
-        diag.confidence = std::clamp(is_dxgi_relative_spike ? raw_conf * 0.90 : raw_conf, 0.50, 0.90);
-        diag.factors = { std::min(trigger.duration_ms / 50.0, 1.0), 0.5, 1.0 };
+        diag.confidence = std::clamp(is_dxgi_relative_spike ? raw_conf * detail::severity::gpu_stall::DXGI_RELATIVE_PENALTY : raw_conf,
+                                     detail::severity::gpu_stall::MIN_CONFIDENCE,
+                                     detail::severity::gpu_stall::MAX_CONFIDENCE);
+        diag.factors = { std::min(trigger.duration_ms / detail::severity::gpu_stall::FACTOR_DURATION_DIVISOR_MS, 1.0), 0.5, 1.0 };
 
         std::stringstream ss;
         ss << "Display frame delivery stall detected via ";
@@ -705,7 +709,7 @@ DiagnosticReport CorrelationEngine::correlate(
         ev.cpu_core = trigger.cpu_index;
         ev.offset_from_trigger_ms = 0.0;
         ev.pid = trigger.target_pid;
-        ev.extra_info = "In titles utilizing GPU DirectStorage (e.g. Marvel's Spider-Man 2), GPU decompression compute shaders share execution queues with graphics rendering. If permitted by the game build/anti-cheat, test temporarily renaming dstorage.dll and dstoragecore.dll to isolate.";
+        ev.extra_info = "In titles utilizing GPU DirectStorage (e.g. titles using DirectStorage 1.2+ / GPU decompression), GPU decompression compute shaders share execution queues with graphics rendering. If permitted by the game build/anti-cheat, test temporarily renaming dstorage.dll and dstoragecore.dll to isolate.";
         diag.evidence.push_back(std::move(ev));
 
         hypotheses.push_back(std::move(diag));
@@ -724,8 +728,8 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const double ref_vblank_ms = (trigger.baseline_avg_ms > 0.0) 
             ? trigger.baseline_avg_ms 
-            : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : 16.67);
-        const double duration_severity = detail::severity_linear(effective_dur_ms, 3.0 * ref_vblank_ms);
+            : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : DEFAULT_60HZ_VBLANK_MS);
+        const double duration_severity = detail::severity_linear(effective_dur_ms, detail::severity::DWM_REF_VBLANK_MULTIPLIER * ref_vblank_ms);
         const double confidence = detail::confidence_weighted(0.50, 0.50, 0.75, 0.25, duration_severity);
 
         Diagnosis diag;
@@ -766,9 +770,9 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = pagefault_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = detail::severity_linear(lat_ms, 30.0);
+        const double duration_severity = detail::severity_linear(lat_ms, detail::severity::PAGE_FAULT_SCALE_MS);
         const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.5, 0.0);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::GENERAL_WINDOW_MS);
 
         const double confidence = detail::confidence_weighted(0.40, 0.0, 0.90, 0.30, duration_severity, 0.20, is_target_proc, 0.10, temporal_proximity);
 
@@ -797,7 +801,7 @@ DiagnosticReport CorrelationEngine::correlate(
 
     // 8. Thermal Throttle Hypothesis
     if (thermal.detected) {
-        const double cap_severity = detail::severity_linear(static_cast<double>(thermal.cap_seconds), 20.0);
+        const double cap_severity = detail::severity_linear(static_cast<double>(thermal.cap_seconds), detail::severity::THERMAL_THROTTLE_SCALE_MS);
         const double confidence = detail::confidence_weighted(0.40, 0.40, 0.80, 0.35, cap_severity);
         Diagnosis diag;
         diag.hypothesis = "thermal_throttle";
@@ -821,9 +825,9 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = antimalware_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = detail::severity_linear(lat_ms, 50.0);
-        const double scan_count_factor = detail::severity_linear(static_cast<double>(antimalware_candidates.size()), 5.0);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
+        const double duration_severity = detail::severity_linear(lat_ms, detail::severity::DEFENDER_DURATION_MS);
+        const double scan_count_factor = detail::severity_linear(static_cast<double>(antimalware_candidates.size()), detail::severity::DEFENDER_SCAN_COUNT);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::GENERAL_WINDOW_MS);
 
         const double confidence = detail::confidence_weighted(0.35, 0.0, 0.85, 0.25, duration_severity, 0.15, scan_count_factor, 0.10, temporal_proximity);
 
@@ -860,10 +864,10 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = d3d12_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
-        const double duration_severity = detail::severity_linear(lat_ms, 30.0);
+        const double duration_severity = detail::severity_linear(lat_ms, detail::severity::PSO_STALL_SCALE_MS);
         const double is_target_thread = (trigger.target_tid != 0 && trigger.target_tid == worst.record.tid) ? 1.0
                                       : (trigger.target_pid != 0 && trigger.target_pid == worst.record.pid ? 0.8 : (trigger.target_pid == 0 ? 0.5 : 0.1));
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::GENERAL_WINDOW_MS);
 
         const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.35, duration_severity, 0.15, is_target_thread, 0.10, temporal_proximity);
 
@@ -898,12 +902,12 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = vram_candidates.front();
         const double max_demoted_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double duration_severity = detail::severity_linear(max_demoted_mb, 64.0);
+        const double duration_severity = detail::severity_linear(max_demoted_mb, detail::severity::VRAM_OVERCOMMIT_SCALE_MB);
         const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.6, 0.0);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 100.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::VRAM_WINDOW_MS);
 
         // Base score is 0.15; reaches >= 0.30 only with meaningful target attribution or severe demotion
-        const double confidence = detail::confidence_weighted(0.15, 0.0, 0.95, 0.35, duration_severity, 0.35, is_target_proc, 0.15, temporal_proximity);
+        const double confidence = detail::confidence_weighted(detail::severity::VRAM_BASE_CONFIDENCE, 0.0, 0.95, 0.35, duration_severity, 0.35, is_target_proc, 0.15, temporal_proximity);
 
         Diagnosis diag;
         diag.hypothesis = "vram_exhaustion_paging_stall";
@@ -945,9 +949,9 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = mem_alloc_candidates.front();
         const double alloc_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double size_severity = detail::severity_linear(alloc_mb, 64.0);
+        const double size_severity = detail::severity_linear(alloc_mb, detail::severity::VIRTUAL_ALLOC_SCALE_MB);
         const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.6, 0.2);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::GENERAL_WINDOW_MS);
 
         const double confidence = detail::confidence_weighted(0.45, 0.0, 0.95, 0.30, size_severity, 0.15, is_target_proc, 0.10, temporal_proximity);
 
@@ -982,10 +986,10 @@ DiagnosticReport CorrelationEngine::correlate(
 
         const auto& worst = mem_trim_candidates.front();
         const double trim_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double trim_severity = detail::severity_linear(trim_mb, 32.0);
-        const double duration_factor = (worst.record.duration_us > 0) ? detail::severity_linear(worst.record.duration_us, 10000.0) : 0.5;
+        const double trim_severity = detail::severity_linear(trim_mb, detail::severity::WORKING_SET_TRIM_SCALE_MB);
+        const double duration_factor = (worst.record.duration_us > 0) ? detail::severity_linear(worst.record.duration_us, detail::severity::PHYS_MEM_DURATION_US) : 0.5;
         const double is_target_proc = detail::target_pid_affinity(worst.record.pid, trigger.target_pid, 0.6, 0.2);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::GENERAL_WINDOW_MS);
 
         const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.25, trim_severity, 0.15, duration_factor, 0.10, is_target_proc, 0.10, temporal_proximity);
 
@@ -1029,9 +1033,9 @@ DiagnosticReport CorrelationEngine::correlate(
         const auto& worst = mem_physical_candidates.front();
         const double lat_ms = worst.record.duration_us / 1000.0;
         const double alloc_mb = worst.record.auxiliary_data / (1024.0 * 1024.0);
-        const double latency_severity = detail::severity_linear(worst.record.duration_us, 10000.0);
-        const double size_factor = detail::severity_linear(alloc_mb, 32.0);
-        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, 200.0);
+        const double latency_severity = detail::severity_linear(worst.record.duration_us, detail::severity::PHYS_MEM_DURATION_US);
+        const double size_factor = detail::severity_linear(alloc_mb, detail::severity::PHYS_MEM_SIZE_MB);
+        const double temporal_proximity = detail::proximity_decay(worst.offset_ms, detail::severity::proximity::GENERAL_WINDOW_MS);
 
         const double confidence = detail::confidence_weighted(0.40, 0.0, 0.95, 0.35, latency_severity, 0.15, size_factor, 0.10, temporal_proximity);
 
@@ -1079,7 +1083,7 @@ DiagnosticReport CorrelationEngine::correlate(
     // 16. Constrained SMI / Unprofiled Hardware Gap Check
     const double ref_smi_cadence_ms = (trigger.baseline_avg_ms > 0.0)
         ? trigger.baseline_avg_ms
-        : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : 16.67);
+        : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : DEFAULT_60HZ_VBLANK_MS);
     const double effective_smi_threshold = (thresholds_.auto_scale_smi)
         ? (2.0 * ref_smi_cadence_ms)
         : thresholds_.smi_severity_threshold_ms;
@@ -1098,8 +1102,8 @@ DiagnosticReport CorrelationEngine::correlate(
         no_preemption_anomaly) {
         Diagnosis diag;
         diag.hypothesis = "unprofiled_hardware_or_smi_stall";
-        diag.confidence = provider_ctx.kernel_cswitch_active ? 0.35 : 0.30; // Strictly capped <= 0.35
-        diag.factors = { 0.35, 0.0, 1.0 };
+        diag.confidence = provider_ctx.kernel_cswitch_active ? detail::severity::SMI_CAP_WITH_CSWITCH : detail::severity::SMI_CAP_WITHOUT_CSWITCH; // Strictly capped <= 0.35
+        diag.factors = { detail::severity::SMI_CAP_WITH_CSWITCH, 0.0, 1.0 };
         diag.summary = (trigger.source == TriggerSource::AUDIO_GLITCH)
             ? "Audio buffer underrun occurred without corresponding software DPC/ISR or context-switch stalls. "
               "Unprofiled hardware interrupt or BIOS SMI is suspected."
@@ -1192,15 +1196,16 @@ DiagnosticReport CorrelationEngine::correlate(
                 size_t take_pre = 0;
                 size_t take_post = 0;
 
-                if (avail_pre < 512) {
+                constexpr size_t half_timeline = DiagnosticReport::MAX_TIMELINE_POINTS / 2;
+                if (avail_pre < half_timeline) {
                     take_pre = avail_pre;
                     take_post = std::min(avail_post, DiagnosticReport::MAX_TIMELINE_POINTS - avail_pre);
-                } else if (avail_post < 512) {
+                } else if (avail_post < half_timeline) {
                     take_post = avail_post;
                     take_pre = std::min(avail_pre, DiagnosticReport::MAX_TIMELINE_POINTS - avail_post);
                 } else {
-                    take_pre = 512;
-                    take_post = 512;
+                    take_pre = half_timeline;
+                    take_post = half_timeline;
                 }
 
                 start_idx = anchor_idx - take_pre;

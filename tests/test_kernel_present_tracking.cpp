@@ -5,6 +5,7 @@
 #include "stuttometer/json_reporter.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include "stuttometer/session_benchmark.hpp"
+#include <stuttometer/internal/dxgkrnl_layout.hpp>
 #include <iostream>
 #include <unordered_set>
 
@@ -399,9 +400,9 @@ static void test_dxgkrnl_task17_flip_parsing_and_dwm_filtering() {
     const uint64_t expected_alloc = 0xABCD1234DEADBEEFULL;
     const uint32_t expected_present_id = 4242;
 
-    std::memcpy(payload + 8, &expected_vidpn, 4);
-    std::memcpy(payload + 16, &expected_alloc, 8);
-    std::memcpy(payload + 36, &expected_present_id, 4);
+    std::memcpy(payload + stuttometer::dxgkrnl_layout::task17::OFFSET_VIDPN_SOURCE_ID, &expected_vidpn, 4);
+    std::memcpy(payload + stuttometer::dxgkrnl_layout::task17::OFFSET_FLIP_TO_DRIVER_ALLOCATION, &expected_alloc, 8);
+    std::memcpy(payload + stuttometer::dxgkrnl_layout::task17::OFFSET_FLIP_PRESENT_ID, &expected_present_id, 4);
 
     // 1. Normal game flip (PID 5555)
     EVENT_RECORD ev_game{};

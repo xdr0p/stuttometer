@@ -13,6 +13,20 @@
 
 namespace stuttometer::gui {
 
+namespace {
+namespace sound_tuning {
+    constexpr uint32_t SAMPLE_RATE_HZ         = 44100;
+    constexpr float    FADE_FRACTION          = 0.008f;
+    constexpr float    DECAY_STRENGTH         = 0.20f;
+    constexpr float    START_CUE_FREQ_HZ      = 1000.0f;
+    constexpr float    START_CUE_DURATION_SEC = 0.10f;
+    constexpr float    START_CUE_VOLUME       = 0.40f;
+    constexpr float    STOP_CUE_FREQ_HZ       = 700.0f;
+    constexpr float    STOP_CUE_DURATION_SEC  = 0.09f;
+    constexpr float    STOP_CUE_VOLUME        = 0.28f;
+}
+} // anonymous namespace
+
 // Pure Tone Synthesizer for High-Precision Audio Cues (Zero disk files, zero latency, in-memory WASAPI/PlaySound)
 std::vector<uint8_t> generate_sine_wav(float freq_hz, float duration_sec, float volume) {
     if (freq_hz <= 0.0f || duration_sec <= 0.0f || volume <= 0.0f) {
@@ -20,7 +34,7 @@ std::vector<uint8_t> generate_sine_wav(float freq_hz, float duration_sec, float 
     }
     volume = std::clamp(volume, 0.0f, 1.0f);
 
-    uint32_t sample_rate = 44100;
+    uint32_t sample_rate = sound_tuning::SAMPLE_RATE_HZ;
     uint32_t total_samples = static_cast<uint32_t>(sample_rate * duration_sec);
     if (total_samples == 0) {
         return {};
@@ -58,7 +72,7 @@ std::vector<uint8_t> generate_sine_wav(float freq_hz, float duration_sec, float 
     std::memcpy(p + 40, &data_size, 4);
 
     int16_t* samples = reinterpret_cast<int16_t*>(p + 44);
-    uint32_t fade_samples = std::min(static_cast<uint32_t>(sample_rate * 0.008f), total_samples / 2); // anti-click fade envelope
+    uint32_t fade_samples = std::min(static_cast<uint32_t>(sample_rate * sound_tuning::FADE_FRACTION), total_samples / 2); // anti-click fade envelope
 
     constexpr float pi = std::numbers::pi_v<float>;
 
@@ -71,7 +85,7 @@ std::vector<uint8_t> generate_sine_wav(float freq_hz, float duration_sec, float 
         }
         float t = static_cast<float>(i) / sample_rate;
         float sample_val = std::sin(2.0f * pi * freq_hz * t);
-        float decayed_gain = gain * (1.0f - 0.20f * (static_cast<float>(i) / total_samples));
+        float decayed_gain = gain * (1.0f - sound_tuning::DECAY_STRENGTH * (static_cast<float>(i) / total_samples));
         int16_t sample_i16 = static_cast<int16_t>(sample_val * decayed_gain * volume * 32767.0f);
         samples[i] = sample_i16;
     }
@@ -87,9 +101,9 @@ static std::once_flag g_wav_init_once;
 void play_capture_sound(bool starting) {
     std::call_once(g_wav_init_once, []() {
         // Start: Crisp, comfortable continuous tone (1000 Hz, 100ms, 40% volume)
-        g_wav_start = generate_sine_wav(1000.0f, 0.10f, 0.40f);
+        g_wav_start = generate_sine_wav(sound_tuning::START_CUE_FREQ_HZ, sound_tuning::START_CUE_DURATION_SEC, sound_tuning::START_CUE_VOLUME);
         // Stop: Softer, easily audible completion tone (700 Hz, 90ms, 28% volume)
-        g_wav_stop  = generate_sine_wav(700.0f, 0.09f, 0.28f);
+        g_wav_stop  = generate_sine_wav(sound_tuning::STOP_CUE_FREQ_HZ, sound_tuning::STOP_CUE_DURATION_SEC, sound_tuning::STOP_CUE_VOLUME);
     });
 
     const auto& wav = starting ? g_wav_start : g_wav_stop;

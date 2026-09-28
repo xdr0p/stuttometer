@@ -1,7 +1,52 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 
 namespace stuttometer {
+
+inline constexpr uint64_t PAGE_SIZE_BYTES = 4096ULL;
+inline constexpr uint64_t VIRTUAL_ALLOC_MIN_SEVERE_BYTES = 4ULL * 1024 * 1024;
+inline constexpr uint32_t MIN_BUFFER_SLOTS = 65536;
+inline constexpr uint32_t DEFAULT_BUFFER_SLOTS = 262144;
+inline constexpr uint32_t MAX_BUFFER_SLOTS = 1048576;
+static_assert(MIN_BUFFER_SLOTS <= DEFAULT_BUFFER_SLOTS && DEFAULT_BUFFER_SLOTS <= MAX_BUFFER_SLOTS,
+              "Buffer slot bounds invariant violated");
+static_assert((MIN_BUFFER_SLOTS & (MIN_BUFFER_SLOTS - 1)) == 0,
+              "MIN_BUFFER_SLOTS must be a power of 2 for bitmask indexing");
+static_assert((DEFAULT_BUFFER_SLOTS & (DEFAULT_BUFFER_SLOTS - 1)) == 0,
+              "DEFAULT_BUFFER_SLOTS must be a power of 2 for bitmask indexing");
+static_assert((MAX_BUFFER_SLOTS & (MAX_BUFFER_SLOTS - 1)) == 0,
+              "MAX_BUFFER_SLOTS must be a power of 2 for bitmask indexing");
+
+inline constexpr double   DEFAULT_60HZ_VBLANK_MS = 16.67;
+inline constexpr double   TRIGGER_WATCHDOG_MS = 5000.0;
+inline constexpr double   VBLANK_WARNING_FACTOR = 2.0;
+inline constexpr uint32_t POST_TRIGGER_DRAIN_BUDGET_MS = 30;
+inline constexpr uint32_t POST_TRIGGER_DRAIN_STEP_MS = 1;
+
+// ETW Buffer Configuration (uint32_t implicitly converts to ULONG in Win32 APIs without Windows.h dependency)
+inline constexpr uint32_t ETW_BUFFER_SIZE_KB   = 128;
+inline constexpr uint32_t ETW_MIN_BUFFERS       = 16;
+inline constexpr uint32_t ETW_MAX_BUFFERS       = 64;
+inline constexpr uint32_t ETW_FLUSH_TIMER_SEC   = 1;
+
+// DWM Glitch Deduplication (size_t matches internal array capacity & bitmask indexing)
+inline constexpr double DWM_MIN_GLITCH_DURATION_US = 1000.0;
+inline constexpr double DWM_DEDUP_WINDOW_MS        = 50.0;
+inline constexpr size_t DWM_DEDUP_BUFFER_SIZE      = 16;
+static_assert((DWM_DEDUP_BUFFER_SIZE & (DWM_DEDUP_BUFFER_SIZE - 1)) == 0,
+              "DWM_DEDUP_BUFFER_SIZE must be a power of 2 for bitmask indexing");
+
+namespace eviction_age_ms {
+    inline constexpr double PRESENT_TABLE          = 5000.0;
+    inline constexpr double DISK_TABLE             = 3000.0;
+    inline constexpr double SCAN_TABLE             = 12000.0;
+    inline constexpr double THREAD_TABLE           = 5000.0;
+    inline constexpr double TID_PID_TABLE          = 15000.0;
+    inline constexpr double PRESENT_AND_FLIP_TABLE = 30000.0;
+    inline constexpr double PSO_TABLE              = 12000.0;
+    inline constexpr double WS_TRIM_TABLE          = 12000.0;
+}
 
 // 2.0s ceiling: any gap >= 2.0s is a loading screen, cutscene, Alt-Tab, or scene transition
 constexpr double   PAUSE_CEILING_MS = 2000.0;

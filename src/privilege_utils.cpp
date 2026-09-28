@@ -143,7 +143,7 @@ void DriverSymbolResolver::refresh(bool force) const {
     const uint64_t qpc_freq = get_qpc_frequency();
     if (!force) {
         const uint64_t last = last_refresh_qpc_.load(std::memory_order_relaxed);
-        if (last > 0 && qpc_delta_to_ms(now_qpc - last, qpc_freq) < 5000.0) {
+        if (last > 0 && qpc_delta_to_ms(now_qpc - last, qpc_freq) < privilege_tuning::DRIVER_REFRESH_RATE_LIMIT_MS) {
             return; // Rate-limit: avoid spamming EnumDeviceDrivers more than once per 5 seconds
         }
     }
@@ -199,7 +199,7 @@ std::string DriverSymbolResolver::resolve_driver_name(uint64_t routine_address) 
         );
         if (it != drivers.end()) {
             const size_t index = std::distance(drivers.begin(), it);
-            constexpr uint64_t MAX_DRIVER_SPAN = 128ULL * 1024 * 1024; // 128 MB max driver text span
+            constexpr uint64_t MAX_DRIVER_SPAN = privilege_tuning::MAX_DRIVER_SPAN_BYTES; // 128 MB max driver text span
             const uint64_t upper_bound = (index > 0) ? drivers[index - 1].base_address : (it->base_address + MAX_DRIVER_SPAN);
             if (routine_address >= it->base_address && routine_address < upper_bound) {
                 return it->name;
@@ -229,7 +229,7 @@ std::string DriverSymbolResolver::resolve_driver_name(uint64_t routine_address) 
     const uint64_t now_qpc = get_current_qpc();
     const uint64_t qpc_freq = get_qpc_frequency();
     const uint64_t last = last_refresh_qpc_.load(std::memory_order_relaxed);
-    if (last == 0 || qpc_delta_to_ms(now_qpc - last, qpc_freq) >= 3000.0) {
+    if (last == 0 || qpc_delta_to_ms(now_qpc - last, qpc_freq) >= privilege_tuning::DRIVER_REFRESH_FALLBACK_MS) {
         refresh(true);
         current_drivers = drivers_.load(std::memory_order_acquire);
         if (current_drivers) {
@@ -261,7 +261,7 @@ std::string get_process_name_by_pid(uint32_t pid) {
         std::lock_guard<std::mutex> lock(cache_mutex);
         auto it = cache.find(pid);
         if (it != cache.end()) {
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second.cached_at).count() < 3) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second.cached_at).count() < privilege_tuning::PROCESS_NAME_TTL_SEC) {
                 return it->second.name;
             }
         }
@@ -283,17 +283,17 @@ std::string get_process_name_by_pid(uint32_t pid) {
 
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        if (cache.size() >= 512) {
+        if (cache.size() >= privilege_tuning::PROCESS_NAME_CACHE_CAPACITY) {
             // Evict stale entries older than 15s
             for (auto it = cache.begin(); it != cache.end(); ) {
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second.cached_at).count() > 15) {
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second.cached_at).count() > privilege_tuning::PROCESS_NAME_STALE_SEC) {
                     it = cache.erase(it);
                 } else {
                     ++it;
                 }
             }
             // If still full, prune the oldest 128 entries (25%) instead of nuking the entire cache
-            if (cache.size() >= 512) {
+            if (cache.size() >= privilege_tuning::PROCESS_NAME_CACHE_CAPACITY) {
                 std::vector<std::pair<uint32_t, std::chrono::steady_clock::time_point>> entries;
                 entries.reserve(cache.size());
                 for (const auto& [entry_pid, item] : cache) {
@@ -302,7 +302,7 @@ std::string get_process_name_by_pid(uint32_t pid) {
                 std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
                     return a.second < b.second;
                 });
-                for (size_t i = 0; i < 128 && i < entries.size(); ++i) {
+                for (size_t i = 0; i < privilege_tuning::PROCESS_NAME_PRUNE_COUNT && i < entries.size(); ++i) {
                     cache.erase(entries[i].first);
                 }
             }
@@ -378,8 +378,8 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
                 }
             } else {
                 const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.cached_at).count();
-                if (elapsed_ms < 250) {
-                    return 0; // Short 250ms negative cache TTL
+                if (elapsed_ms < privilege_tuning::PID_RESOLVE_NEGATIVE_TTL_MS) {
+                    return 0; // Short negative cache TTL
                 }
             }
         }
@@ -460,15 +460,15 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
 
     {
         std::lock_guard<std::mutex> lock(s_resolve_mutex);
-        if (s_resolve_cache.size() >= 64) {
+        if (s_resolve_cache.size() >= privilege_tuning::PID_RESOLVE_CACHE_CAPACITY) {
             for (auto it = s_resolve_cache.begin(); it != s_resolve_cache.end();) {
-                if ((now - it->second.cached_at) > std::chrono::milliseconds(2000)) {
+                if ((now - it->second.cached_at) > std::chrono::milliseconds(privilege_tuning::PID_RESOLVE_CACHE_STALE_MS)) {
                     it = s_resolve_cache.erase(it);
                 } else {
                     ++it;
                 }
             }
-            if (s_resolve_cache.size() >= 64) {
+            if (s_resolve_cache.size() >= privilege_tuning::PID_RESOLVE_CACHE_CAPACITY) {
                 std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> entries;
                 entries.reserve(s_resolve_cache.size());
                 for (const auto& [name_key, item] : s_resolve_cache) {
@@ -477,7 +477,7 @@ uint32_t resolve_process_name_to_pid(const std::string& process_name) {
                 std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
                     return a.second < b.second;
                 });
-                for (size_t i = 0; i < 16 && i < entries.size(); ++i) {
+                for (size_t i = 0; i < (privilege_tuning::PID_RESOLVE_CACHE_CAPACITY / 4) && i < entries.size(); ++i) {
                     s_resolve_cache.erase(entries[i].first);
                 }
             }
@@ -527,7 +527,7 @@ void rotate_directory_by_prefix(
 DisplayRefreshInfo query_display_refresh_info(uint32_t target_pid) noexcept {
     DisplayRefreshInfo info{};
     info.refresh_rate_hz = 60.0;
-    info.vblank_interval_ms = 16.67;
+    info.vblank_interval_ms = DEFAULT_60HZ_VBLANK_MS;
     info.query_succeeded = false;
 
     auto query_monitor = [](HMONITOR hmon, DisplayRefreshInfo& out_info) noexcept -> bool {

@@ -2,6 +2,7 @@
 #include "gui_state.hpp"
 #include "card_renderer.hpp"
 #include <stuttometer/json_reporter.hpp>
+#include "stuttometer/internal/gui_constants.hpp"
 
 #include <windows.h>
 #include <commdlg.h>
@@ -45,7 +46,7 @@ void copy_selected_report_json(HWND hwnd) {
     if (g_h_btn_copy) {
         SetWindowTextW(g_h_btn_copy, ok ? L"Copied \u2713" : L"Failed \u2715");
         InvalidateRect(g_h_btn_copy, NULL, TRUE);
-        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy), 1500, NULL);
+        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy), gui_constants::BUTTON_FEEDBACK_MS, NULL);
     }
 }
 
@@ -77,7 +78,7 @@ void export_selected_report_json(HWND hwnd) {
         if (g_h_btn_export) {
             SetWindowTextW(g_h_btn_export, ok ? L"Exported \u2713" : L"Failed \u2715");
             InvalidateRect(g_h_btn_export, NULL, TRUE);
-            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export), 1500, NULL);
+            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export), gui_constants::BUTTON_FEEDBACK_MS, NULL);
         }
     }
 }
@@ -97,7 +98,7 @@ void copy_selected_report_card(HWND hwnd) {
     if (g_h_btn_copy_card) {
         SetWindowTextW(g_h_btn_copy_card, ok ? L"Copied \u2713" : L"Failed \u2715");
         InvalidateRect(g_h_btn_copy_card, NULL, TRUE);
-        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy_card), 1500, NULL);
+        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy_card), gui_constants::BUTTON_FEEDBACK_MS, NULL);
     }
 }
 
@@ -126,7 +127,7 @@ void export_selected_report_card(HWND hwnd) {
         if (g_h_btn_export_card) {
             SetWindowTextW(g_h_btn_export_card, ok ? L"Exported \u2713" : L"Failed \u2715");
             InvalidateRect(g_h_btn_export_card, NULL, TRUE);
-            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export_card), 1500, NULL);
+            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export_card), gui_constants::BUTTON_FEEDBACK_MS, NULL);
         }
     }
 }

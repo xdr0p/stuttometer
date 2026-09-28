@@ -9,6 +9,9 @@
 
 #include "stuttometer/cli_parser.hpp"
 #include "stuttometer/version.hpp"
+#include "stuttometer/constants.hpp"
+#include "stuttometer/internal/gui_constants.hpp"
+#include "stuttometer/internal/process_watcher.hpp"
 #include <iostream>
 #include <iomanip>
 #include <atomic>
@@ -27,6 +30,7 @@ static std::atomic<bool> g_stop_requested{false};
 static std::atomic<bool> g_shutdown_done{false};
 static std::mutex g_shutdown_mutex;
 static std::condition_variable g_shutdown_cv;
+static stuttometer::ProcessWatcher g_watcher;
 
 static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
@@ -234,11 +238,13 @@ int main(int argc, char** argv) {
                   << disp_info.refresh_rate_hz << " Hz (vblank: " 
                   << std::fixed << std::setprecision(2) << disp_info.vblank_interval_ms << " ms)\n";
     } else {
-        std::cout << "[STUTTOMETER] Notice: Display refresh detection unavailable; defaulting to 60.0 Hz (16.67 ms).\n";
+        std::cout << "[STUTTOMETER] Notice: Display refresh detection unavailable; defaulting to 60.0 Hz ("
+                  << stuttometer::DEFAULT_60HZ_VBLANK_MS << " ms).\n";
     }
-    if (config.present_threshold_manual && (present_threshold_ms > 2.0 * disp_info.vblank_interval_ms)) {
+    if (config.present_threshold_manual && (present_threshold_ms > stuttometer::VBLANK_WARNING_FACTOR * disp_info.vblank_interval_ms)) {
         std::cout << "[STUTTOMETER] Notice: Configured stutter threshold (" 
-                  << std::fixed << std::setprecision(1) << present_threshold_ms << " ms) is >2.0x "
+                  << std::fixed << std::setprecision(1) << present_threshold_ms << " ms) is >"
+                  << std::setprecision(1) << stuttometer::VBLANK_WARNING_FACTOR << "x "
                   << "the detected display refresh interval ("
                   << disp_info.vblank_interval_ms << " ms, "
                   << std::setprecision(0) << disp_info.refresh_rate_hz << " Hz). "
@@ -291,29 +297,28 @@ int main(int argc, char** argv) {
     uint32_t loop_counter = 0;
 
     // Dedicated background thread for CLI process name watcher (eliminates main loop jitter)
-    std::thread watcher_thread;
     if (!target_pid_manual && !target_process_name.empty()) {
-        watcher_thread = std::thread([&]() {
-            while (!g_stop_requested.load(std::memory_order_relaxed)) {
-                const uint32_t found_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
-                if (found_pid != 0) {
-                    if (trigger_engine.try_attach_pid(found_pid)) {
-                        std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' active (PID " << found_pid << ")\n";
-                    }
-                } else {
-                    const uint32_t active = trigger_engine.active_target_pid();
-                    if (active != 0 && trigger_engine.try_detach_pid(active)) {
-                        std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' closed. Waiting for restart...\n";
-                    }
-                }
-
-                // Poll responsive 50ms while waiting for target to launch; poll ~2s once attached
-                const int sleep_steps = trigger_engine.is_target_waiting() ? 1 : 40;
-                for (int i = 0; i < sleep_steps && !g_stop_requested.load(std::memory_order_relaxed); ++i) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-            }
-        });
+        stuttometer::WatcherCallbacks callbacks;
+        callbacks.user_data = &trigger_engine;
+        callbacks.try_attach = [](uint32_t pid, void* ud) -> bool {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->try_attach_pid(pid);
+        };
+        callbacks.try_detach = [](uint32_t pid, void* ud) -> bool {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->try_detach_pid(pid);
+        };
+        callbacks.is_waiting = [](void* ud) -> bool {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->is_target_waiting();
+        };
+        callbacks.get_active_pid = [](void* ud) -> uint32_t {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->active_target_pid();
+        };
+        callbacks.on_attach_success = [](uint32_t pid, std::string_view name, void*) {
+            std::cout << "[STUTTOMETER] Target process '" << name << "' active (PID " << pid << ")\n";
+        };
+        callbacks.on_detach_success = [](uint32_t, std::string_view name, void*) {
+            std::cout << "[STUTTOMETER] Target process '" << name << "' closed. Waiting for restart...\n";
+        };
+        g_watcher.start(target_process_name, callbacks);
     }
 
     while (!g_stop_requested.load(std::memory_order_relaxed)) {
@@ -324,7 +329,7 @@ int main(int argc, char** argv) {
 
         ++loop_counter;
 
-        if (verbose && loop_counter % 500 == 0) {
+        if (verbose && loop_counter % stuttometer::gui_constants::VERBOSE_LOG_INTERVAL_LOOPS == 0) {
             std::cout << "[VERBOSE] Head: " << flight_recorder.current_head() 
                       << " | Upstream Lost Events: " << session_mgr.events_lost()
                       << " | Lost Buffers: " << session_mgr.buffers_lost()
@@ -344,11 +349,11 @@ int main(int argc, char** argv) {
             try {
                 // Synchronously flush active buffers and deterministically drain post-trigger window
                 session_mgr.flush_buffers();
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_BUDGET_MS);
                 while (session_mgr.last_processed_qpc() < to_qpc && std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_STEP_MS));
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_STEP_MS));
 
                 uint64_t drops = 0;
                 auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);
@@ -420,12 +425,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::gui_constants::SESSION_LOOP_SLEEP_MS));
     }
 
-    if (watcher_thread.joinable()) {
-        watcher_thread.join();
-    }
+    g_watcher.stop();
 
     std::cout << "\n[STUTTOMETER] Stopping trace sessions and cleaning up...\n";
     session_mgr.stop();

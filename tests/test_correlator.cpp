@@ -1,3 +1,9 @@
+// ==============================================================================
+// NOTE ON ATTRIBUTION CONFIDENCE ASSERTIONS:
+// Attribution thresholds and confidence scaling validated in this test suite
+// strictly align with the canonical scaling factors in severity_scales.hpp.
+// ==============================================================================
+
 #include "test_common.hpp"
 #include "stuttometer/correlator.hpp"
 #include "stuttometer/trigger_engine.hpp"

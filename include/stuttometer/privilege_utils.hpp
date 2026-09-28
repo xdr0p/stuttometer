@@ -7,8 +7,22 @@
 #include <atomic>
 #include <mutex>
 #include <filesystem>
+#include "constants.hpp"
 
 namespace stuttometer {
+
+namespace privilege_tuning {
+    inline constexpr size_t   PROCESS_NAME_CACHE_CAPACITY   = 512;
+    inline constexpr int      PROCESS_NAME_STALE_SEC        = 15;
+    inline constexpr size_t   PROCESS_NAME_PRUNE_COUNT      = 128;
+    inline constexpr int      PROCESS_NAME_TTL_SEC          = 3;
+    inline constexpr size_t   PID_RESOLVE_CACHE_CAPACITY    = 64;
+    inline constexpr int      PID_RESOLVE_CACHE_STALE_MS    = 2000;
+    inline constexpr int      PID_RESOLVE_NEGATIVE_TTL_MS   = 250;
+    inline constexpr double   DRIVER_REFRESH_RATE_LIMIT_MS  = 5000.0;  // rate limit inside refresh()
+    inline constexpr double   DRIVER_REFRESH_FALLBACK_MS    = 3000.0;  // force-refresh threshold in resolve_driver_name
+    inline constexpr uint64_t MAX_DRIVER_SPAN_BYTES         = 128ULL * 1024 * 1024;
+}
 
 // Check if current process has Administrator elevation
 bool is_running_as_admin();
@@ -22,7 +36,7 @@ bool is_supported_windows_build();
 // Display refresh rate and physical vblank cadence query
 struct DisplayRefreshInfo {
     double refresh_rate_hz{60.0};
-    double vblank_interval_ms{16.67};
+    double vblank_interval_ms{DEFAULT_60HZ_VBLANK_MS};
     bool query_succeeded{false};
 };
 [[nodiscard]] DisplayRefreshInfo query_display_refresh_info(uint32_t target_pid = 0) noexcept;

@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include "stuttometer/etw_session.hpp"
+#include <stuttometer/internal/etw_kernel_opcodes.hpp>
 #include <windows.h>
 #include <evntrace.h>
 #include <iostream>
@@ -36,15 +37,11 @@ static void test_kernel_opcodes_and_payloads() {
     STUTTO_ASSERT(EVENT_TRACE_FLAG_CSWITCH == 0x00000010);
 
     // 2. Kernel MOF Opcodes: DPC_Classic=66 (0x42), ISR=67 (0x43), DPC=68 (0x44), Timer=69 (0x45)
-    constexpr uint8_t KERNEL_OPCODE_DPC_CLASSIC = 66;
-    constexpr uint8_t KERNEL_OPCODE_ISR = 67;
-    constexpr uint8_t KERNEL_OPCODE_DPC = 68;
-    constexpr uint8_t KERNEL_OPCODE_TIMER = 69;
-
-    STUTTO_ASSERT(KERNEL_OPCODE_DPC_CLASSIC == 66);
-    STUTTO_ASSERT(KERNEL_OPCODE_ISR == 67);
-    STUTTO_ASSERT(KERNEL_OPCODE_DPC == 68);
-    STUTTO_ASSERT(KERNEL_OPCODE_TIMER == 69);
+    static_assert(stuttometer::KERNEL_OPCODE_ISR_CLASSIC == 67, "KERNEL_OPCODE_ISR_CLASSIC must be 67");
+    STUTTO_ASSERT(stuttometer::KERNEL_OPCODE_DPC_CLASSIC == 66);
+    STUTTO_ASSERT(stuttometer::KERNEL_OPCODE_ISR_CLASSIC == 67);
+    STUTTO_ASSERT(stuttometer::KERNEL_OPCODE_DPC == 68);
+    STUTTO_ASSERT(stuttometer::KERNEL_OPCODE_TIMER == 69);
 
     // 3. CSwitch (PerfInfo_V2_TypeGroup1) 24-byte payload
     static_assert(sizeof(CSwitchPayloadLayout) == 24, "CSwitch payload layout must be strictly 24 bytes");

@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <cstring>
+#include "stuttometer/constants.hpp"
+#include "stuttometer/internal/dxgkrnl_layout.hpp"
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
@@ -14,12 +16,12 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
 
     // Verified offsets for Task 17 (Event 116: MMIOFlip):
     // Offset 8 (4B): VidPnSourceId, Offset 16 (8B): FlipToDriverAllocation, Offset 36 (4B): FlipPresentId
-    if (p_event->UserDataLength >= 24 && p_event->UserData) {
+    if (p_event->UserDataLength >= dxgkrnl_layout::task17::MIN_PAYLOAD_LEN_BASIC && p_event->UserData) {
         const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
-        std::memcpy(&vidpn_source_id, raw + 8, sizeof(uint32_t));
-        std::memcpy(&allocation_ptr, raw + 16, sizeof(uint64_t));
-        if (p_event->UserDataLength >= 40) {
-            std::memcpy(&flip_present_id, raw + 36, sizeof(uint32_t));
+        std::memcpy(&vidpn_source_id, raw + dxgkrnl_layout::task17::OFFSET_VIDPN_SOURCE_ID, sizeof(uint32_t));
+        std::memcpy(&allocation_ptr, raw + dxgkrnl_layout::task17::OFFSET_FLIP_TO_DRIVER_ALLOCATION, sizeof(uint64_t));
+        if (p_event->UserDataLength >= dxgkrnl_layout::task17::MIN_PAYLOAD_LEN_EXTENDED) {
+            std::memcpy(&flip_present_id, raw + dxgkrnl_layout::task17::OFFSET_FLIP_PRESENT_ID, sizeof(uint32_t));
         }
     }
 
@@ -124,7 +126,7 @@ void EtwSessionManager::handle_dxgkrnl_paging_event(PEVENT_RECORD p_event, EtwEv
         std::memcpy(&number_of_pages, raw + 48, sizeof(uint64_t));
 
         if (number_of_pages > 0) {
-            rec.auxiliary_data = number_of_pages * 4096ULL;
+            rec.auxiliary_data = number_of_pages * PAGE_SIZE_BYTES;
             rec.flags = EventFlags::VRAM_PAGING_TRANSFER;
             data_ok = true;
         }

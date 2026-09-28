@@ -25,7 +25,7 @@ struct OsdToastData {
     double confidence{0.0};
     stuttometer::TriggerSource source{stuttometer::TriggerSource::DXGI_PRESENT_STUTTER};
     uint32_t glitch_count{0};
-    double present_threshold_ms{16.67};
+    double present_threshold_ms{stuttometer::DEFAULT_60HZ_VBLANK_MS};
     stuttometer::TriggerInfo trigger{};
 };
 

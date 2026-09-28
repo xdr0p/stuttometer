@@ -104,8 +104,8 @@ static void test_high_fps_micro_stutter_relative_spike() {
     stuttometer::TriggerConfig config;
     config.present_threshold_ms = 25.0; // High static threshold (40 FPS)
     config.frame_trigger_mode = stuttometer::FrameTriggerMode::HYBRID;
-    config.spike_multiplier = 2.0;
-    config.min_spike_delta_ms = 4.0;
+    config.spike_multiplier = stuttometer::DEFAULT_SPIKE_MULTIPLIER;
+    config.min_spike_delta_ms = stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS;
 
     stuttometer::TriggerEngine engine(config, qpc_freq);
     const uint32_t pid = 4321;
@@ -151,7 +151,7 @@ static void test_cadence_judder_detection() {
     config.present_threshold_ms = 40.0;
     config.frame_trigger_mode = stuttometer::FrameTriggerMode::HYBRID;
     config.enable_judder_detection = true;
-    config.judder_swing_ratio = 0.35;
+    config.judder_swing_ratio = stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO;
 
     stuttometer::TriggerEngine engine(config, qpc_freq);
     const uint32_t pid = 7777;
@@ -215,10 +215,10 @@ static void test_pause_reset_ceiling() {
         now_qpc,
         qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0,
-        4.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER,
+        stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS,
         true,
-        0.35,
+        stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO,
         25.0
     );
 
@@ -244,10 +244,10 @@ static void test_dynamic_only_warmup_sanity_clamping() {
         qpc,
         qpc_freq,
         stuttometer::FrameTriggerMode::DYNAMIC_ONLY,
-        2.0,
-        4.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER,
+        stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS,
         true,
-        0.35,
+        stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO,
         25.0
     );
 
@@ -266,10 +266,10 @@ static void test_dynamic_only_warmup_sanity_clamping() {
         qpc,
         qpc_freq,
         stuttometer::FrameTriggerMode::DYNAMIC_ONLY,
-        2.0,
-        4.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER,
+        stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS,
         true,
-        0.35,
+        stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO,
         25.0
     );
     STUTTO_ASSERT(!res_clean.is_stutter);
@@ -294,7 +294,7 @@ static void test_cadence_reset_after_stutter_frame() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.666, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(!res.is_stutter);
     }
@@ -304,7 +304,7 @@ static void test_cadence_reset_after_stutter_frame() {
     auto res_stutter = stuttometer::evaluate_frame_pacing(
         stats, 50.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
     );
     STUTTO_ASSERT(res_stutter.is_stutter);
     // Cadence state must be reset
@@ -316,7 +316,7 @@ static void test_cadence_reset_after_stutter_frame() {
     auto res_clean = stuttometer::evaluate_frame_pacing(
         stats, 16.666, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
     );
     STUTTO_ASSERT(!res_clean.is_stutter);
     std::cout << "  -> Cadence state reset after stutter frame verified.\n";
@@ -337,7 +337,7 @@ static void test_sustained_stutter_storm_baseline_preservation() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.666, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(!res.is_stutter);
     }
@@ -350,7 +350,7 @@ static void test_sustained_stutter_storm_baseline_preservation() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 50.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         if (i == 1) {
             STUTTO_ASSERT(res.is_stutter);
@@ -376,7 +376,7 @@ static void test_sustained_stutter_storm_baseline_preservation() {
         auto clean_res = stuttometer::evaluate_frame_pacing(
             stats, 50.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(!clean_res.is_stutter);
         STUTTO_ASSERT(clean_res.reason == stuttometer::TriggerReason::NONE);
@@ -406,7 +406,7 @@ static void test_cadence_helper_no_double_increment() {
     auto res1 = stuttometer::evaluate_frame_pacing(
         stats, 23.0, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.5, 10.0, true, 0.35, 50.0
+        2.5, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0
     );
     STUTTO_ASSERT(!res1.is_stutter);
     STUTTO_ASSERT(stats.alternating_cadence_count == 0);
@@ -416,7 +416,7 @@ static void test_cadence_helper_no_double_increment() {
     auto res2 = stuttometer::evaluate_frame_pacing(
         stats, 10.0, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.5, 10.0, true, 0.35, 50.0
+        2.5, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0
     );
     STUTTO_ASSERT(!res2.is_stutter);
     STUTTO_ASSERT(stats.alternating_cadence_count == 1);
@@ -426,7 +426,7 @@ static void test_cadence_helper_no_double_increment() {
     auto res3 = stuttometer::evaluate_frame_pacing(
         stats, 23.0, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.5, 10.0, true, 0.35, 50.0
+        2.5, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0
     );
     STUTTO_ASSERT(!res3.is_stutter);
     STUTTO_ASSERT(stats.alternating_cadence_count == 2);
@@ -436,7 +436,7 @@ static void test_cadence_helper_no_double_increment() {
     auto res4 = stuttometer::evaluate_frame_pacing(
         stats, 10.0, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.5, 10.0, true, 0.35, 50.0
+        2.5, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0
     );
     STUTTO_ASSERT(res4.is_stutter);
     STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::CADENCE_JUDDER);
@@ -457,7 +457,7 @@ static void test_static_only_immediate_trigger_preserved() {
     auto res = stuttometer::evaluate_frame_pacing(
         stats, 30.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::STATIC_ONLY,
-        2.0, 4.0, true, 0.35, 25.0
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
     );
     STUTTO_ASSERT(res.is_stutter);
     STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
@@ -468,7 +468,7 @@ static void test_static_only_immediate_trigger_preserved() {
     auto res_clean = stuttometer::evaluate_frame_pacing(
         stats, 16.6, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::STATIC_ONLY,
-        2.0, 4.0, true, 0.35, 25.0
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
     );
     STUTTO_ASSERT(!res_clean.is_stutter);
     STUTTO_ASSERT(res_clean.reason == stuttometer::TriggerReason::NONE);
@@ -491,7 +491,7 @@ static void test_hybrid_warmup_reject_then_recover() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 500.0, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(!res.is_stutter); // Rejected without trigger during initial 4 frames
         STUTTO_ASSERT(stats.sample_count == static_cast<uint16_t>(i + 1)); // Clamped 100 ms sample pushed each iteration
@@ -508,7 +508,7 @@ static void test_hybrid_warmup_reject_then_recover() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.6, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(!res.is_stutter);
     }
@@ -521,7 +521,7 @@ static void test_hybrid_warmup_reject_then_recover() {
     auto res_spike = stuttometer::evaluate_frame_pacing(
         stats, 30.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
     );
     STUTTO_ASSERT(!res_spike.is_stutter);
     STUTTO_ASSERT(res_spike.reason == stuttometer::TriggerReason::NONE);
@@ -542,7 +542,7 @@ static void test_hybrid_steady_slow_game_baseline_establishment() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 33.3, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 40.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 40.0
         );
         STUTTO_ASSERT(!res.is_stutter);
     }
@@ -565,7 +565,7 @@ static void test_hybrid_warmup_static_suppression_below_200ms() {
     auto res0 = stuttometer::evaluate_frame_pacing(
         stats, 50.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
     );
     STUTTO_ASSERT(!res0.is_stutter);
     STUTTO_ASSERT(res0.reason == stuttometer::TriggerReason::NONE);
@@ -578,7 +578,7 @@ static void test_hybrid_warmup_static_suppression_below_200ms() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 50.0, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(!res.is_stutter);
     }
@@ -590,7 +590,7 @@ static void test_hybrid_warmup_static_suppression_below_200ms() {
     auto res4 = stuttometer::evaluate_frame_pacing(
         stats, 30.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
     );
     STUTTO_ASSERT(!res4.is_stutter);
     STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::NONE);
@@ -611,7 +611,7 @@ static void test_hybrid_warmup_100fps_on_200hz_no_static_trigger() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.0, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.25,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.25,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -665,7 +665,7 @@ static void test_adaptive_trigger_140fps() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 7.14, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 16.67,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 16.67,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -677,7 +677,7 @@ static void test_adaptive_trigger_140fps() {
     auto res_spike = stuttometer::evaluate_frame_pacing(
         stats, 12.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 16.67,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 16.67,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(res_spike.is_stutter);
@@ -702,7 +702,7 @@ static void test_adaptive_trigger_60fps() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.67, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, static_threshold,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, static_threshold,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -714,7 +714,7 @@ static void test_adaptive_trigger_60fps() {
     auto res_clean = stuttometer::evaluate_frame_pacing(
         stats, 17.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, static_threshold,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, static_threshold,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!res_clean.is_stutter);
@@ -724,7 +724,7 @@ static void test_adaptive_trigger_60fps() {
     auto res_static = stuttometer::evaluate_frame_pacing(
         stats, 20.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, static_threshold,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, static_threshold,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(res_static.is_stutter);
@@ -735,7 +735,7 @@ static void test_adaptive_trigger_60fps() {
     auto res_rel = stuttometer::evaluate_frame_pacing(
         stats, 35.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, static_threshold,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, static_threshold,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(res_rel.is_stutter);
@@ -859,7 +859,7 @@ static void test_cadence_adaptation_173fps_to_100fps() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 5.78, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -873,7 +873,7 @@ static void test_cadence_adaptation_173fps_to_100fps() {
     auto res1 = stuttometer::evaluate_frame_pacing(
         stats, 10.2, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(res1.is_stutter);
@@ -887,7 +887,7 @@ static void test_cadence_adaptation_173fps_to_100fps() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.2, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -910,7 +910,7 @@ static void test_cadence_adaptation_173fps_to_100fps() {
     auto res61 = stuttometer::evaluate_frame_pacing(
         stats, 10.2, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!res61.is_stutter);
@@ -935,7 +935,7 @@ static void test_drs_flapping_resistance() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 5.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(!res.is_stutter);
     }
@@ -948,7 +948,7 @@ static void test_drs_flapping_resistance() {
         auto res10 = stuttometer::evaluate_frame_pacing(
             stats, 10.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(res10.is_stutter);
         STUTTO_ASSERT(stats.candidate_count == 1);
@@ -958,7 +958,7 @@ static void test_drs_flapping_resistance() {
         auto res15 = stuttometer::evaluate_frame_pacing(
             stats, 15.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0
         );
         STUTTO_ASSERT(res15.is_stutter);
         // Candidate consistency check failed; reset to 0 (frame is discarded without seeding)
@@ -1016,7 +1016,7 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 5.78, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -1029,7 +1029,7 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.2, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (i == 1) {
@@ -1047,7 +1047,7 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
     auto clean_res = stuttometer::evaluate_frame_pacing(
         stats, 5.78, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!clean_res.is_stutter);
@@ -1061,7 +1061,7 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.2, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -1081,7 +1081,7 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
     auto res_after = stuttometer::evaluate_frame_pacing(
         stats, 10.2, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!res_after.is_stutter);
@@ -1105,7 +1105,7 @@ static void test_candidate_reset_then_reaccumulate_promotes() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 5.78, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -1118,7 +1118,7 @@ static void test_candidate_reset_then_reaccumulate_promotes() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 30.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (i == 1) {
@@ -1138,7 +1138,7 @@ static void test_candidate_reset_then_reaccumulate_promotes() {
     auto reset_res = stuttometer::evaluate_frame_pacing(
         stats, 10.2, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(reset_res.is_stutter);
@@ -1153,7 +1153,7 @@ static void test_candidate_reset_then_reaccumulate_promotes() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.2, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (i == 1) {
@@ -1177,7 +1177,7 @@ static void test_candidate_reset_then_reaccumulate_promotes() {
     auto clean_res = stuttometer::evaluate_frame_pacing(
         stats, 10.2, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!clean_res.is_stutter);
@@ -1199,7 +1199,7 @@ static void test_hybrid_144fps_to_30fps_promotes_cleanly() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 6.94, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -1216,7 +1216,7 @@ static void test_hybrid_144fps_to_30fps_promotes_cleanly() {
         stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         // Detect promotion via baseline mean shifting to ~33.33 ms per C10
@@ -1243,7 +1243,7 @@ static void test_hybrid_candidate_accumulation_progresses_past_seed() {
         stuttometer::evaluate_frame_pacing(
             stats, 6.94, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
     }
@@ -1253,7 +1253,7 @@ static void test_hybrid_candidate_accumulation_progresses_past_seed() {
         stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(stats.candidate_count == static_cast<uint16_t>(i));
@@ -1274,7 +1274,7 @@ static void test_dynamic_mode_144fps_to_30fps_promotes() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 6.94, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::DYNAMIC_ONLY,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -1286,7 +1286,7 @@ static void test_dynamic_mode_144fps_to_30fps_promotes() {
         stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::DYNAMIC_ONLY,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (std::abs(stuttometer::calculate_mean_ms(stats) - 33.33) < 0.1) {
@@ -1311,7 +1311,7 @@ static void test_hybrid_low_framerate_sigma_relative() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.666, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -1328,7 +1328,7 @@ static void test_hybrid_low_framerate_sigma_relative() {
         stuttometer::evaluate_frame_pacing(
             stats, dur, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (std::abs(stuttometer::calculate_mean_ms(stats) - 50.0) < 1.0) {
@@ -1353,7 +1353,7 @@ static void test_hybrid_noisy_transition_grace_band_preserves_mean() {
         stuttometer::evaluate_frame_pacing(
             stats, 6.94, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
     }
@@ -1371,7 +1371,7 @@ static void test_hybrid_noisy_transition_grace_band_preserves_mean() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, dur, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (res.is_stutter) {
@@ -1408,7 +1408,7 @@ static void test_hybrid_grace_band_seed_trap_bound() {
         stuttometer::evaluate_frame_pacing(
             stats, 6.94, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
     }
@@ -1419,7 +1419,7 @@ static void test_hybrid_grace_band_seed_trap_bound() {
     stuttometer::evaluate_frame_pacing(
         stats, 40.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(stats.candidate_count == 1);
@@ -1431,7 +1431,7 @@ static void test_hybrid_grace_band_seed_trap_bound() {
         stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(stats.candidate_count == 1);
@@ -1442,7 +1442,7 @@ static void test_hybrid_grace_band_seed_trap_bound() {
     stuttometer::evaluate_frame_pacing(
         stats, 33.33, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(stats.candidate_count == 0);
@@ -1452,7 +1452,7 @@ static void test_hybrid_grace_band_seed_trap_bound() {
     stuttometer::evaluate_frame_pacing(
         stats, 33.33, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(stats.candidate_count == 1);
@@ -1473,7 +1473,7 @@ static void test_hybrid_clean_frame_preserves_active_candidate() {
         stuttometer::evaluate_frame_pacing(
             stats, 6.94, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
     }
@@ -1484,7 +1484,7 @@ static void test_hybrid_clean_frame_preserves_active_candidate() {
         stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(stats.candidate_count == i);
@@ -1495,7 +1495,7 @@ static void test_hybrid_clean_frame_preserves_active_candidate() {
     auto clean_res = stuttometer::evaluate_frame_pacing(
         stats, 6.94, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!clean_res.is_stutter);
@@ -1508,7 +1508,7 @@ static void test_hybrid_clean_frame_preserves_active_candidate() {
         stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
     }
@@ -1532,7 +1532,7 @@ static void test_hybrid_periodic_hitches_not_silenced() {
             stuttometer::evaluate_frame_pacing(
                 stats, 16.67, qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
         }
@@ -1543,7 +1543,7 @@ static void test_hybrid_periodic_hitches_not_silenced() {
             auto res = stuttometer::evaluate_frame_pacing(
                 stats, 40.0, qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
             STUTTO_ASSERT(res.is_stutter);
@@ -1554,7 +1554,7 @@ static void test_hybrid_periodic_hitches_not_silenced() {
                 auto clean_res = stuttometer::evaluate_frame_pacing(
                     stats, 16.67, qpc, qpc_freq,
                     stuttometer::FrameTriggerMode::HYBRID,
-                    2.0, 4.0, true, 0.35, 25.0,
+                    stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                     stuttometer::PacingProfile::AUTO_ADAPTIVE
                 );
                 STUTTO_ASSERT(!clean_res.is_stutter);
@@ -1575,7 +1575,7 @@ static void test_hybrid_periodic_hitches_not_silenced() {
             stuttometer::evaluate_frame_pacing(
                 stats, 33.33, qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 50.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
         }
@@ -1586,7 +1586,7 @@ static void test_hybrid_periodic_hitches_not_silenced() {
             auto res = stuttometer::evaluate_frame_pacing(
                 stats, 70.0, qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 50.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
             STUTTO_ASSERT(res.is_stutter);
@@ -1597,7 +1597,7 @@ static void test_hybrid_periodic_hitches_not_silenced() {
                 auto clean_res = stuttometer::evaluate_frame_pacing(
                     stats, 33.33, qpc, qpc_freq,
                     stuttometer::FrameTriggerMode::HYBRID,
-                    2.0, 4.0, true, 0.35, 50.0,
+                    stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0,
                     stuttometer::PacingProfile::AUTO_ADAPTIVE
                 );
                 STUTTO_ASSERT(!clean_res.is_stutter);
@@ -1621,7 +1621,7 @@ static void test_one_off_spike_no_cascade() {
         stuttometer::evaluate_frame_pacing(
             stats, 16.67, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
     }
@@ -1632,7 +1632,7 @@ static void test_one_off_spike_no_cascade() {
     auto res_spike1 = stuttometer::evaluate_frame_pacing(
         stats, 45.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     if (res_spike1.is_stutter) ++stutter_count;
@@ -1646,7 +1646,7 @@ static void test_one_off_spike_no_cascade() {
         auto res_clean = stuttometer::evaluate_frame_pacing(
             stats, 16.67, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (res_clean.is_stutter) ++stutter_count;
@@ -1660,7 +1660,7 @@ static void test_one_off_spike_no_cascade() {
     auto res_spike2 = stuttometer::evaluate_frame_pacing(
         stats, 45.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     if (res_spike2.is_stutter) ++stutter_count;
@@ -1686,7 +1686,7 @@ static void test_hybrid_multistage_descending_transition() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.67, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         if (res.is_stutter) ++stutter_reports;
@@ -1698,7 +1698,7 @@ static void test_hybrid_multistage_descending_transition() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 22.2, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         if (res.is_stutter) ++stutter_reports;
@@ -1710,7 +1710,7 @@ static void test_hybrid_multistage_descending_transition() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         if (res.is_stutter) ++stutter_reports;
@@ -1722,7 +1722,7 @@ static void test_hybrid_multistage_descending_transition() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 50.0, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         if (res.is_stutter) ++stutter_reports;
@@ -1749,7 +1749,7 @@ static void test_pause_reset_clears_candidate_accumulation() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 5.78, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -1762,7 +1762,7 @@ static void test_pause_reset_clears_candidate_accumulation() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.2, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (i == 1) {
@@ -1782,7 +1782,7 @@ static void test_pause_reset_clears_candidate_accumulation() {
     auto pause_res = stuttometer::evaluate_frame_pacing(
         stats, 16.67, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!pause_res.is_stutter);
@@ -1814,7 +1814,7 @@ static void test_candidate_jitter_tolerance_and_rejection() {
             stuttometer::evaluate_frame_pacing(
                 stats, 5.78, current_qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
         }
@@ -1826,7 +1826,7 @@ static void test_candidate_jitter_tolerance_and_rejection() {
             auto res = stuttometer::evaluate_frame_pacing(
                 stats, dur, current_qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                1.4, 1.5, true, 0.35, 25.0,
+                stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::CUSTOM
             );
             if (i == 1) {
@@ -1858,7 +1858,7 @@ static void test_candidate_jitter_tolerance_and_rejection() {
             stuttometer::evaluate_frame_pacing(
                 stats, 5.78, current_qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
         }
@@ -1868,7 +1868,7 @@ static void test_candidate_jitter_tolerance_and_rejection() {
         auto r1 = stuttometer::evaluate_frame_pacing(
             stats, 10.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         STUTTO_ASSERT(r1.is_stutter);
@@ -1880,7 +1880,7 @@ static void test_candidate_jitter_tolerance_and_rejection() {
         auto r2 = stuttometer::evaluate_frame_pacing(
             stats, 12.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         STUTTO_ASSERT(!r2.is_stutter);
@@ -1893,7 +1893,7 @@ static void test_candidate_jitter_tolerance_and_rejection() {
         auto r3 = stuttometer::evaluate_frame_pacing(
             stats, 14.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         STUTTO_ASSERT(r3.is_stutter);
@@ -1923,7 +1923,7 @@ static void test_independent_stream_candidate_isolation() {
             stuttometer::evaluate_frame_pacing(
                 s, 5.78, qpc_a, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
         });
@@ -1933,7 +1933,7 @@ static void test_independent_stream_candidate_isolation() {
             stuttometer::evaluate_frame_pacing(
                 s, 16.666, qpc_b, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
         });
@@ -1946,7 +1946,7 @@ static void test_independent_stream_candidate_isolation() {
             auto res_a = stuttometer::evaluate_frame_pacing(
                 s, 10.2, qpc_a, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
             if (i == 1) {
@@ -1968,7 +1968,7 @@ static void test_independent_stream_candidate_isolation() {
             auto res_b = stuttometer::evaluate_frame_pacing(
                 s, 16.666, qpc_b, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
             STUTTO_ASSERT(!res_b.is_stutter);
@@ -2003,10 +2003,10 @@ static void test_scene_transition_reset_2s_boundary() {
             current_qpc,
             qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0,
-            4.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER,
+            stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS,
             true,
-            0.35,
+            stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO,
             25.0
         );
 
@@ -2022,10 +2022,10 @@ static void test_scene_transition_reset_2s_boundary() {
             current_qpc,
             qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0,
-            4.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER,
+            stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS,
             true,
-            0.35,
+            stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO,
             25.0
         );
         STUTTO_ASSERT(res_post.is_stutter == false);
@@ -2050,10 +2050,10 @@ static void test_scene_transition_reset_2s_boundary() {
             current_qpc,
             qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0,
-            4.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER,
+            stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS,
             true,
-            0.35,
+            stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO,
             25.0
         );
 
@@ -2080,10 +2080,10 @@ static void test_scene_transition_reset_2s_boundary() {
             current_qpc,
             qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0,
-            4.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER,
+            stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS,
             true,
-            0.35,
+            stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO,
             25.0
         );
 
@@ -2107,7 +2107,7 @@ static void test_hybrid_transition_report_count() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 6.94, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -2123,7 +2123,7 @@ static void test_hybrid_transition_report_count() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 33.33, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (res.is_stutter) {
@@ -2151,7 +2151,7 @@ static void test_hybrid_static_fallback_cadence_routing() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.666, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 10.0, true, 0.35, static_threshold,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, static_threshold,
             stuttometer::PacingProfile::CUSTOM
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -2169,7 +2169,7 @@ static void test_hybrid_static_fallback_cadence_routing() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 22.2, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 10.0, true, 0.35, static_threshold,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, static_threshold,
             stuttometer::PacingProfile::CUSTOM
         );
         if (res.is_stutter) {
@@ -2194,7 +2194,7 @@ static void test_hybrid_static_fallback_cadence_routing() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 22.2, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 10.0, true, 0.35, static_threshold,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, static_threshold,
             stuttometer::PacingProfile::CUSTOM
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -2217,7 +2217,7 @@ static void test_hybrid_candidate_staleness_sweep_10s() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.67, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -2239,7 +2239,7 @@ static void test_hybrid_candidate_staleness_sweep_10s() {
             auto res_clean = stuttometer::evaluate_frame_pacing(
                 stats, 16.67, qpc, qpc_freq,
                 stuttometer::FrameTriggerMode::HYBRID,
-                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
             STUTTO_ASSERT(!res_clean.is_stutter);
@@ -2257,7 +2257,7 @@ static void test_hybrid_candidate_staleness_sweep_10s() {
         auto res_hitch = stuttometer::evaluate_frame_pacing(
             stats, 40.0, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         if (res_hitch.is_stutter) {
@@ -2297,7 +2297,7 @@ static void test_hybrid_candidate_1000_sample_reseed_policy() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 16.666, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -2315,7 +2315,7 @@ static void test_hybrid_candidate_1000_sample_reseed_policy() {
     auto res_seed = stuttometer::evaluate_frame_pacing(
         stats, 150.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::CUSTOM
     );
     STUTTO_ASSERT(res_seed.is_stutter);
@@ -2328,7 +2328,7 @@ static void test_hybrid_candidate_1000_sample_reseed_policy() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, dur, qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -2343,7 +2343,7 @@ static void test_hybrid_candidate_1000_sample_reseed_policy() {
     auto res_reseed = stuttometer::evaluate_frame_pacing(
         stats, dur_reseed, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::CUSTOM
     );
     STUTTO_ASSERT(res_reseed.is_stutter);
@@ -2358,7 +2358,7 @@ static void test_hybrid_candidate_1000_sample_reseed_policy() {
     auto res_post = stuttometer::evaluate_frame_pacing(
         stats, dur_post, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
         stuttometer::PacingProfile::CUSTOM
     );
     STUTTO_ASSERT(!res_post.is_stutter);

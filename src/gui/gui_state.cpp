@@ -1,4 +1,5 @@
 #include "gui_state.hpp"
+#include "stuttometer/internal/gui_constants.hpp"
 
 #include <shlobj.h>
 #include <fstream>
@@ -60,7 +61,7 @@ static std::mutex g_engine_logs_mutex;
 void append_engine_log(std::wstring log_msg) {
     std::lock_guard<std::mutex> lock(g_engine_logs_mutex);
     g_engine_logs.push_back(std::move(log_msg));
-    if (g_engine_logs.size() > 200) {
+    if (g_engine_logs.size() > gui_constants::MAX_ENGINE_LOGS) {
         g_engine_logs.erase(g_engine_logs.begin());
     }
 }

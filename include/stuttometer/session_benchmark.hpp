@@ -14,6 +14,13 @@
 
 namespace stuttometer {
 
+namespace bench_tuning {
+    inline constexpr double   FALLBACK_PASS1_SANITY_MS      = 100.0;
+    inline constexpr double   FALLBACK_PASS2_MEDIAN_FACTOR  = 1.4;
+    inline constexpr uint64_t FALLBACK_MIN_SAMPLES          = 8;
+    inline constexpr size_t   FALLBACK_WINDOW_SIZE          = 64;
+}
+
 enum class BindingFloorSource : uint8_t {
     NONE    = 0,
     DYNAMIC = 1,
@@ -168,7 +175,7 @@ private:
 
     // Pacing context & live telemetry
     std::atomic<PacingProfile> pacing_profile_{PacingProfile::AUTO_ADAPTIVE};
-    std::atomic<double> present_threshold_ms_{16.67};
+    std::atomic<double> present_threshold_ms_{DEFAULT_60HZ_VBLANK_MS};
     std::atomic<double> spike_multiplier_{2.0};
     std::atomic<double> min_spike_delta_ms_{4.0};
     std::atomic<bool> has_live_telemetry_{false};

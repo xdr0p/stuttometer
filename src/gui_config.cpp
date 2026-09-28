@@ -32,7 +32,7 @@ static std::string wstring_to_utf8_helper(const std::wstring& wstr) {
 }
 
 double fps_to_present_threshold_ms(double fps) noexcept {
-    if (std::isnan(fps) || fps <= 0.0) return 16.67;
+    if (std::isnan(fps) || fps <= 0.0) return DEFAULT_60HZ_VBLANK_MS;
     return std::clamp(1000.0 / fps, 2.0, 200.0);
 }
 
@@ -127,7 +127,7 @@ void deserialize_gui_settings_from_json(
 
         if (!manual) {
             out_config.present_threshold_manual = false;
-            out_config.present_threshold_ms = 16.67;
+            out_config.present_threshold_ms = DEFAULT_60HZ_VBLANK_MS;
         } else {
             if (j.contains("min_fps_threshold") && j["min_fps_threshold"].is_number()) {
                 double fps = j["min_fps_threshold"].get<double>();
@@ -136,11 +136,11 @@ void deserialize_gui_settings_from_json(
                     out_config.present_threshold_ms = fps_to_present_threshold_ms(fps);
                 } else {
                     out_config.present_threshold_manual = false;
-                    out_config.present_threshold_ms = 16.67;
+                    out_config.present_threshold_ms = DEFAULT_60HZ_VBLANK_MS;
                 }
             } else {
                 out_config.present_threshold_manual = false;
-                out_config.present_threshold_ms = 16.67;
+                out_config.present_threshold_ms = DEFAULT_60HZ_VBLANK_MS;
             }
         }
 
@@ -189,7 +189,7 @@ void deserialize_gui_settings_from_json(
 
         if (j.contains("buffer_slots") && j["buffer_slots"].is_number_unsigned()) {
             uint32_t v = j["buffer_slots"].get<uint32_t>();
-            if (v >= 65536 && v <= 1048576) out_config.buffer_slots = v;
+            if (v >= MIN_BUFFER_SLOTS && v <= MAX_BUFFER_SLOTS) out_config.buffer_slots = v;
         }
 
         if (j.contains("dpc_threshold_us") && j["dpc_threshold_us"].is_number_unsigned()) {
