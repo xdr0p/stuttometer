@@ -7,6 +7,7 @@
 #include "stuttometer/json_reporter.hpp"
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
+#include "stuttometer/internal/process_watcher.hpp"
 #include <stuttometer/gui_config.hpp>
 
 #include <windows.h>
@@ -138,6 +139,8 @@ private:
 
     std::unique_ptr<GuiLogRedirector> log_redirector_;
     std::string target_process_name_;
+    ProcessWatcher watcher_;
+    WatcherCallbacks make_watcher_callbacks();
     // Declared before active_trigger_engine_ to guarantee session_benchmark_ outlives the engine (Resolves M-10-5)
     std::shared_ptr<SessionBenchmark> session_benchmark_;
     std::unique_ptr<TriggerEngine> active_trigger_engine_;

@@ -76,6 +76,7 @@ add_library(stuttometer_core STATIC
   src/etw_handlers_memory.cpp
   src/etw_handlers_kernel_mof.cpp
   src/gui_config.cpp
+  src/process_watcher.cpp
 )
 
 target_include_directories(stuttometer_core

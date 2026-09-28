@@ -11,6 +11,7 @@
 #include "stuttometer/version.hpp"
 #include "stuttometer/constants.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
+#include "stuttometer/internal/process_watcher.hpp"
 #include <iostream>
 #include <iomanip>
 #include <atomic>
@@ -29,6 +30,7 @@ static std::atomic<bool> g_stop_requested{false};
 static std::atomic<bool> g_shutdown_done{false};
 static std::mutex g_shutdown_mutex;
 static std::condition_variable g_shutdown_cv;
+static stuttometer::ProcessWatcher g_watcher;
 
 static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
@@ -295,29 +297,28 @@ int main(int argc, char** argv) {
     uint32_t loop_counter = 0;
 
     // Dedicated background thread for CLI process name watcher (eliminates main loop jitter)
-    std::thread watcher_thread;
     if (!target_pid_manual && !target_process_name.empty()) {
-        watcher_thread = std::thread([&]() {
-            while (!g_stop_requested.load(std::memory_order_relaxed)) {
-                const uint32_t found_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
-                if (found_pid != 0) {
-                    if (trigger_engine.try_attach_pid(found_pid)) {
-                        std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' active (PID " << found_pid << ")\n";
-                    }
-                } else {
-                    const uint32_t active = trigger_engine.active_target_pid();
-                    if (active != 0 && trigger_engine.try_detach_pid(active)) {
-                        std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' closed. Waiting for restart...\n";
-                    }
-                }
-
-                // Poll responsive 50ms while waiting for target to launch; poll ~2s once attached
-                const int sleep_steps = trigger_engine.is_target_waiting() ? 1 : 40;
-                for (int i = 0; i < sleep_steps && !g_stop_requested.load(std::memory_order_relaxed); ++i) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-            }
-        });
+        stuttometer::WatcherCallbacks callbacks;
+        callbacks.user_data = &trigger_engine;
+        callbacks.try_attach = [](uint32_t pid, void* ud) -> bool {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->try_attach_pid(pid);
+        };
+        callbacks.try_detach = [](uint32_t pid, void* ud) -> bool {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->try_detach_pid(pid);
+        };
+        callbacks.is_waiting = [](void* ud) -> bool {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->is_target_waiting();
+        };
+        callbacks.get_active_pid = [](void* ud) -> uint32_t {
+            return static_cast<stuttometer::TriggerEngine*>(ud)->active_target_pid();
+        };
+        callbacks.on_attach_success = [](uint32_t pid, std::string_view name, void*) {
+            std::cout << "[STUTTOMETER] Target process '" << name << "' active (PID " << pid << ")\n";
+        };
+        callbacks.on_detach_success = [](uint32_t, std::string_view name, void*) {
+            std::cout << "[STUTTOMETER] Target process '" << name << "' closed. Waiting for restart...\n";
+        };
+        g_watcher.start(target_process_name, callbacks);
     }
 
     while (!g_stop_requested.load(std::memory_order_relaxed)) {
@@ -427,9 +428,7 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::gui_constants::SESSION_LOOP_SLEEP_MS));
     }
 
-    if (watcher_thread.joinable()) {
-        watcher_thread.join();
-    }
+    g_watcher.stop();
 
     std::cout << "\n[STUTTOMETER] Stopping trace sessions and cleaning up...\n";
     session_mgr.stop();

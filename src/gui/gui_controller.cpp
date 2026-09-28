@@ -113,6 +113,7 @@ GuiController::~GuiController() {
 }
 
 void GuiController::shutdown() {
+    watcher_.stop();
     if (log_redirector_) {
         log_redirector_->set_shutting_down(true);
     }
@@ -130,6 +131,32 @@ void GuiController::shutdown() {
     }
 
     log_redirector_.reset();
+}
+
+WatcherCallbacks GuiController::make_watcher_callbacks() {
+    WatcherCallbacks cb;
+    cb.user_data = this;
+    cb.try_attach = [](uint32_t pid, void* ud) -> bool {
+        auto* self = static_cast<GuiController*>(ud);
+        std::lock_guard<std::mutex> lock(self->trigger_engine_mutex_);
+        return self->active_trigger_engine_ ? self->active_trigger_engine_->try_attach_pid(pid) : false;
+    };
+    cb.try_detach = [](uint32_t pid, void* ud) -> bool {
+        auto* self = static_cast<GuiController*>(ud);
+        std::lock_guard<std::mutex> lock(self->trigger_engine_mutex_);
+        return self->active_trigger_engine_ ? self->active_trigger_engine_->try_detach_pid(pid) : false;
+    };
+    cb.is_waiting = [](void* ud) -> bool {
+        auto* self = static_cast<GuiController*>(ud);
+        std::lock_guard<std::mutex> lock(self->trigger_engine_mutex_);
+        return self->active_trigger_engine_ ? self->active_trigger_engine_->is_target_waiting() : false;
+    };
+    cb.get_active_pid = [](void* ud) -> uint32_t {
+        auto* self = static_cast<GuiController*>(ud);
+        std::lock_guard<std::mutex> lock(self->trigger_engine_mutex_);
+        return self->active_trigger_engine_ ? self->active_trigger_engine_->active_target_pid() : 0;
+    };
+    return cb;
 }
 
 bool GuiController::start_session_async(const GuiConfig& config) {
@@ -185,6 +212,7 @@ void GuiController::update_target_filter(uint32_t pid, const std::string& proces
         if (session_benchmark_) {
             session_benchmark_->retarget(0);
         }
+        watcher_.stop();
     } else {
         // Targeted or waiting mode: Retarget FIRST, then attach sink
         if (session_benchmark_) {
@@ -192,6 +220,9 @@ void GuiController::update_target_filter(uint32_t pid, const std::string& proces
         }
         if (active_trigger_engine_) {
             active_trigger_engine_->set_benchmark_sink(session_benchmark_.get());
+        }
+        if (!process_name.empty() && is_capturing()) {
+            watcher_.start(process_name, make_watcher_callbacks());
         }
     }
 }
@@ -333,51 +364,9 @@ void GuiController::session_worker_loop(GuiConfig config) {
     CorrelationEngine correlator(driver_resolver, thresholds);
 
     // Dedicated background thread for asynchronous process name watcher (zero jitter on trigger loop)
-    std::atomic<bool> watcher_running{true};
-    std::thread watcher_thread([this, &watcher_running]() {
-        while (watcher_running.load(std::memory_order_relaxed)) {
-            std::string proc;
-            bool is_waiting = false;
-            {
-                std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-                proc = target_process_name_;
-                if (active_trigger_engine_) {
-                    is_waiting = active_trigger_engine_->is_target_waiting();
-                }
-            }
-            if (!proc.empty()) {
-                const uint32_t found = resolve_process_name_to_pid(proc);
-                std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-                if (active_trigger_engine_) {
-                    if (found != 0) {
-                        active_trigger_engine_->try_attach_pid(found);
-                    } else {
-                        const uint32_t active = active_trigger_engine_->active_target_pid();
-                        if (active != 0) {
-                            active_trigger_engine_->try_detach_pid(active);
-                        }
-                    }
-                    is_waiting = active_trigger_engine_->is_target_waiting();
-                }
-            }
-            // Poll responsive 50ms while waiting for target to launch; poll ~2s once attached
-            const int sleep_steps = is_waiting ? 1 : 40;
-            for (int i = 0; i < sleep_steps && watcher_running.load(std::memory_order_relaxed); ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        }
-    });
-
-    struct WatcherJoinGuard {
-        std::atomic<bool>& running;
-        std::thread& th;
-        ~WatcherJoinGuard() {
-            running.store(false, std::memory_order_release);
-            if (th.joinable()) {
-                th.join();
-            }
-        }
-    } watcher_guard{watcher_running, watcher_thread};
+    if (!config.target_process_name.empty()) {
+        watcher_.start(config.target_process_name, make_watcher_callbacks());
+    }
 
     if (!config.output_dir.empty()) {
         std::error_code ec;
@@ -547,10 +536,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    watcher_running.store(false, std::memory_order_release);
-    if (watcher_thread.joinable()) {
-        watcher_thread.join();
-    }
+    watcher_.stop();
 
     // Teardown ETW sessions (joins threads off the UI thread)
     session_mgr->stop();
@@ -567,6 +553,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
     }
     } catch (const std::exception& ex) {
         std::cerr << "[STUTTOMETER] Fatal error in session worker loop: " << ex.what() << "\n";
+        watcher_.stop();
         {
             std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
             active_trigger_engine_.reset();
@@ -577,6 +564,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         }
     } catch (...) {
         std::cerr << "[STUTTOMETER] Unknown fatal error in session worker loop.\n";
+        watcher_.stop();
         {
             std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
             active_trigger_engine_.reset();
