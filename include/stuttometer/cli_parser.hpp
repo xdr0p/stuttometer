@@ -47,7 +47,7 @@ struct CliConfig {
     double spike_multiplier{2.0};
     double min_spike_delta_ms{4.0};
     bool enable_judder{true};
-    double judder_swing_ratio{0.35};
+    double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
     std::string dump_events_path;
     size_t dump_max_mb{100};
     size_t dump_max_files{3};
@@ -80,7 +80,7 @@ inline constexpr CliRangeDef CLI_RANGES[] = {
     {"--mem-alloc-threshold-mb",  1.0,     1024.0,   "MB",  [](const CliConfig& c) { return static_cast<double>(c.mem_alloc_threshold_mb); }},
     {"--mem-trim-threshold-mb",   1.0,     1024.0,   "MB",  [](const CliConfig& c) { return static_cast<double>(c.mem_trim_threshold_mb); }},
     {"--mem-physical-latency-us", 50.0,    50000.0,  "us",  [](const CliConfig& c) { return static_cast<double>(c.mem_physical_latency_us); }},
-    {"--buffer-slots",            65536.0, 1048576.0, "",   [](const CliConfig& c) { return static_cast<double>(c.buffer_slots); }},
+    {"--buffer-slots",            static_cast<double>(MIN_BUFFER_SLOTS), static_cast<double>(MAX_BUFFER_SLOTS), "",   [](const CliConfig& c) { return static_cast<double>(c.buffer_slots); }},
     {"--spike-multiplier",        1.2,     10.0,     "",    [](const CliConfig& c) { return c.spike_multiplier; }},
     {"--min-spike-delta-ms",      1.0,     50.0,     "ms",  [](const CliConfig& c) { return c.min_spike_delta_ms; }},
     {"--judder-swing-ratio",      0.1,     0.9,      "",    [](const CliConfig& c) { return c.judder_swing_ratio; }}

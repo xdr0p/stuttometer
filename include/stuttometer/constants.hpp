@@ -11,6 +11,12 @@ inline constexpr uint32_t DEFAULT_BUFFER_SLOTS = 262144;
 inline constexpr uint32_t MAX_BUFFER_SLOTS = 1048576;
 static_assert(MIN_BUFFER_SLOTS <= DEFAULT_BUFFER_SLOTS && DEFAULT_BUFFER_SLOTS <= MAX_BUFFER_SLOTS,
               "Buffer slot bounds invariant violated");
+static_assert((MIN_BUFFER_SLOTS & (MIN_BUFFER_SLOTS - 1)) == 0,
+              "MIN_BUFFER_SLOTS must be a power of 2 for bitmask indexing");
+static_assert((DEFAULT_BUFFER_SLOTS & (DEFAULT_BUFFER_SLOTS - 1)) == 0,
+              "DEFAULT_BUFFER_SLOTS must be a power of 2 for bitmask indexing");
+static_assert((MAX_BUFFER_SLOTS & (MAX_BUFFER_SLOTS - 1)) == 0,
+              "MAX_BUFFER_SLOTS must be a power of 2 for bitmask indexing");
 
 inline constexpr double   DEFAULT_60HZ_VBLANK_MS = 16.67;
 inline constexpr double   TRIGGER_WATCHDOG_MS = 5000.0;

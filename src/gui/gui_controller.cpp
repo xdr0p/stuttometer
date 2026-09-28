@@ -200,31 +200,41 @@ void GuiController::stop_session_async() {
 }
 
 void GuiController::update_target_filter(uint32_t pid, const std::string& process_name) {
-    std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-    target_process_name_ = process_name;
-    if (active_trigger_engine_) {
-        active_trigger_engine_->update_target_pid(pid, (pid == 0 && !process_name.empty()));
+    bool should_stop_watcher = false;
+    bool should_start_watcher = false;
+    {
+        std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
+        target_process_name_ = process_name;
+        if (active_trigger_engine_) {
+            active_trigger_engine_->update_target_pid(pid, (pid == 0 && !process_name.empty()));
+        }
+        if (pid == 0 && process_name.empty()) {
+            // Monitor-all mode: Detach sink FIRST, then retarget to 0 (Resolves S-9-1)
+            if (active_trigger_engine_) {
+                active_trigger_engine_->set_benchmark_sink(nullptr);
+            }
+            if (session_benchmark_) {
+                session_benchmark_->retarget(0);
+            }
+            should_stop_watcher = true;
+        } else {
+            // Targeted or waiting mode: Retarget FIRST, then attach sink
+            if (session_benchmark_) {
+                session_benchmark_->retarget(pid);
+            }
+            if (active_trigger_engine_) {
+                active_trigger_engine_->set_benchmark_sink(session_benchmark_.get());
+            }
+            if (!process_name.empty() && is_capturing()) {
+                should_start_watcher = true;
+            }
+        }
     }
-    if (pid == 0 && process_name.empty()) {
-        // Monitor-all mode: Detach sink FIRST, then retarget to 0 (Resolves S-9-1)
-        if (active_trigger_engine_) {
-            active_trigger_engine_->set_benchmark_sink(nullptr);
-        }
-        if (session_benchmark_) {
-            session_benchmark_->retarget(0);
-        }
+
+    if (should_stop_watcher) {
         watcher_.stop();
-    } else {
-        // Targeted or waiting mode: Retarget FIRST, then attach sink
-        if (session_benchmark_) {
-            session_benchmark_->retarget(pid);
-        }
-        if (active_trigger_engine_) {
-            active_trigger_engine_->set_benchmark_sink(session_benchmark_.get());
-        }
-        if (!process_name.empty() && is_capturing()) {
-            watcher_.start(process_name, make_watcher_callbacks());
-        }
+    } else if (should_start_watcher) {
+        watcher_.start(process_name, make_watcher_callbacks());
     }
 }
 

@@ -5,7 +5,8 @@
 namespace stuttometer {
 
 void ProcessWatcher::start(std::string target_process, WatcherCallbacks callbacks) {
-    stop();
+    std::lock_guard<std::mutex> lock(watcher_mutex_);
+    stop_locked();
     if (target_process.empty()) {
         return;
     }
@@ -17,6 +18,11 @@ void ProcessWatcher::start(std::string target_process, WatcherCallbacks callback
 }
 
 void ProcessWatcher::stop() {
+    std::lock_guard<std::mutex> lock(watcher_mutex_);
+    stop_locked();
+}
+
+void ProcessWatcher::stop_locked() {
     stop_flag_.store(true, std::memory_order_release);
     if (worker_thread_.joinable()) {
         worker_thread_.join();
@@ -29,14 +35,23 @@ void ProcessWatcher::worker_loop(WatcherCallbacks callbacks) {
 
     while (!stop_flag_.load(std::memory_order_relaxed)) {
         const uint32_t found_pid = resolve_process_name_to_pid(target_process_);
+        const uint32_t active = callbacks.get_active_pid ? callbacks.get_active_pid(callbacks.user_data) : 0;
+
         if (found_pid != 0) {
+            if (active != 0 && active != found_pid) {
+                // The process restarted with a different PID; detach old PID first
+                if (callbacks.try_detach && callbacks.try_detach(active, callbacks.user_data)) {
+                    if (callbacks.on_detach_success) {
+                        callbacks.on_detach_success(active, name_view, callbacks.user_data);
+                    }
+                }
+            }
             if (callbacks.try_attach && callbacks.try_attach(found_pid, callbacks.user_data)) {
                 if (callbacks.on_attach_success) {
                     callbacks.on_attach_success(found_pid, name_view, callbacks.user_data);
                 }
             }
         } else {
-            const uint32_t active = callbacks.get_active_pid ? callbacks.get_active_pid(callbacks.user_data) : 0;
             if (active != 0 && callbacks.try_detach && callbacks.try_detach(active, callbacks.user_data)) {
                 if (callbacks.on_detach_success) {
                     callbacks.on_detach_success(active, name_view, callbacks.user_data);

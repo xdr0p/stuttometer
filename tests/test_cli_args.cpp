@@ -1,11 +1,14 @@
 #include "test_common.hpp"
 #include "stuttometer/cli_parser.hpp"
 #include "stuttometer/version.hpp"
+#include "stuttometer/internal/process_watcher.hpp"
 #include <iostream>
 #include <sstream>
 #include <vector>
 #include <string>
 #include <cmath>
+#include <chrono>
+#include <thread>
 
 using namespace stuttometer;
 
@@ -398,6 +401,79 @@ static void test_manual_threshold_flags() {
     std::cout << "  -> Manual threshold tracking flags verified.\n";
 }
 
+static void test_process_watcher_lifecycle() {
+    std::cout << "[TEST] Testing ProcessWatcher lifecycle and query interface...\n";
+
+    struct MockState {
+        uint32_t active_pid = 0;
+        bool waiting = true;
+        std::vector<std::string> log;
+    } mock;
+
+    stuttometer::WatcherCallbacks cb;
+    cb.user_data = &mock;
+    cb.try_attach = [](uint32_t pid, void* ud) -> bool {
+        auto* m = static_cast<MockState*>(ud);
+        if (m->active_pid == 0 && m->waiting) {
+            m->active_pid = pid;
+            m->waiting = false;
+            return true;
+        }
+        return false;
+    };
+    cb.try_detach = [](uint32_t pid, void* ud) -> bool {
+        auto* m = static_cast<MockState*>(ud);
+        if (m->active_pid == pid) {
+            m->active_pid = 0;
+            m->waiting = true;
+            return true;
+        }
+        return false;
+    };
+    cb.is_waiting = [](void* ud) -> bool {
+        return static_cast<MockState*>(ud)->waiting;
+    };
+    cb.get_active_pid = [](void* ud) -> uint32_t {
+        return static_cast<MockState*>(ud)->active_pid;
+    };
+    cb.on_attach_success = [](uint32_t pid, std::string_view name, void* ud) {
+        auto* m = static_cast<MockState*>(ud);
+        m->log.push_back("ATTACH:" + std::string(name) + ":" + std::to_string(pid));
+    };
+    cb.on_detach_success = [](uint32_t pid, std::string_view name, void* ud) {
+        auto* m = static_cast<MockState*>(ud);
+        m->log.push_back("DETACH:" + std::string(name) + ":" + std::to_string(pid));
+    };
+
+    stuttometer::ProcessWatcher watcher;
+    STUTTO_ASSERT(!watcher.is_running());
+
+    // 1. Starting with empty target should not launch thread
+    watcher.start("", cb);
+    STUTTO_ASSERT(!watcher.is_running());
+
+    // 2. Stop is idempotent on unstarted watcher
+    watcher.stop();
+    STUTTO_ASSERT(!watcher.is_running());
+
+    // 3. Start with non-existent process (polling path exercised)
+    watcher.start("nonexistent_test_proc_123456789.exe", cb);
+    STUTTO_ASSERT(watcher.is_running());
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    STUTTO_ASSERT(mock.active_pid == 0);
+    STUTTO_ASSERT(mock.waiting);
+
+    // 4. Clean stop
+    watcher.stop();
+    STUTTO_ASSERT(!watcher.is_running());
+
+    // 5. Repeated stop is idempotent
+    watcher.stop();
+    STUTTO_ASSERT(!watcher.is_running());
+
+    std::cout << "  -> ProcessWatcher lifecycle and query interface PASSED.\n";
+}
+
 int main() {
     try {
         test_pacing_profile_parsing();
@@ -410,6 +486,7 @@ int main() {
         test_cli_ranges_table();
         test_help_flags();
         test_manual_threshold_flags();
+        test_process_watcher_lifecycle();
 
         std::cout << "\n[ALL CLI ARGS TESTS PASSED]\n";
         return 0;

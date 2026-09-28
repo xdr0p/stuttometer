@@ -4,6 +4,7 @@
 #include <string_view>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <cstdint>
 
 namespace stuttometer {
@@ -39,7 +40,9 @@ public:
 
 private:
     void worker_loop(WatcherCallbacks callbacks);
+    void stop_locked();
 
+    std::mutex watcher_mutex_;
     std::string target_process_;
     std::thread worker_thread_;
     std::atomic<bool> stop_flag_{false};

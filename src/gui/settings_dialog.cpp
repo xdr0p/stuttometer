@@ -657,9 +657,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             struct BufOption { const wchar_t* label; uint32_t slots; };
             BufOption buf_opts[] = {
-                { L"65,536 slots (~4 MB RAM)", 65536 },
+                { L"65,536 slots (~4 MB RAM)", MIN_BUFFER_SLOTS },
                 { L"131,072 slots (~8 MB RAM)", 131072 },
-                { L"262,144 slots (~16 MB RAM) [Default]", 262144 },
+                { L"262,144 slots (~16 MB RAM) [Default]", DEFAULT_BUFFER_SLOTS },
                 { L"524,288 slots (~33 MB RAM)", 524288 },
                 { L"1,048,576 slots (~67 MB RAM)", MAX_BUFFER_SLOTS }
             };
