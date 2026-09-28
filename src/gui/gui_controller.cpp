@@ -2,6 +2,7 @@
 #include "gui_state.hpp"
 #include "stuttometer/csv_exporter.hpp"
 #include "stuttometer/constants.hpp"
+#include "stuttometer/internal/gui_constants.hpp"
 #include <psapi.h>
 #include <algorithm>
 #include <iomanip>
@@ -390,7 +391,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         uint64_t to_qpc = 0;
 
         // Live metrics update (every ~200ms)
-        if (++loop_counter % 20 == 0 && hwnd_ && IsWindow(hwnd_)) {
+        if (++loop_counter % gui_constants::METRICS_UPDATE_INTERVAL_LOOPS == 0 && hwnd_ && IsWindow(hwnd_)) {
             auto* p_metrics = new GuiMetrics();
             const uint64_t head = flight_recorder.current_head();
             const uint64_t dropped = flight_recorder.total_dropped_events();
@@ -460,11 +461,11 @@ void GuiController::session_worker_loop(GuiConfig config) {
             try {
                 // Synchronously flush active buffers and deterministically drain post-trigger window
                 session_mgr->flush_buffers();
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(POST_TRIGGER_DRAIN_BUDGET_MS);
                 while (session_mgr->last_processed_qpc() < to_qpc && std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(POST_TRIGGER_DRAIN_STEP_MS));
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(POST_TRIGGER_DRAIN_STEP_MS));
 
                 uint64_t drops = 0;
                 auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);
@@ -533,7 +534,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(gui_constants::SESSION_LOOP_SLEEP_MS));
     }
 
     watcher_.stop();

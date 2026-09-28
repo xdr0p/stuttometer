@@ -55,7 +55,7 @@ void apply_window_dark_titlebar(HWND hwnd) {
         DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &use_dark_mode, sizeof(use_dark_mode));
     }
     COLORREF caption_color = RGB(13, 17, 23);   // #0D1117 (Deeper charcoal canvas)
-    COLORREF text_color    = RGB(226, 232, 240); // #E2E8F0 (Soft crisp white)
+    COLORREF text_color    = COLOR_TEXT_SOFT_WHITE; // #E2E8F0 (Soft crisp white)
     COLORREF border_color  = RGB(36, 43, 61);   // #242B3D (Subtle dark separator border)
     DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption_color, sizeof(caption_color));
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text_color, sizeof(text_color));
@@ -122,8 +122,8 @@ void GdiThemeCache::init() {
     br_list_bg = CreateSolidBrush(COLOR_LIST_BG);
     br_list_alt = CreateSolidBrush(COLOR_LIST_ROW_ALT);
     br_list_sel = CreateSolidBrush(COLOR_LIST_SEL);
-    br_pill = CreateSolidBrush(RGB(28, 33, 44));
-    br_badge = CreateSolidBrush(RGB(24, 28, 38));
+    br_pill = CreateSolidBrush(COLOR_CARD_BG);
+    br_badge = CreateSolidBrush(COLOR_BADGE_BG);
     br_list_hdr_bg = CreateSolidBrush(COLOR_LIST_HDR_BG);
 
     // Buttons: Primary Emerald

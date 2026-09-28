@@ -1,6 +1,7 @@
 #include "benchmark_view.hpp"
 #include "theme.hpp"
 #include "gui_string_utils.hpp"
+#include "stuttometer/internal/gui_constants.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
@@ -312,7 +313,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             SetWindowSubclass(state->h_btn_reset, BenchmarkButtonSubclassProc, IDC_BENCH_RESET_SESSION, 0);
             SetWindowSubclass(state->h_btn_close, BenchmarkButtonSubclassProc, IDC_BENCH_CLOSE, 0);
 
-            SetTimer(hwnd, IDT_BENCH_REFRESH, 1000, NULL);
+            SetTimer(hwnd, IDT_BENCH_REFRESH, gui_constants::BENCHMARK_REFRESH_MS, NULL);
             refresh_cached_summary(state);
             return 0;
         }
@@ -816,7 +817,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 ? L"No session telemetry recorded yet."
                 : L"No stutters recorded in current session. Frame pacing is smooth.";
 
-            HBRUSH br_alt = CreateSolidBrush(RGB(34, 40, 54));
+            HBRUSH br_alt = CreateSolidBrush(COLOR_TABLE_ROW_ALT);
             HPEN   pen_dv = CreatePen(PS_SOLID, 1, RGB(40, 48, 66));
             auto attr_stripe = [&](size_t r) -> HBRUSH {
                 return (r < summary.culprits.size())

@@ -345,15 +345,15 @@ static void draw_card(
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
     // --- Palette (aligned with Stuttometer Fluent Zinc dark theme) ---
-    Color color_bg(255, 0x11, 0x15, 0x1F);              // #11151f (standalone canvas)
-    Color color_card(255, 0x1C, 0x21, 0x2C);            // #1c212c (unified card panels & tiles)
-    Color color_card_border(255, 0x28, 0x30, 0x42);     // #283042 (container outline)
-    Color color_inset_border(255, 0x2A, 0x35, 0x4B);    // #2a354b (outer 1px inset — DO NOT CHANGE)
-    Color color_text_pri(255, 0xFF, 0xFF, 0xFF);        // #ffffff (pure white)
-    Color color_text_bright(255, 0xF1, 0xF5, 0xF9);     // #f1f5f9 (bright text)
-    Color color_text_label(255, 0xCB, 0xD5, 0xE1);      // #cbd5e1 (slate label text)
-    Color color_text_muted(255, 0x94, 0xA3, 0xB8);      // #94a3b8 (muted slate)
-    Color color_accent_emerald(255, 16, 185, 129);      // #10b981 (emerald brand/healthy accent)
+    Color color_bg = to_gdiplus_color(COLOR_CANVAS_CARD);
+    Color color_card = to_gdiplus_color(COLOR_CARD_BG);
+    Color color_card_border = to_gdiplus_color(COLOR_CARD_BORDER);
+    Color color_inset_border = to_gdiplus_color(COLOR_INSET_BORDER);
+    Color color_text_pri = to_gdiplus_color(COLOR_TEXT_PRI);
+    Color color_text_bright = to_gdiplus_color(COLOR_TEXT_BRIGHT);
+    Color color_text_label = to_gdiplus_color(COLOR_TEXT_LABEL);
+    Color color_text_muted = to_gdiplus_color(COLOR_TEXT_MUTED);
+    Color color_accent_emerald = to_gdiplus_color(COLOR_ACCENT_EMERALD);
     Color color_accent_danger = to_gdiplus_color(COLOR_SEV_DANGER);
     Color color_accent_amb = to_gdiplus_color(COLOR_SEV_WARNING);
 

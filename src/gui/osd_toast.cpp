@@ -2,6 +2,7 @@
 #include "theme.hpp"
 #include "gui_string_utils.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
+#include "stuttometer/internal/gui_constants.hpp"
 
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
@@ -32,7 +33,7 @@ static BOOL CALLBACK EnumProcessWindowsProc(HWND hwnd, LPARAM lParam) {
         if (IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == nullptr) {
             RECT rc{};
             GetWindowRect(hwnd, &rc);
-            if ((rc.right - rc.left) > 100 && (rc.bottom - rc.top) > 100) {
+            if ((rc.right - rc.left) > gui_constants::MIN_WINDOW_DIMENSION_PX && (rc.bottom - rc.top) > gui_constants::MIN_WINDOW_DIMENSION_PX) {
                 pSearch->hwnd = hwnd;
                 return FALSE; // Found main window
             }
@@ -129,8 +130,8 @@ void OsdToast::recreate_fonts(UINT dpi) noexcept {
 
 void OsdToast::init_gdi_resources() noexcept {
     try {
-        if (!br_bg_) br_bg_ = CreateSolidBrush(RGB(17, 21, 31));
-        if (!pen_border_) pen_border_ = CreatePen(PS_SOLID, 1, RGB(42, 53, 75));
+        if (!br_bg_) br_bg_ = CreateSolidBrush(COLOR_CANVAS_OSD);
+        if (!pen_border_) pen_border_ = CreatePen(PS_SOLID, 1, COLOR_BORDER_OSD);
     } catch (...) {
     }
 }
@@ -267,7 +268,7 @@ void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPos
             state_start_tp_ = now;
 
             ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
-            timer_id_ = SetTimer(hwnd_, TIMER_ID, 16, nullptr);
+            timer_id_ = SetTimer(hwnd_, TIMER_ID, gui_constants::OSD_ANIMATION_TIMER_MS, nullptr);
             InvalidateRect(hwnd_, nullptr, TRUE);
         } else {
             // Rapid re-trigger: immediately full opacity and extend display deadline
@@ -277,7 +278,7 @@ void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPos
             state_ = State::DISPLAYING;
             state_start_tp_ = now;
             display_deadline_ = now + std::chrono::milliseconds(display_duration_ms_);
-            timer_id_ = SetTimer(hwnd_, TIMER_ID, 16, nullptr);
+            timer_id_ = SetTimer(hwnd_, TIMER_ID, gui_constants::OSD_ANIMATION_TIMER_MS, nullptr);
             InvalidateRect(hwnd_, nullptr, TRUE);
         }
     } catch (...) {
@@ -420,8 +421,8 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
 
         init_gdi_resources();
 
-        COLORREF col_text_pri = RGB(241, 245, 249); // Soft white
-        COLORREF col_text_sec = RGB(148, 163, 184); // Slate
+        COLORREF col_text_pri = COLOR_TEXT_BRIGHT;
+        COLORREF col_text_sec = COLOR_TEXT_MUTED;
         COLORREF col_accent = get_attribution_color(current_data_.attribution);
         HBRUSH br_accent = get_attribution_brush(current_data_.attribution);
         std::wstring attr_tag;
