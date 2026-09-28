@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include "stuttometer/flight_recorder.hpp"
+#include "stuttometer/constants.hpp"
 #include "stuttometer/fixed_table.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include "stuttometer/trigger_engine.hpp"
@@ -505,8 +506,8 @@ static void test_flight_recorder_capacity_extremes() {
 
     // 2. Large capacity: 1,048,576 slots (maximum supported capacity)
     {
-        stuttometer::FlightRecorder fr_large(1048576);
-        STUTTO_ASSERT(fr_large.capacity() == 1048576);
+        stuttometer::FlightRecorder fr_large(stuttometer::MAX_BUFFER_SLOTS);
+        STUTTO_ASSERT(fr_large.capacity() == stuttometer::MAX_BUFFER_SLOTS);
 
         constexpr size_t TEST_EVENTS = 10000;
         for (size_t i = 0; i < TEST_EVENTS; ++i) {

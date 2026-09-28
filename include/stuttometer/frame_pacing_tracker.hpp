@@ -11,6 +11,24 @@
 
 namespace stuttometer {
 
+namespace pacing_tuning {
+    inline constexpr double   CONSISTENCY_FLOOR_MS       = 1.5;
+    inline constexpr double   CONSISTENCY_RATIO          = 0.15;
+    inline constexpr double   CONSISTENCY_REJECT_FACTOR  = 2.0;
+    inline constexpr double   SIGMA_SCALE                = 0.10;
+    inline constexpr double   SIGMA_FLOOR_MS             = 0.5;
+    inline constexpr double   SIGMA_CEIL_MS              = 5.0;
+    inline constexpr uint32_t CANDIDATE_MAX_SAMPLES      = 1000;
+    inline constexpr uint32_t PROMOTION_MIN_SAMPLES      = 60;
+    inline constexpr uint32_t POST_WARMUP_MIN_SAMPLES    = 8;  // sample_count >= 8: baseline active
+    inline constexpr uint32_t INITIAL_WARMUP_SAMPLES     = 4;  // sample_count < 4: catastrophic-only gate
+    inline constexpr double   DELTA_SCALE_FACTOR         = 0.3;
+    inline constexpr double   CATASTROPHIC_FACTOR        = 12.0;
+    inline constexpr double   CATASTROPHIC_FLOOR_MS      = 50.0;
+    inline constexpr double   CATASTROPHIC_CEIL_MS       = 500.0;
+    inline constexpr double   DEFAULT_JUDDER_SWING_RATIO = 0.35;
+}
+
 // Strongly-typed trigger reason identifier
 enum class TriggerReason : uint8_t {
     NONE                  = 0,
@@ -142,7 +160,7 @@ struct AdaptivePacingParams {
     const double clamped_t = std::clamp(mean_ms, T_240_FPS_MS, T_60_FPS_MS);
     const double factor = (clamped_t - T_240_FPS_MS) / (T_60_FPS_MS - T_240_FPS_MS);
     const double mult = HIGH_REFRESH_SPIKE_MULTIPLIER + factor * (CONSERVATIVE_SPIKE_MULTIPLIER - HIGH_REFRESH_SPIKE_MULTIPLIER);
-    const double delta = std::clamp(mean_ms * 0.3, HIGH_REFRESH_MIN_DELTA_MS, CONSERVATIVE_MIN_DELTA_MS);
+    const double delta = std::clamp(mean_ms * pacing_tuning::DELTA_SCALE_FACTOR, HIGH_REFRESH_MIN_DELTA_MS, CONSERVATIVE_MIN_DELTA_MS);
 
     return { mult, delta };
 }
@@ -270,7 +288,7 @@ inline CadenceDeltaResult calculate_cadence_delta(
 }
 
 // Pushes a non-stuttering clean frame into the rolling window
-inline void push_clean_frame(RollingFrameStats& stats, uint32_t dur_us, uint64_t qpc_ts, double swing_ratio = 0.35) noexcept {
+inline void push_clean_frame(RollingFrameStats& stats, uint32_t dur_us, uint64_t qpc_ts, double swing_ratio = pacing_tuning::DEFAULT_JUDDER_SWING_RATIO) noexcept {
     if (dur_us == 0) return;
 
     if (stats.sample_count > 0) {
@@ -362,10 +380,10 @@ constexpr uint32_t MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR = 10;
     // Consistency check & tolerance triage (D5):
     const double cand_mean_us = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
     const double cand_mean_ms = cand_mean_us / 1000.0;
-    const double tol_ms       = std::max(1.5, cand_mean_ms * 0.15);
+    const double tol_ms       = std::max(pacing_tuning::CONSISTENCY_FLOOR_MS, cand_mean_ms * pacing_tuning::CONSISTENCY_RATIO);
     const double dev_ms       = std::abs(dur_ms - cand_mean_ms);
 
-    if (dev_ms > 2.0 * tol_ms) {
+    if (dev_ms > pacing_tuning::CONSISTENCY_REJECT_FACTOR * tol_ms) {
         clear_cadence_candidate(stats);
         return CandidateOutcome::RESET;
     }
@@ -381,7 +399,7 @@ constexpr uint32_t MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR = 10;
     stats.candidate_consecutive_skips = 0;
 
     // Cap policy: clear and reseed when reaching 1000 without promotion (D8).
-    if (stats.candidate_count >= 1000) {
+    if (stats.candidate_count >= pacing_tuning::CANDIDATE_MAX_SAMPLES) {
         clear_cadence_candidate(stats);
         stats.candidate_first_qpc  = timestamp_qpc;
         stats.candidate_sum_us     = dur_us;
@@ -395,7 +413,7 @@ constexpr uint32_t MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR = 10;
     ++stats.candidate_count;
 
     // Promotion threshold not yet reached.
-    if (stats.candidate_count < 60) {
+    if (stats.candidate_count < pacing_tuning::PROMOTION_MIN_SAMPLES) {
         return CandidateOutcome::ACCUMULATED;
     }
 
@@ -404,7 +422,7 @@ constexpr uint32_t MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR = 10;
     const double var_us     = std::max(0.0, mean_sq_us - (mean_us * mean_us));
     const double sigma_ms   = std::sqrt(var_us) / 1000.0;
 
-    const double sigma_threshold_ms = std::clamp(0.10 * (mean_us / 1000.0), 0.5, 5.0);
+    const double sigma_threshold_ms = std::clamp(pacing_tuning::SIGMA_SCALE * (mean_us / 1000.0), pacing_tuning::SIGMA_FLOOR_MS, pacing_tuning::SIGMA_CEIL_MS);
     if (sigma_ms >= sigma_threshold_ms || (mean_us / 1000.0) >= CANDIDATE_SANITY_CEILING_MS) {
         return CandidateOutcome::ACCUMULATED;
     }
@@ -506,7 +524,7 @@ inline FramePacingResult evaluate_frame_pacing(
         );
     }
 
-    if (stats.sample_count < 8) {
+    if (stats.sample_count < pacing_tuning::POST_WARMUP_MIN_SAMPLES) {
         if (mode == FrameTriggerMode::STATIC_ONLY) {
             // STATIC_ONLY: Evaluates static threshold immediately from frame 0
             if (dur_ms >= effective_static_threshold_ms) {
@@ -524,14 +542,14 @@ inline FramePacingResult evaluate_frame_pacing(
             bool is_warmup_stall = false;
             bool static_trigger  = false;
 
-            if (stats.sample_count < 4) {
+            if (stats.sample_count < pacing_tuning::INITIAL_WARMUP_SAMPLES) {
                 // Initial 4 frames: suppress static trigger entirely to let the baseline
                 // stabilize. Only truly catastrophic frames (>= 12x base present time,
                 // clamped to [50 ms, 500 ms]) are clamped and pushed so warmup can
                 // complete; ordinary slow frames are pushed unclamped.
                 const double base_present_ms =
                     invert_effective_static_threshold(effective_static_threshold_ms);
-                const double catastrophic_cutoff_ms = std::clamp(12.0 * base_present_ms, 50.0, 500.0);
+                const double catastrophic_cutoff_ms = std::clamp(pacing_tuning::CATASTROPHIC_FACTOR * base_present_ms, pacing_tuning::CATASTROPHIC_FLOOR_MS, pacing_tuning::CATASTROPHIC_CEIL_MS);
 
                 if (dur_ms >= catastrophic_cutoff_ms) {
                     is_warmup_stall = true; // Catastrophic stall during early warmup: suppress trigger, advance baseline

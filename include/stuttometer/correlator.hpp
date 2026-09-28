@@ -11,6 +11,8 @@
 
 namespace stuttometer {
 
+inline constexpr double MIN_ATTRIBUTION_CONFIDENCE = 0.30;
+
 struct CorrelateOptions {
     double window_pre_ms{250.0};
     double window_post_ms{30.0};

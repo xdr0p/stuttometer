@@ -54,6 +54,15 @@ inline constexpr COLORREF COLOR_CARD_DIVIDER    = RGB(36, 43, 58);   // Section 
 inline constexpr COLORREF COLOR_INPUT_BG        = RGB(19, 22, 29);   // Input / Inspector Background (#13161D)
 inline constexpr COLORREF COLOR_INPUT_BORDER    = RGB(48, 58, 78);   // Input Outline (#303A4E)
 
+// Standalone Canvas / OSD / Card Exports
+inline constexpr COLORREF COLOR_CANVAS_OSD      = RGB(17, 21, 31);   // #11151F (OSD toast canvas)
+inline constexpr COLORREF COLOR_CANVAS_CARD     = RGB(17, 21, 31);   // #11151F (PNG export card canvas - shared with OSD)
+inline constexpr COLORREF COLOR_BORDER_OSD      = RGB(42, 53, 75);   // #2A354B (OSD toast container border)
+inline constexpr COLORREF COLOR_INSET_BORDER    = RGB(42, 53, 75);   // #2A354B (Card outer 1px inset - DO NOT CHANGE)
+inline constexpr COLORREF COLOR_TEXT_SOFT_WHITE = RGB(226, 232, 240); // #E2E8F0 (Native titlebar text)
+inline constexpr COLORREF COLOR_BADGE_BG        = RGB(24, 28, 38);   // #181C26 (Badge background)
+inline constexpr COLORREF COLOR_TABLE_ROW_ALT   = RGB(34, 40, 54);   // #222836 (Benchmark table row alt)
+
 inline constexpr COLORREF COLOR_LIST_BG         = RGB(17, 19, 23);   // ListView Canvas (#111317)
 inline constexpr COLORREF COLOR_LIST_ROW_ALT    = RGB(22, 25, 33);   // Alternating Row (#161921)
 inline constexpr COLORREF COLOR_LIST_SEL        = RGB(30, 58, 95);   // Selected Row Highlight (#1E3A5F)

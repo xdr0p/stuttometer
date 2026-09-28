@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include <stuttometer/gui_config.hpp>
+#include <stuttometer/constants.hpp>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <cmath>
@@ -25,7 +26,7 @@ static void test_auto_mode_deserialization() {
     deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
 
     STUTTO_ASSERT(!cfg.present_threshold_manual);
-    STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+    STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     std::cout << "  -> PASSED\n";
 }
 
@@ -64,7 +65,7 @@ static void test_manual_mode_fault_tolerance() {
         std::string proc;
         deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
         STUTTO_ASSERT(!cfg.present_threshold_manual);
-        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     }
 
     // 3b. Null min_fps_threshold
@@ -78,7 +79,7 @@ static void test_manual_mode_fault_tolerance() {
         std::string proc;
         deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
         STUTTO_ASSERT(!cfg.present_threshold_manual);
-        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     }
 
     // 3c. Negative min_fps_threshold (-5.0)
@@ -92,7 +93,7 @@ static void test_manual_mode_fault_tolerance() {
         std::string proc;
         deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
         STUTTO_ASSERT(!cfg.present_threshold_manual);
-        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     }
 
     // 3d. Below range min_fps_threshold (7.0 < 10.0)
@@ -106,7 +107,7 @@ static void test_manual_mode_fault_tolerance() {
         std::string proc;
         deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
         STUTTO_ASSERT(!cfg.present_threshold_manual);
-        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     }
 
     // 3e. Above range min_fps_threshold (1000.0 > 500.0)
@@ -120,7 +121,7 @@ static void test_manual_mode_fault_tolerance() {
         std::string proc;
         deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
         STUTTO_ASSERT(!cfg.present_threshold_manual);
-        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     }
 
     // 3f. Lower boundary edge (9.999 < 10.0)
@@ -134,7 +135,7 @@ static void test_manual_mode_fault_tolerance() {
         std::string proc;
         deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
         STUTTO_ASSERT(!cfg.present_threshold_manual);
-        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     }
 
     // 3g. Upper boundary edge (500.001 > 500.0)
@@ -148,7 +149,7 @@ static void test_manual_mode_fault_tolerance() {
         std::string proc;
         deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
         STUTTO_ASSERT(!cfg.present_threshold_manual);
-        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     }
 
     // 3h. Exact valid boundaries: 10.0 and 500.0
@@ -191,17 +192,17 @@ static void test_manual_mode_fault_tolerance() {
             std::string proc;
             deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
             STUTTO_ASSERT(!cfg.present_threshold_manual);
-            STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+            STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
         }
     }
 
     // 3j. Direct validation of fps_to_present_threshold_ms robustness & clamping
     {
-        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(0.0) - 16.67) < 1e-6);
-        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(-10.0) - 16.67) < 1e-6);
-        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(std::numeric_limits<double>::quiet_NaN()) - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(0.0) - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
+        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(-10.0) - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
+        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(std::numeric_limits<double>::quiet_NaN()) - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
         STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(std::numeric_limits<double>::infinity()) - 2.0) < 1e-6);
-        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(-std::numeric_limits<double>::infinity()) - 16.67) < 1e-6);
+        STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(-std::numeric_limits<double>::infinity()) - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
         STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(1000.0) - 2.0) < 1e-6);
         STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(1.0) - 200.0) < 1e-6);
         STUTTO_ASSERT(std::abs(fps_to_present_threshold_ms(60.0) - (1000.0 / 60.0)) < 1e-6);
@@ -225,7 +226,7 @@ static void test_legacy_migration_absent_flag() {
     deserialize_gui_settings_from_json(j, cfg, vk, mods, sound, proc);
 
     STUTTO_ASSERT(!cfg.present_threshold_manual);
-    STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - 16.67) < 1e-6);
+    STUTTO_ASSERT(std::abs(cfg.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     std::cout << "  -> PASSED\n";
 }
 
@@ -246,7 +247,7 @@ static void test_legacy_stale_cleanup_roundtrip() {
 
     deserialize_gui_settings_from_json(j_in, cfg1, vk1, mods1, sound1, proc1);
     STUTTO_ASSERT(!cfg1.present_threshold_manual);
-    STUTTO_ASSERT(std::abs(cfg1.present_threshold_ms - 16.67) < 1e-6);
+    STUTTO_ASSERT(std::abs(cfg1.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
 
     nlohmann::json j_out = serialize_gui_settings_to_json(cfg1, vk1, mods1, sound1, proc1);
     STUTTO_ASSERT(j_out.contains("present_threshold_manual"));
@@ -260,7 +261,7 @@ static void test_legacy_stale_cleanup_roundtrip() {
     std::string proc2;
     deserialize_gui_settings_from_json(j_out, cfg2, vk2, mods2, sound2, proc2);
     STUTTO_ASSERT(!cfg2.present_threshold_manual);
-    STUTTO_ASSERT(std::abs(cfg2.present_threshold_ms - 16.67) < 1e-6);
+    STUTTO_ASSERT(std::abs(cfg2.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
 
     std::cout << "  -> PASSED\n";
 }
@@ -270,7 +271,7 @@ static void test_auto_mode_serialization() {
     std::cout << "[TEST] 6. Auto Mode Serialization...\n";
     GuiConfig cfg;
     cfg.present_threshold_manual = false;
-    cfg.present_threshold_ms = 16.67;
+    cfg.present_threshold_ms = DEFAULT_60HZ_VBLANK_MS;
 
     nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x7A, 2, true, "Game.exe");
     STUTTO_ASSERT(j.contains("present_threshold_manual"));
@@ -329,7 +330,7 @@ static void test_full_settings_roundtrip_auto() {
     GuiConfig cfg_in;
     cfg_in.window_pre_ms = 300.0;
     cfg_in.window_post_ms = 50.0;
-    cfg_in.present_threshold_ms = 16.67;
+    cfg_in.present_threshold_ms = DEFAULT_60HZ_VBLANK_MS;
     cfg_in.present_threshold_manual = false;
     cfg_in.cooldown_ms = 2000.0;
     cfg_in.enable_audio = false;
@@ -380,7 +381,7 @@ static void test_full_settings_roundtrip_auto() {
     STUTTO_ASSERT(proc_out == proc_in);
 
     STUTTO_ASSERT(!cfg_out.present_threshold_manual);
-    STUTTO_ASSERT(std::abs(cfg_out.present_threshold_ms - 16.67) < 1e-6);
+    STUTTO_ASSERT(std::abs(cfg_out.present_threshold_ms - DEFAULT_60HZ_VBLANK_MS) < 1e-6);
     STUTTO_ASSERT(std::abs(cfg_out.window_pre_ms - cfg_in.window_pre_ms) < 1e-6);
     STUTTO_ASSERT(std::abs(cfg_out.window_post_ms - cfg_in.window_post_ms) < 1e-6);
     STUTTO_ASSERT(std::abs(cfg_out.cooldown_ms - cfg_in.cooldown_ms) < 1e-6);

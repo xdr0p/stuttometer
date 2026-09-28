@@ -14,6 +14,13 @@
 
 namespace stuttometer {
 
+namespace bench_tuning {
+    inline constexpr double   FALLBACK_PASS1_SANITY_MS      = 100.0;
+    inline constexpr double   FALLBACK_PASS2_MEDIAN_FACTOR  = 1.4;
+    inline constexpr uint64_t FALLBACK_MIN_SAMPLES          = 8;
+    inline constexpr size_t   FALLBACK_WINDOW_SIZE          = 64;
+}
+
 enum class BindingFloorSource : uint8_t {
     NONE    = 0,
     DYNAMIC = 1,

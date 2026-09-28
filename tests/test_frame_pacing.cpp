@@ -151,7 +151,7 @@ static void test_cadence_judder_detection() {
     config.present_threshold_ms = 40.0;
     config.frame_trigger_mode = stuttometer::FrameTriggerMode::HYBRID;
     config.enable_judder_detection = true;
-    config.judder_swing_ratio = 0.35;
+    config.judder_swing_ratio = stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO;
 
     stuttometer::TriggerEngine engine(config, qpc_freq);
     const uint32_t pid = 7777;
