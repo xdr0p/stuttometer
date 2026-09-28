@@ -14,11 +14,18 @@ constexpr uint64_t PAUSE_CEILING_US = static_cast<uint64_t>(PAUSE_CEILING_MS * 1
 constexpr uint64_t KERNEL_SINGLE_EVENT_CAP_US = 10'000'000ULL; // 10.0 s: DPC, ISR, CSwitch, Memory, HardFault
 constexpr uint64_t DISK_SINGLE_EVENT_CAP_US   =  3'000'000ULL; //  3.0 s: Disk I/O
 
-// Temporal deduplication threshold for duplicate present paths (e.g. standard DXGI + MPO on same frame).
-// A sub-1 ms inter-frame delta is physically implausible for a real frame even at extreme refresh rates
-// (240 Hz = ~4.17 ms). The MPO intra-frame artifact is ~0.3 ms. Any Stop-to-Stop delta on the same
-// swapchain below this value is classified as a duplicate present path and excluded from pacing ingestion.
-constexpr uint64_t DUPLICATE_PRESENT_PATH_MAX_US = 1000; // 1.0 ms
+// Duplicate present path detection bounds (in microseconds).
+// The MPO artifact is driver-side API overhead (typically ~1.7 ms) and does NOT scale
+// with display cadence. A pure fraction of vblank fails at low refresh rates (would flag
+// 120 FPS uncapped on a 60 Hz panel). A pure min() fails at high refresh rates (360 Hz+,
+// where vblank * 0.5 drops below the artifact size). Clamp covers both extremes.
+inline constexpr uint64_t DUPLICATE_PRESENT_PATH_FLOOR_US        = 2000;  // 2.0 ms floor (high-refresh protection)
+inline constexpr uint64_t DUPLICATE_PRESENT_PATH_CEILING_US      = 3000;  // 3.0 ms ceiling (uncapped-low-refresh protection)
+inline constexpr double   DUPLICATE_PRESENT_PATH_VBLANK_FRACTION = 0.5;   // 50% of vblank interval
+inline constexpr uint64_t DUPLICATE_PRESENT_PATH_DEFAULT_US      = 2000;  // Fallback when vblank is unset
+
+static_assert(DUPLICATE_PRESENT_PATH_FLOOR_US <= DUPLICATE_PRESENT_PATH_CEILING_US,
+              "Floor must be <= ceiling for std::clamp");
 
 // Warmup clamp — bounds the contribution of any single warmup frame to the baseline,
 // allowing warmup to complete even when every frame exceeds the static threshold
@@ -34,5 +41,14 @@ constexpr double WARMUP_CLAMP_US = 100000.0; // 100 ms
 // The two quantities are equal in the current DXGI ETW path but the engine does not
 // enforce that invariant; do NOT collapse this to PAUSE_CEILING_US.
 constexpr double DEFENSIVE_DURATION_CLAMP_US = 10000000.0; // 10.0 s
+
+// Absolute sanity ceiling for candidate cadence adaptation (~5 FPS floor).
+// Chosen to be well below any real-time interactive target and well above the pathological-hang
+// / pause regime (PAUSE_CEILING_MS = 2000.0) that the sanity ceiling exists to reject.
+// Mode-independent: applies to both HYBRID and DYNAMIC_ONLY. Replaces vblank-derived static gate.
+constexpr double CANDIDATE_SANITY_CEILING_MS = 200.0;
+
+// Maximum time window an unpromoted candidate accumulator can persist before being cleared as stale.
+constexpr uint64_t STALE_CANDIDATE_US = 10'000'000ULL; // 10.0 s
 
 } // namespace stuttometer

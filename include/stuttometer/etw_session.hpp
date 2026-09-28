@@ -192,7 +192,7 @@ static_assert(std::is_trivially_copyable_v<LastFlipEntry>, "LastFlipEntry must b
 struct PresentDeltaResult {
     uint64_t effective_dur_us{0};
     bool is_baseline_reset{false};
-    bool is_duplicate_present_path{false}; // True when frametime_us is implausibly small (< 1 ms): duplicate present path artifact
+    bool is_duplicate_present_path{false}; // True when frametime_us is below dynamic threshold (clamped [2ms, 3ms] vblank fraction): duplicate present path artifact
 };
 
 static inline PresentDeltaResult calculate_effective_present_duration(
@@ -200,7 +200,8 @@ static inline PresentDeltaResult calculate_effective_present_duration(
     uint64_t previous_timestamp_qpc,
     uint64_t present_start_qpc,
     uint64_t qpc_freq,
-    uint64_t max_pause_ceiling_us = PAUSE_CEILING_US // 2.0s ceiling for loading/Alt-Tab
+    uint64_t max_pause_ceiling_us = PAUSE_CEILING_US,
+    double vblank_interval_ms = 0.0
 ) noexcept {
     PresentDeltaResult result{};
     uint64_t api_dur_us = 0;
@@ -227,12 +228,28 @@ static inline PresentDeltaResult calculate_effective_present_duration(
     result.effective_dur_us = (frametime_us > api_dur_us) ? frametime_us : api_dur_us;
     result.is_baseline_reset = false;
 
-    // Temporal deduplication: a sub-DUPLICATE_PRESENT_PATH_MAX_US inter-frame delta on the same swapchain
-    // is physically implausible for a real frame (even 240 Hz = ~4.17 ms). This is the signature of a
-    // duplicate present path artifact — e.g. a DX12 title emitting both standard DXGI (42/43) and
-    // MPO (55/56) Stop events for the same rendered frame. The event is recorded faithfully in the flight
-    // recorder and NDJSON stream (data fidelity); only pacing baseline ingestion is skipped by the caller.
-    if (frametime_us > 0 && frametime_us < DUPLICATE_PRESENT_PATH_MAX_US) {
+    // Temporal deduplication: an inter-frame delta below the dynamic vblank-derived threshold
+    // (clamped to [DUPLICATE_PRESENT_PATH_FLOOR_US, DUPLICATE_PRESENT_PATH_CEILING_US]) on the same
+    // swapchain indicates a duplicate present path artifact — e.g. a DX12 title emitting both
+    // standard DXGI (42/43) and MPO (55/56) Stop events for the same rendered frame. The event is recorded
+    // faithfully in the flight recorder and NDJSON stream (data fidelity); only pacing baseline ingestion is skipped.
+    uint64_t dup_max_us;
+    if (vblank_interval_ms > 0.0) {
+        const uint64_t vblank_us = static_cast<uint64_t>(vblank_interval_ms * 1000.0);
+        dup_max_us = std::clamp(
+            static_cast<uint64_t>(vblank_us * DUPLICATE_PRESENT_PATH_VBLANK_FRACTION),
+            DUPLICATE_PRESENT_PATH_FLOOR_US,
+            DUPLICATE_PRESENT_PATH_CEILING_US
+        );
+    } else {
+        // Fallback: vblank unset. Note that TriggerEngine::vblank_interval_ms() falls back to
+        // present_threshold_ms when config_.vblank_interval_ms == 0.0, so this branch rarely
+        // fires in production. It exists as a defensive guard against future API changes or
+        // callers that pass 0.0 explicitly (e.g. headless test fixtures).
+        dup_max_us = DUPLICATE_PRESENT_PATH_DEFAULT_US;
+    }
+
+    if (frametime_us > 0 && frametime_us < dup_max_us) {
         result.is_duplicate_present_path = true;
     }
 

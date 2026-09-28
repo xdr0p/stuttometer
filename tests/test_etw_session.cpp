@@ -133,6 +133,46 @@ void operator delete[](void* p, size_t, std::align_val_t) noexcept {
 
 using namespace stuttometer;
 
+static void push_present_start(
+    stuttometer::EtwSessionManager& mgr,
+    uint16_t event_id,
+    uint32_t pid,
+    uint32_t tid,
+    uint64_t timestamp_qpc,
+    uint64_t swapchain_ptr)
+{
+    EVENT_RECORD ev{};
+    ev.UserContext = &mgr;
+    ev.EventHeader.ProviderId = stuttometer::DXGI_PROVIDER_GUID;
+    ev.EventHeader.EventDescriptor.Id = event_id;
+    ev.EventHeader.ProcessId = pid;
+    ev.EventHeader.ThreadId = tid;
+    ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(timestamp_qpc);
+    ev.UserData = &swapchain_ptr;
+    ev.UserDataLength = sizeof(swapchain_ptr);
+    stuttometer::EtwSessionManager::on_event_record(&ev);
+}
+
+static void push_present_stop(
+    stuttometer::EtwSessionManager& mgr,
+    uint16_t event_id,
+    uint32_t pid,
+    uint32_t tid,
+    uint64_t timestamp_qpc)
+{
+    uint32_t result_ok = 0;
+    EVENT_RECORD ev{};
+    ev.UserContext = &mgr;
+    ev.EventHeader.ProviderId = stuttometer::DXGI_PROVIDER_GUID;
+    ev.EventHeader.EventDescriptor.Id = event_id;
+    ev.EventHeader.ProcessId = pid;
+    ev.EventHeader.ThreadId = tid;
+    ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(timestamp_qpc);
+    ev.UserData = &result_ok;
+    ev.UserDataLength = sizeof(result_ok);
+    stuttometer::EtwSessionManager::on_event_record(&ev);
+}
+
 static void test_session_manager_initial_state() {
     std::cout << "[TEST] EtwSessionManager initial state and default config...\n";
 
@@ -1610,6 +1650,243 @@ static void test_working_set_trim_cross_thread_correlation() {
               << rec.duration_us << " us). PASSED.\n";
 }
 
+static void test_mpo_duplicate_path_adversarial_matrix() {
+    std::cout << "[TEST] Validating dynamic MPO duplicate path threshold matrix...\n";
+    const uint64_t qpc_freq = 10000000ULL; // 10 MHz synthetic
+
+    // Helper lambda mirroring the production clamp formula. Used only to verify the
+    // arithmetic of the constants themselves; the real function is exercised below.
+    auto compute_thresh = [](double vblank_ms) -> uint64_t {
+        if (vblank_ms <= 0.0) return stuttometer::DUPLICATE_PRESENT_PATH_DEFAULT_US;
+        uint64_t vblank_us = static_cast<uint64_t>(vblank_ms * 1000.0);
+        return std::clamp(
+            static_cast<uint64_t>(vblank_us * stuttometer::DUPLICATE_PRESENT_PATH_VBLANK_FRACTION),
+            stuttometer::DUPLICATE_PRESENT_PATH_FLOOR_US,
+            stuttometer::DUPLICATE_PRESENT_PATH_CEILING_US
+        );
+    };
+
+    // 1. 60 Hz (16.67 ms) -> 50% = 8335 us -> clamped to CEILING (3000 us)
+    //    This is the case the ceiling exists for: 120 FPS uncapped on a 60 Hz panel
+    //    produces 8333 us deltas, which must NOT be flagged as duplicate.
+    STUTTO_ASSERT(compute_thresh(16.67) == 3000);
+    {
+        const uint64_t unclamped_60hz = static_cast<uint64_t>(16.67 * 1000.0 * 0.5);
+        STUTTO_ASSERT(unclamped_60hz > stuttometer::DUPLICATE_PRESENT_PATH_CEILING_US);
+    }
+
+    // 2. 144 Hz (6.94 ms) -> 50% = 3470 us -> clamped to CEILING (3000 us)
+    STUTTO_ASSERT(compute_thresh(6.94) == 3000);
+
+    // 3. 200 Hz (5.00 ms) -> 50% = 2500 us -> within bounds
+    STUTTO_ASSERT(compute_thresh(5.00) == 2500);
+
+    // 4. 240 Hz (4.17 ms) -> 50% = 2085 us -> within bounds
+    STUTTO_ASSERT(compute_thresh(4.17) == 2085);
+
+    // 5. 360 Hz (2.78 ms) -> 50% = 1390 us -> clamped to FLOOR (2000 us)
+    //    Proves that a min() without a floor would collapse below the artifact size.
+    STUTTO_ASSERT(compute_thresh(2.78) == 2000);
+    {
+        const uint64_t unclamped_360hz = static_cast<uint64_t>(2.78 * 1000.0 * 0.5);
+        STUTTO_ASSERT(unclamped_360hz < stuttometer::DUPLICATE_PRESENT_PATH_FLOOR_US);
+    }
+
+    // 6. Unset vblank (0.0 ms) -> defensive fallback
+    STUTTO_ASSERT(compute_thresh(0.0) == stuttometer::DUPLICATE_PRESENT_PATH_DEFAULT_US);
+
+    // 7. Strict Inequality Boundary Verification (floor, interior, ceiling):
+    //    Frametime exactly at threshold must NOT be flagged (strict '<').
+    // 7a. Interior (200 Hz -> 2500 us)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(2.5, qpc_freq); // exactly 2500 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 5.0);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(2.499, qpc_freq); // 2499 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 5.0);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7b. Floor boundary (360 Hz -> clamped to 2000 us)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(2.0, qpc_freq); // exactly 2000 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 2.78);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(1.999, qpc_freq); // 1999 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 2.78);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7c. Ceiling boundary (60 Hz -> clamped to 3000 us)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(3.0, qpc_freq); // exactly 3000 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 16.67);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(2.999, qpc_freq); // 2999 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 16.67);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7d. Ceiling boundary (144 Hz -> clamped to 3000 us)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(3.0, qpc_freq); // exactly 3000 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 6.94);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(2.999, qpc_freq); // 2999 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 6.94);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7e. Interior boundary (240 Hz -> 2085 us)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(2.085, qpc_freq); // exactly 2085 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 4.17);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(2.084, qpc_freq); // 2084 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 4.17);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7f. Defensive fallback boundary (0.0 ms -> fallback to 2000 us)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(2.0, qpc_freq); // exactly 2000 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 0.0);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(1.999, qpc_freq); // 1999 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 0.0);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7g. Default parameter fallback boundary (omitted vblank_interval_ms argument)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(2.0, qpc_freq); // exactly 2000 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(1.999, qpc_freq); // 1999 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7h. Negative vblank input guard (e.g. -5.0 ms -> defensive fallback to 2000 us)
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(2.0, qpc_freq); // exactly 2000 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, -5.0);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+
+        const uint64_t t3 = t1 + stuttometer::ms_to_qpc_delta(1.999, qpc_freq); // 1999 us
+        auto res2 = stuttometer::calculate_effective_present_duration(
+            t3, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, -5.0);
+        STUTTO_ASSERT(res2.is_duplicate_present_path);
+    }
+    // 7i. Domain scenario: Uncapped 120 FPS (8.333 ms = 8333 us) on 60 Hz display (16.67 ms vblank)
+    //     Must NOT be flagged as duplicate (protected by the 3000 us ceiling).
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(8.333, qpc_freq);
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 16.67);
+        STUTTO_ASSERT(!res.is_duplicate_present_path);
+    }
+    // 7j. Domain scenario: MPO driver artifact (~1.7 ms) on 360 Hz display (2.78 ms vblank)
+    //     Without floor, threshold would be 1390 us (misses artifact). With 2000 us floor, MUST be flagged.
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(1.7, qpc_freq); // 1700 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 2.78);
+        STUTTO_ASSERT(res.is_duplicate_present_path);
+    }
+    // 7k. Domain scenario: MPO driver artifact (~1.7 ms) on 500 Hz display (2.0 ms vblank)
+    //     Without floor, threshold would be 1000 us (misses artifact). With 2000 us floor, MUST be flagged.
+    {
+        const uint64_t t1 = 1000000;
+        const uint64_t t2 = t1 + stuttometer::ms_to_qpc_delta(1.7, qpc_freq); // 1700 us
+        auto res = stuttometer::calculate_effective_present_duration(
+            t2, t1, t1, qpc_freq, stuttometer::PAUSE_CEILING_US, 2.0);
+        STUTTO_ASSERT(res.is_duplicate_present_path);
+    }
+
+    // 8. End-to-End Caller Path: synthesize 42/43 + 55/56 through EtwSessionManager
+    //    at a 200 Hz vblank (5.0 ms -> 2500 us threshold) and assert the 56-Stop flag.
+    {
+        stuttometer::TriggerConfig trig_cfg;
+        trig_cfg.vblank_interval_ms = 5.0;   // 200 Hz
+        trig_cfg.target_pid = 1234;
+
+        stuttometer::FlightRecorder recorder(1024);
+        stuttometer::TriggerEngine engine(trig_cfg, qpc_freq);
+
+        stuttometer::EtwSessionConfig etw_cfg;
+        etw_cfg.enable_dxgi = true;
+
+        stuttometer::EtwSessionManager mgr(recorder, engine, etw_cfg);
+        mgr.set_running_for_test(true);
+
+        const uint32_t pid = 1234;
+        const uint32_t tid_std = 100;
+        const uint32_t tid_mpo = 200;
+        const uint64_t swapchain = 0xDEADBEEF0000ULL;
+
+        // Case A: MPO artifact 0.3 ms after 43-Stop -> MUST be flagged duplicate.
+        // Base timestamp chosen to keep the initial 43-Stop as a baseline reset.
+        const uint64_t baseA = 10000000ULL;
+        push_present_start(mgr, 42, pid, tid_std, baseA, swapchain);
+        push_present_stop (mgr, 43, pid, tid_std, baseA + stuttometer::ms_to_qpc_delta(0.5, qpc_freq));
+        push_present_start(mgr, 55, pid, tid_mpo, baseA + stuttometer::ms_to_qpc_delta(0.5, qpc_freq), swapchain);
+        push_present_stop (mgr, 56, pid, tid_mpo, baseA + stuttometer::ms_to_qpc_delta(0.8, qpc_freq));
+
+        // Case B: 3.0 ms after 43-Stop -> MUST NOT be flagged.
+        // Gap chosen so the 43-Stop is a baseline-reset-free frame and the 56-Stop's
+        // inter-Stop delta (3.0 ms) safely exceeds the 2.5 ms threshold.
+        const uint64_t baseB = baseA + stuttometer::ms_to_qpc_delta(1000.0, qpc_freq);
+        push_present_start(mgr, 42, pid, tid_std, baseB, swapchain);
+        push_present_stop (mgr, 43, pid, tid_std, baseB + stuttometer::ms_to_qpc_delta(0.5, qpc_freq));
+        push_present_start(mgr, 55, pid, tid_mpo, baseB + stuttometer::ms_to_qpc_delta(0.5, qpc_freq), swapchain);
+        push_present_stop (mgr, 56, pid, tid_mpo, baseB + stuttometer::ms_to_qpc_delta(3.5, qpc_freq));
+
+        uint64_t drops = 0;
+        auto snap = recorder.snapshot(baseA, baseB + stuttometer::ms_to_qpc_delta(10.0, qpc_freq), &drops);
+
+        bool found_flagged = false;
+        bool found_unflagged = false;
+        for (const auto& rec : snap) {
+            if (rec.event_id != 56) continue;
+            const bool is_dup = (rec.flags & stuttometer::EventFlags::DXGI_DUPLICATE_PRESENT_PATH) != 0;
+            if (is_dup) found_flagged = true;
+            else        found_unflagged = true;
+        }
+        STUTTO_ASSERT(found_flagged);
+        STUTTO_ASSERT(found_unflagged);
+
+        mgr.set_running_for_test(false);
+    }
+
+    std::cout << "  -> Dynamic MPO duplicate path adversarial matrix PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer ETW Session Manager Tests ===\n";
     try {
@@ -1642,6 +1919,7 @@ int main() {
         test_trigger_engine_stale_writer_generation_guard();
         test_trigger_engine_stale_writer_concurrent_claimed_race();
         test_working_set_trim_cross_thread_correlation();
+        test_mpo_duplicate_path_adversarial_matrix();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

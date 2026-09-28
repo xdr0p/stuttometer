@@ -344,42 +344,46 @@ static void test_sustained_stutter_storm_baseline_preservation() {
     STUTTO_ASSERT(stats.sample_count == 64);
     STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 16.666) < 0.05);
 
-    // 2. Simulate 1500 consecutive stutter frames (50ms each = 75.0s of continuous stutter storm)
-    for (int i = 0; i < 1500; ++i) {
+    // 2. Feed 60 consecutive 50.0ms frames. Frames 1..59 accumulate; frame 60 promotes!
+    for (int i = 1; i <= 60; ++i) {
         current_qpc += stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 50.0, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
             2.0, 4.0, true, 0.35, 25.0
         );
-        STUTTO_ASSERT(res.is_stutter);
-        // Sample count must NOT reset to 0 during the storm
-        STUTTO_ASSERT(stats.sample_count == 64);
-        // Baseline must NOT be corrupted by the 50ms stutters
-        STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 16.666) < 0.05);
-
-        // Candidate count must accurately accumulate and cap at 1000 without overflow or spurious reset
-        if (i < 1000) {
-            STUTTO_ASSERT(stats.candidate_count == i + 1);
+        if (i == 1) {
+            STUTTO_ASSERT(res.is_stutter);
         } else {
-            STUTTO_ASSERT(stats.candidate_count == 1000);
-            STUTTO_ASSERT(stats.candidate_sum_us == 1000ULL * 50000ULL);
+            STUTTO_ASSERT(!res.is_stutter);
+            STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+        }
+        if (i < 60) {
+            STUTTO_ASSERT(stats.candidate_count == i);
+            STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 16.666) < 0.05);
+        } else {
+            // Frame 60 promotes to 50.0ms baseline
+            STUTTO_ASSERT(stats.candidate_count == 0);
+            STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 50.0) < 0.1);
+            STUTTO_ASSERT(std::abs(res.baseline_avg_ms - 50.0) < 0.1);
+            STUTTO_ASSERT(res.spike_ratio == 1.0);
         }
     }
 
-    // 3. Clean frame arrives after storm: baseline is still intact and clean frame is accepted
-    current_qpc += stuttometer::ms_to_qpc_delta(16.666, qpc_freq);
-    auto clean_res = stuttometer::evaluate_frame_pacing(
-        stats, 16.666, current_qpc, qpc_freq,
-        stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0
-    );
-    STUTTO_ASSERT(!clean_res.is_stutter);
-    STUTTO_ASSERT(stats.sample_count == 64);
-    STUTTO_ASSERT(stats.candidate_count == 0);
-    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 16.666) < 0.05);
+    // 3. Subsequent 50.0ms frames are clean under the promoted baseline
+    for (int i = 0; i < 10; ++i) {
+        current_qpc += stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
+        auto clean_res = stuttometer::evaluate_frame_pacing(
+            stats, 50.0, current_qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0
+        );
+        STUTTO_ASSERT(!clean_res.is_stutter);
+        STUTTO_ASSERT(clean_res.reason == stuttometer::TriggerReason::NONE);
+        STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 50.0) < 0.1);
+    }
 
-    std::cout << "  -> Sustained stutter storm baseline preservation PASSED.\n";
+    std::cout << "  -> Sustained transition to 50.0 ms promoted and subsequent frames clean PASSED.\n";
 }
 
 static void test_cadence_helper_no_double_increment() {
@@ -511,17 +515,17 @@ static void test_hybrid_warmup_reject_then_recover() {
     // 3 clamped warmup samples + 4 clean frames = 7 total samples
     STUTTO_ASSERT(stats.sample_count == 7);
 
-    // Push frame 8 at 30.0ms (>= 25.0ms). sample_count == 7 is in the [4,7] window, so static
-    // triggers are active now.
+    // Push frame 8 at 30.0ms. At sample_count == 7, mean is ~52.3 ms, which lifts the ceiling
+    // to ~56.3 ms (sample_count >= 4). Frame 8 at 30.0 ms is clean.
     qpc += stuttometer::ms_to_qpc_delta(30.0, qpc_freq);
     auto res_spike = stuttometer::evaluate_frame_pacing(
         stats, 30.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
         2.0, 4.0, true, 0.35, 25.0
     );
-    STUTTO_ASSERT(res_spike.is_stutter);
-    STUTTO_ASSERT(res_spike.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
-    STUTTO_ASSERT(stats.sample_count == 8); // Stutter frame is now pushed as a clamped warmup sample (prevents starvation)
+    STUTTO_ASSERT(!res_spike.is_stutter);
+    STUTTO_ASSERT(res_spike.reason == stuttometer::TriggerReason::NONE);
+    STUTTO_ASSERT(stats.sample_count == 8);
     std::cout << "  -> HYBRID warmup reject-then-recover verified.\n";
 }
 
@@ -580,18 +584,40 @@ static void test_hybrid_warmup_static_suppression_below_200ms() {
     }
     STUTTO_ASSERT(stats.sample_count == 4);
 
-    // Frame 4 (sample_count == 4): now sample_count >= 4, so static triggers are active!
-    // A frame with 30.0ms against 25.0ms threshold must trigger STATIC_THRESHOLD
+    // Frame 4 (sample_count == 4): mean is 50.0 ms, which lifts the ceiling to 54.0 ms (sample_count >= 4).
+    // The 30.0 ms frame is clean.
     qpc += stuttometer::ms_to_qpc_delta(30.0, qpc_freq);
     auto res4 = stuttometer::evaluate_frame_pacing(
         stats, 30.0, qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
         2.0, 4.0, true, 0.35, 25.0
     );
-    STUTTO_ASSERT(res4.is_stutter);
-    STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
-    STUTTO_ASSERT(stats.sample_count == 5); // Stutter frame is now pushed as a clamped warmup sample (prevents [4,7] starvation)
+    STUTTO_ASSERT(!res4.is_stutter);
+    STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::NONE);
+    STUTTO_ASSERT(stats.sample_count == 5);
     std::cout << "  -> HYBRID warmup static suppression for frames 0..3 verified.\n";
+}
+
+static void test_hybrid_warmup_100fps_on_200hz_no_static_trigger() {
+    std::cout << "[TEST] Verifying HYBRID warmup at 100 FPS on 200 Hz display produces zero static triggers...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 10000000ULL;
+    // 30 frames of 10.0 ms (100 FPS) against effective_static_threshold_ms = 5.25 (200 Hz display)
+    for (int i = 0; i < 30; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 10.0, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.25,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+        STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+    }
+    std::cout << "  -> HYBRID warmup 100 FPS on 200 Hz verified zero false triggers.\n";
 }
 
 static void test_adaptive_pacing_math() {
@@ -833,7 +859,7 @@ static void test_cadence_adaptation_173fps_to_100fps() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 5.78, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            2.0, 4.0, true, 0.35, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
         STUTTO_ASSERT(!res.is_stutter);
@@ -847,7 +873,7 @@ static void test_cadence_adaptation_173fps_to_100fps() {
     auto res1 = stuttometer::evaluate_frame_pacing(
         stats, 10.2, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        2.0, 4.0, true, 0.35, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(res1.is_stutter);
@@ -861,11 +887,11 @@ static void test_cadence_adaptation_173fps_to_100fps() {
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.2, current_qpc, qpc_freq,
             stuttometer::FrameTriggerMode::HYBRID,
-            2.0, 4.0, true, 0.35, 25.0,
+            2.0, 4.0, true, 0.35, 5.5,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
-        STUTTO_ASSERT(res.is_stutter);
-        STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::RELATIVE_SPIKE);
+        STUTTO_ASSERT(!res.is_stutter);
+        STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
 
         if (i < 60) {
             STUTTO_ASSERT(stats.candidate_count == i);
@@ -884,7 +910,7 @@ static void test_cadence_adaptation_173fps_to_100fps() {
     auto res61 = stuttometer::evaluate_frame_pacing(
         stats, 10.2, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.0, 4.0, true, 0.35, 25.0,
+        2.0, 4.0, true, 0.35, 5.5,
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!res61.is_stutter);
@@ -965,9 +991,9 @@ static void test_rolling_frame_stats_alignment_and_cache_lines() {
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, sample_count) == 284);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, write_idx) == 286);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, alternating_cadence_count) == 288);
-    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, _align_pad0) == 289);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_consecutive_skips) == 289);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_count) == 290);
-    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, _align_pad1) == 292);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_clean_frames_since_last_match) == 292);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_first_qpc) == 296);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_sum_us) == 304);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_sum_sq_us) == 312);
@@ -1006,12 +1032,17 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
             2.0, 4.0, true, 0.35, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
-        STUTTO_ASSERT(res.is_stutter);
+        if (i == 1) {
+            STUTTO_ASSERT(res.is_stutter);
+        } else {
+            STUTTO_ASSERT(!res.is_stutter);
+            STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+        }
         STUTTO_ASSERT(stats.candidate_count == i);
     }
     STUTTO_ASSERT(stats.candidate_count == 30);
 
-    // 3. Feed 1 clean frame at 5.78ms (resets candidate state to 0)
+    // 3. Feed 1 clean frame at 5.78ms (candidate survives with count intact)
     current_qpc += stuttometer::ms_to_qpc_delta(5.78, qpc_freq);
     auto clean_res = stuttometer::evaluate_frame_pacing(
         stats, 5.78, current_qpc, qpc_freq,
@@ -1020,11 +1051,12 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
         stuttometer::PacingProfile::AUTO_ADAPTIVE
     );
     STUTTO_ASSERT(!clean_res.is_stutter);
-    STUTTO_ASSERT(stats.candidate_count == 0);
+    STUTTO_ASSERT(stats.candidate_count == 30);
+    STUTTO_ASSERT(stats.candidate_clean_frames_since_last_match == 1);
     STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 5.78) < 0.05);
 
-    // 4. Feed 60 frames at 10.2ms (clean re-accumulation and single promotion at frame 60)
-    for (int i = 1; i <= 60; ++i) {
+    // 4. Feed 30 additional frames at 10.2ms (completes 60 frames -> promotion executes on frame 60)
+    for (int i = 31; i <= 60; ++i) {
         current_qpc += stuttometer::ms_to_qpc_delta(10.2, qpc_freq);
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 10.2, current_qpc, qpc_freq,
@@ -1032,7 +1064,8 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
             2.0, 4.0, true, 0.35, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
-        STUTTO_ASSERT(res.is_stutter);
+        STUTTO_ASSERT(!res.is_stutter);
+        STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
         if (i < 60) {
             STUTTO_ASSERT(stats.candidate_count == i);
         } else {
@@ -1057,8 +1090,8 @@ static void test_cadence_adaptation_clean_frame_interleaving() {
     std::cout << "  -> Cadence adaptation with clean frame interleaving PASSED.\n";
 }
 
-static void test_static_gate_block_then_reenter() {
-    std::cout << "[TEST] Verifying static gate blocking then re-entering acceptable range...\n";
+static void test_candidate_reset_then_reaccumulate_promotes() {
+    std::cout << "[TEST] Verifying candidate reset on deviation then re-accumulation to promotion...\n";
 
     stuttometer::RollingFrameStats stats{};
     stuttometer::reset_frame_stats(stats, 1000);
@@ -1066,7 +1099,7 @@ static void test_static_gate_block_then_reenter() {
     const uint64_t qpc_freq = 10000000ULL;
     uint64_t current_qpc = 1000000ULL;
 
-    // 1. Establish 173 FPS baseline (5.78ms) with static ceiling 25.0ms
+    // 1. Establish 173 FPS baseline (5.78ms)
     for (int i = 0; i < 64; ++i) {
         current_qpc += stuttometer::ms_to_qpc_delta(5.78, qpc_freq);
         auto res = stuttometer::evaluate_frame_pacing(
@@ -1079,10 +1112,8 @@ static void test_static_gate_block_then_reenter() {
     }
     STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 5.78) < 0.05);
 
-    // 2. Feed 60 frames at 30.0ms:
-    // Exceeds static ceiling (30.0ms >= 25.0ms) -> static gate blocks promotion.
-    // Baseline must stay at 5.78ms throughout.
-    for (int i = 1; i <= 60; ++i) {
+    // 2. Feed 20 frames at 30.0ms: accumulates candidate to 20
+    for (int i = 1; i <= 20; ++i) {
         current_qpc += stuttometer::ms_to_qpc_delta(30.0, qpc_freq);
         auto res = stuttometer::evaluate_frame_pacing(
             stats, 30.0, current_qpc, qpc_freq,
@@ -1090,12 +1121,15 @@ static void test_static_gate_block_then_reenter() {
             2.0, 4.0, true, 0.35, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
-        STUTTO_ASSERT(res.is_stutter);
+        if (i == 1) {
+            STUTTO_ASSERT(res.is_stutter);
+        } else {
+            STUTTO_ASSERT(!res.is_stutter);
+            STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+        }
         STUTTO_ASSERT(stats.candidate_count == i);
-        // Baseline must NOT change
-        STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 5.78) < 0.05);
     }
-    STUTTO_ASSERT(stats.candidate_count == 60);
+    STUTTO_ASSERT(stats.candidate_count == 20);
 
     // 3. Feed 1 frame at 10.2ms:
     // Consistency check against candidate mean (30.0ms) fails (|10.2 - 30.0| = 19.8 > 4.5).
@@ -1113,7 +1147,7 @@ static void test_static_gate_block_then_reenter() {
 
     // 4. Feed 60 frames at 10.2ms:
     // Frame 1 seeds candidate_count = 1; 59 frames accumulate to 60.
-    // Static gate <= 25.0ms passes (10.2ms < 25.0ms) -> promotion executes on the 60th frame!
+    // Promotion executes on the 60th frame!
     for (int i = 1; i <= 60; ++i) {
         current_qpc += stuttometer::ms_to_qpc_delta(10.2, qpc_freq);
         auto res = stuttometer::evaluate_frame_pacing(
@@ -1122,7 +1156,12 @@ static void test_static_gate_block_then_reenter() {
             2.0, 4.0, true, 0.35, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
-        STUTTO_ASSERT(res.is_stutter);
+        if (i == 1) {
+            STUTTO_ASSERT(res.is_stutter);
+        } else {
+            STUTTO_ASSERT(!res.is_stutter);
+            STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+        }
         if (i < 60) {
             STUTTO_ASSERT(stats.candidate_count == i);
         } else {
@@ -1144,7 +1183,555 @@ static void test_static_gate_block_then_reenter() {
     STUTTO_ASSERT(!clean_res.is_stutter);
     STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 10.2) < 0.1);
 
-    std::cout << "  -> Static gate blocking then re-entering acceptable range PASSED.\n";
+    std::cout << "  -> Candidate reset then re-accumulation to promotion PASSED.\n";
+}
+
+static void test_hybrid_144fps_to_30fps_promotes_cleanly() {
+    std::cout << "[TEST] Verifying 144 FPS -> 30 FPS transition promotes cleanly under HYBRID mode (ceiling 5.5ms)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 144 FPS baseline (64 frames of 6.94ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 6.94, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 64);
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 6.94) < 0.05);
+
+    // 2. Feed 70 frames at 33.33 ms with ceiling 5.5 ms.
+    // Promotion must occur by frame <= 65 of 33.33 ms regime.
+    bool promoted = false;
+    int promotion_frame = -1;
+    for (int i = 1; i <= 70; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        // Detect promotion via baseline mean shifting to ~33.33 ms per C10
+        if (!promoted && std::abs(stuttometer::calculate_mean_ms(stats) - 33.33) < 0.1) {
+            promoted = true;
+            promotion_frame = i;
+        }
+    }
+    STUTTO_ASSERT(promoted);
+    STUTTO_ASSERT(promotion_frame <= 65);
+    std::cout << "  -> 144 FPS -> 30 FPS promoted cleanly at frame " << promotion_frame << ".\n";
+}
+
+static void test_hybrid_candidate_accumulation_progresses_past_seed() {
+    std::cout << "[TEST] Verifying candidate accumulation progresses past seed (regression guard)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // Establish baseline at 144 FPS (64 frames of 6.94ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 6.94, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+    }
+    // Feed 5 matching frames at 33.33 ms
+    for (int i = 1; i <= 5; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(stats.candidate_count == static_cast<uint16_t>(i));
+    }
+    STUTTO_ASSERT(stats.candidate_count == 5);
+    std::cout << "  -> Candidate accumulation progressed to count 5 as expected.\n";
+}
+
+static void test_dynamic_mode_144fps_to_30fps_promotes() {
+    std::cout << "[TEST] Verifying DYNAMIC_ONLY mode 144 FPS -> 30 FPS promotes without consulting vblank threshold...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 6.94, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::DYNAMIC_ONLY,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+
+    bool promoted = false;
+    for (int i = 1; i <= 65; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::DYNAMIC_ONLY,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        if (std::abs(stuttometer::calculate_mean_ms(stats) - 33.33) < 0.1) {
+            promoted = true;
+            break;
+        }
+    }
+    STUTTO_ASSERT(promoted);
+    std::cout << "  -> DYNAMIC_ONLY 144 FPS -> 30 FPS promoted successfully.\n";
+}
+
+static void test_hybrid_low_framerate_sigma_relative() {
+    std::cout << "[TEST] Verifying low-framerate (20 FPS / 50ms) adaptation with +/-3ms jitter promotes...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 60 FPS baseline (16.666 ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.666, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 16.666, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 64);
+
+    // 2. Feed frames around 50.0 ms with +/-3.0 ms jitter (values: 50.0, 53.0, 47.0 ms)
+    // stddev is ~2.45 ms > 1.0 ms. Under relative sigma (10% of 50ms = 5.0ms), it promotes!
+    bool promoted = false;
+    for (int i = 1; i <= 65; ++i) {
+        const double jitter = (i % 3 == 0) ? 0.0 : ((i % 3 == 1) ? 3.0 : -3.0);
+        const double dur = 50.0 + jitter;
+        qpc += stuttometer::ms_to_qpc_delta(dur, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, dur, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        if (std::abs(stuttometer::calculate_mean_ms(stats) - 50.0) < 1.0) {
+            promoted = true;
+            break;
+        }
+    }
+    STUTTO_ASSERT(promoted);
+    std::cout << "  -> Low-framerate relative sigma adaptation PASSED.\n";
+}
+
+static void test_hybrid_noisy_transition_grace_band_preserves_mean() {
+    std::cout << "[TEST] Verifying noisy transition with grace band skips preserves candidate mean...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 144 FPS baseline (6.94ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 6.94, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+    }
+
+    // 2. Feed 60 frames of 33.33 ms with 5 injected 40.0 ms frames (at intervals)
+    // 40.0ms vs 33.33ms: dev = 6.67ms (tol = max(1.5, 5.0) = 5.0ms, 2*tol = 10.0ms -> grace skip)
+    // Candidate count should only increment on 33.33 ms frames!
+    int strict_count = 0;
+    int stutter_reports = 0;
+    bool promoted = false;
+    for (int i = 1; i <= 65; ++i) {
+        bool is_jitter = (i == 10 || i == 20 || i == 30 || i == 40 || i == 50);
+        double dur = is_jitter ? 40.0 : 33.33;
+        qpc += stuttometer::ms_to_qpc_delta(dur, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, dur, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        if (res.is_stutter) {
+            ++stutter_reports;
+        }
+        if (!is_jitter && !promoted) {
+            ++strict_count;
+            if (strict_count < 60) {
+                STUTTO_ASSERT(stats.candidate_count == strict_count);
+                double cand_mean = stuttometer::resolve_candidate_mean_ms(stats);
+                STUTTO_ASSERT(std::abs(cand_mean - 33.33) < 0.5);
+            }
+        }
+        if (std::abs(stuttometer::calculate_mean_ms(stats) - 33.33) < 0.5) {
+            promoted = true;
+        }
+    }
+    // Contract C2 invariant: <= 2 reports total (1 detection + at most 1 reset)
+    STUTTO_ASSERT(stutter_reports <= 2);
+    STUTTO_ASSERT(promoted);
+    std::cout << "  -> Noisy transition grace band preserved mean and promoted (stutter reports=" << stutter_reports << " <= 2) PASSED.\n";
+}
+
+static void test_hybrid_grace_band_seed_trap_bound() {
+    std::cout << "[TEST] Verifying grace band seed trap bound (STALLED after 10 skips)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 144 FPS baseline (6.94ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 6.94, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+    }
+
+    // 2. Seed with a 40.0 ms jitter frame -> candidate_count = 1, cand_mean = 40.0 ms
+    // tol = max(1.5, 6.0) = 6.0 ms, 2*tol = 12.0 ms
+    qpc += stuttometer::ms_to_qpc_delta(40.0, qpc_freq);
+    stuttometer::evaluate_frame_pacing(
+        stats, 40.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(stats.candidate_count == 1);
+
+    // 3. Feed frames at 33.33 ms: dev = |33.33 - 40.0| = 6.67 ms (between 6.0 and 12.0 ms -> grace skip)
+    // Frames 1..10 skip; Frame 11 trips consecutive_skips > 10 (STALLED) -> clears candidate!
+    for (int i = 1; i <= 10; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(stats.candidate_count == 1);
+        STUTTO_ASSERT(stats.candidate_consecutive_skips == i);
+    }
+    // Frame 11: consecutive_skips reaches 11 > 10 -> STALLED, candidate cleared!
+    qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+    stuttometer::evaluate_frame_pacing(
+        stats, 33.33, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(stats.candidate_count == 0);
+
+    // Frame 12: cleanly seeds at 33.33 ms!
+    qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+    stuttometer::evaluate_frame_pacing(
+        stats, 33.33, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(stats.candidate_count == 1);
+    STUTTO_ASSERT(std::abs(stuttometer::resolve_candidate_mean_ms(stats) - 33.33) < 0.1);
+
+    std::cout << "  -> Grace band seed trap bound PASSED.\n";
+}
+
+static void test_hybrid_clean_frame_preserves_active_candidate() {
+    std::cout << "[TEST] Verifying clean frame preserves active candidate (30 + 1 clean + 30 -> promote)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 6.94, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+    }
+
+    // 30 candidate frames at 33.33 ms
+    for (int i = 1; i <= 30; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(stats.candidate_count == i);
+    }
+
+    // 1 old-baseline clean frame at 6.94 ms
+    qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+    auto clean_res = stuttometer::evaluate_frame_pacing(
+        stats, 6.94, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 5.5,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    STUTTO_ASSERT(!clean_res.is_stutter);
+    STUTTO_ASSERT(stats.candidate_count == 30);
+    STUTTO_ASSERT(stats.candidate_clean_frames_since_last_match == 1);
+
+    // 30 more candidate frames at 33.33 ms -> completes 60 accumulated frames!
+    for (int i = 31; i <= 60; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+    }
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 33.33) < 0.5);
+    std::cout << "  -> Clean frame candidate preservation PASSED.\n";
+}
+
+static void test_hybrid_periodic_hitches_not_silenced() {
+    std::cout << "[TEST] Verifying periodic hitches are not silenced across varying gaps (60 FPS & 30 FPS)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+
+    // Part A: 60 FPS (16.67 ms baseline, 40.0 ms hitches) across gaps of 30, 60, 90, and 120 frames
+    const std::vector<int> gaps_60fps = {30, 60, 90, 120};
+    for (int gap : gaps_60fps) {
+        stuttometer::RollingFrameStats stats{};
+        stuttometer::reset_frame_stats(stats, 1000);
+
+        uint64_t qpc = 1000000ULL;
+        for (int i = 0; i < 64; ++i) {
+            qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+            stuttometer::evaluate_frame_pacing(
+                stats, 16.67, qpc, qpc_freq,
+                stuttometer::FrameTriggerMode::HYBRID,
+                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::PacingProfile::AUTO_ADAPTIVE
+            );
+        }
+
+        for (int cycle = 0; cycle < 4; ++cycle) {
+            // Hitch frame: 40.0 ms
+            qpc += stuttometer::ms_to_qpc_delta(40.0, qpc_freq);
+            auto res = stuttometer::evaluate_frame_pacing(
+                stats, 40.0, qpc, qpc_freq,
+                stuttometer::FrameTriggerMode::HYBRID,
+                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::PacingProfile::AUTO_ADAPTIVE
+            );
+            STUTTO_ASSERT(res.is_stutter);
+
+            // Clean frames: gap frames at 16.67 ms
+            for (int f = 0; f < gap; ++f) {
+                qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+                auto clean_res = stuttometer::evaluate_frame_pacing(
+                    stats, 16.67, qpc, qpc_freq,
+                    stuttometer::FrameTriggerMode::HYBRID,
+                    2.0, 4.0, true, 0.35, 25.0,
+                    stuttometer::PacingProfile::AUTO_ADAPTIVE
+                );
+                STUTTO_ASSERT(!clean_res.is_stutter);
+            }
+            // Candidate cleared because gap >= 30 > 10 MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR
+            STUTTO_ASSERT(stats.candidate_count == 0);
+        }
+    }
+
+    // Part B: 30 FPS case (baseline 33.33 ms, 70.0 ms hitches) with 60-frame gaps
+    {
+        stuttometer::RollingFrameStats stats{};
+        stuttometer::reset_frame_stats(stats, 1000);
+
+        uint64_t qpc = 1000000ULL;
+        for (int i = 0; i < 64; ++i) {
+            qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+            stuttometer::evaluate_frame_pacing(
+                stats, 33.33, qpc, qpc_freq,
+                stuttometer::FrameTriggerMode::HYBRID,
+                2.0, 4.0, true, 0.35, 50.0,
+                stuttometer::PacingProfile::AUTO_ADAPTIVE
+            );
+        }
+
+        for (int cycle = 0; cycle < 4; ++cycle) {
+            // Hitch frame: 70.0 ms
+            qpc += stuttometer::ms_to_qpc_delta(70.0, qpc_freq);
+            auto res = stuttometer::evaluate_frame_pacing(
+                stats, 70.0, qpc, qpc_freq,
+                stuttometer::FrameTriggerMode::HYBRID,
+                2.0, 4.0, true, 0.35, 50.0,
+                stuttometer::PacingProfile::AUTO_ADAPTIVE
+            );
+            STUTTO_ASSERT(res.is_stutter);
+
+            // 60 clean frames at 33.33 ms
+            for (int f = 0; f < 60; ++f) {
+                qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+                auto clean_res = stuttometer::evaluate_frame_pacing(
+                    stats, 33.33, qpc, qpc_freq,
+                    stuttometer::FrameTriggerMode::HYBRID,
+                    2.0, 4.0, true, 0.35, 50.0,
+                    stuttometer::PacingProfile::AUTO_ADAPTIVE
+                );
+                STUTTO_ASSERT(!clean_res.is_stutter);
+            }
+            // Candidate cleared after 10 clean frames (60 > 10)
+            STUTTO_ASSERT(stats.candidate_count == 0);
+        }
+    }
+    std::cout << "  -> Periodic hitches not silenced PASSED.\n";
+}
+
+static void test_one_off_spike_no_cascade() {
+    std::cout << "[TEST] Verifying one-off spike does not cascade (candidate cleared after 10 clean frames)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+        stuttometer::evaluate_frame_pacing(
+            stats, 16.67, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+    }
+
+    int stutter_count = 0;
+    // 1 spike frame at 45.0 ms
+    qpc += stuttometer::ms_to_qpc_delta(45.0, qpc_freq);
+    auto res_spike1 = stuttometer::evaluate_frame_pacing(
+        stats, 45.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    if (res_spike1.is_stutter) ++stutter_count;
+    STUTTO_ASSERT(res_spike1.is_stutter);
+    STUTTO_ASSERT(stutter_count == 1);
+    STUTTO_ASSERT(stats.candidate_count == 1);
+
+    // 60 clean frames at 16.67 ms
+    for (int f = 0; f < 60; ++f) {
+        qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+        auto res_clean = stuttometer::evaluate_frame_pacing(
+            stats, 16.67, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        if (res_clean.is_stutter) ++stutter_count;
+    }
+    STUTTO_ASSERT(stutter_count == 1);
+    // Candidate accumulator cleared after 10 clean frames (D6a threshold = 10)
+    STUTTO_ASSERT(stats.candidate_count == 0);
+
+    // Inject an identical spike at 45.0 ms 60 frames later
+    qpc += stuttometer::ms_to_qpc_delta(45.0, qpc_freq);
+    auto res_spike2 = stuttometer::evaluate_frame_pacing(
+        stats, 45.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::PacingProfile::AUTO_ADAPTIVE
+    );
+    if (res_spike2.is_stutter) ++stutter_count;
+    STUTTO_ASSERT(res_spike2.is_stutter);
+    STUTTO_ASSERT(stutter_count == 2);
+    STUTTO_ASSERT(stats.candidate_count == 1);
+
+    std::cout << "  -> One-off spike no cascade PASSED.\n";
+}
+
+static void test_hybrid_multistage_descending_transition() {
+    std::cout << "[TEST] Verifying multi-stage descending transition (60 -> 45 -> 30 -> 20 FPS)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    int stutter_reports = 0;
+
+    // 20 frames at 16.67 ms (baseline)
+    for (int i = 0; i < 20; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 16.67, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        if (res.is_stutter) ++stutter_reports;
+    }
+
+    // 15 frames at 22.2 ms (45 FPS)
+    for (int i = 0; i < 15; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(22.2, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 22.2, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        if (res.is_stutter) ++stutter_reports;
+    }
+
+    // 15 frames at 33.33 ms (30 FPS)
+    for (int i = 0; i < 15; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        if (res.is_stutter) ++stutter_reports;
+    }
+
+    // Feed frames at 50.0 ms (20 FPS): 1 boundary reset frame + 60 accumulation frames -> promotes by frame 61!
+    for (int i = 0; i < 65; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 50.0, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        if (res.is_stutter) ++stutter_reports;
+    }
+
+    // Contract C9 invariant: <= 3 reports total
+    STUTTO_ASSERT(stutter_reports <= 3);
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 50.0) < 0.5);
+    std::cout << "  -> Multi-stage descending transition (stutter reports=" << stutter_reports << " <= 3) PASSED.\n";
 }
 
 static void test_pause_reset_clears_candidate_accumulation() {
@@ -1178,7 +1765,12 @@ static void test_pause_reset_clears_candidate_accumulation() {
             2.0, 4.0, true, 0.35, 25.0,
             stuttometer::PacingProfile::AUTO_ADAPTIVE
         );
-        STUTTO_ASSERT(res.is_stutter);
+        if (i == 1) {
+            STUTTO_ASSERT(res.is_stutter);
+        } else {
+            STUTTO_ASSERT(!res.is_stutter);
+            STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+        }
         STUTTO_ASSERT(stats.candidate_count == i);
     }
     STUTTO_ASSERT(stats.candidate_count == 30);
@@ -1237,7 +1829,12 @@ static void test_candidate_jitter_tolerance_and_rejection() {
                 1.4, 1.5, true, 0.35, 25.0,
                 stuttometer::PacingProfile::CUSTOM
             );
-            STUTTO_ASSERT(res.is_stutter);
+            if (i == 1) {
+                STUTTO_ASSERT(res.is_stutter);
+            } else {
+                STUTTO_ASSERT(!res.is_stutter);
+                STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+            }
             if (i < 60) {
                 STUTTO_ASSERT(stats.candidate_count == i);
             } else {
@@ -1277,7 +1874,8 @@ static void test_candidate_jitter_tolerance_and_rejection() {
         STUTTO_ASSERT(r1.is_stutter);
         STUTTO_ASSERT(stats.candidate_count == 1);
 
-        // Frame 2: 12.0ms -> |12.0 - 10.0| = 2.0ms > consistency_tol (1.5ms) -> rejected, candidate resets to 0!
+        // Frame 2: 12.0ms -> |12.0 - 10.0| = 2.0ms <= 2 * tol (3.0ms) -> grace skip!
+        // candidate_count remains 1, consecutive_skips = 1, stutter is suppressed under Phase 6
         current_qpc += stuttometer::ms_to_qpc_delta(12.0, qpc_freq);
         auto r2 = stuttometer::evaluate_frame_pacing(
             stats, 12.0, current_qpc, qpc_freq,
@@ -1285,7 +1883,20 @@ static void test_candidate_jitter_tolerance_and_rejection() {
             1.4, 1.5, true, 0.35, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
-        STUTTO_ASSERT(r2.is_stutter);
+        STUTTO_ASSERT(!r2.is_stutter);
+        STUTTO_ASSERT(r2.reason == stuttometer::TriggerReason::NONE);
+        STUTTO_ASSERT(stats.candidate_count == 1);
+        STUTTO_ASSERT(stats.candidate_consecutive_skips == 1);
+
+        // Frame 3: 14.0ms -> |14.0 - 10.0| = 4.0ms > 2 * tol (3.0ms) -> catastrophic reset, candidate resets to 0!
+        current_qpc += stuttometer::ms_to_qpc_delta(14.0, qpc_freq);
+        auto r3 = stuttometer::evaluate_frame_pacing(
+            stats, 14.0, current_qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            1.4, 1.5, true, 0.35, 25.0,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        STUTTO_ASSERT(r3.is_stutter);
         STUTTO_ASSERT(stats.candidate_count == 0);
     }
 
@@ -1338,7 +1949,12 @@ static void test_independent_stream_candidate_isolation() {
                 2.0, 4.0, true, 0.35, 25.0,
                 stuttometer::PacingProfile::AUTO_ADAPTIVE
             );
-            STUTTO_ASSERT(res_a.is_stutter);
+            if (i == 1) {
+                STUTTO_ASSERT(res_a.is_stutter);
+            } else {
+                STUTTO_ASSERT(!res_a.is_stutter);
+                STUTTO_ASSERT(res_a.reason == stuttometer::TriggerReason::NONE);
+            }
             if (i < 60) {
                 STUTTO_ASSERT(s.candidate_count == i);
             } else {
@@ -1478,6 +2094,279 @@ static void test_scene_transition_reset_2s_boundary() {
     std::cout << "  -> 2.0s scene transition boundary test PASSED.\n";
 }
 
+static void test_hybrid_transition_report_count() {
+    std::cout << "[TEST] Verifying 144 FPS -> 30 FPS transition reports at most 1 stutter event under Phase 6 suppression...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 144 FPS baseline (64 frames of 6.94ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(6.94, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 6.94, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 64);
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 6.94) < 0.05);
+
+    // 2. Feed 70 frames at 33.33 ms (30 FPS step transition).
+    // Count every stutter report across the transition window.
+    int stutter_report_count = 0;
+    for (int i = 1; i <= 70; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(33.33, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 33.33, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 5.5,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        if (res.is_stutter) {
+            ++stutter_report_count;
+        }
+    }
+
+    // Phase 6 invariant: Exactly 1 report at seed frame, remaining frames suppressed during accumulation and promotion.
+    STUTTO_ASSERT(stutter_report_count <= 1);
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 33.33) < 0.5);
+    std::cout << "  -> Transition produced " << stutter_report_count << " stutter report(s) (<= 1 invariant satisfied) PASSED.\n";
+}
+
+static void test_hybrid_static_fallback_cadence_routing() {
+    std::cout << "[TEST] Verifying HYBRID static fallback cadence candidate routing (60 -> 45 FPS)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 60 FPS baseline (64 frames of 16.666ms) with ceiling at 20.67 ms
+    const double static_threshold = 20.67;
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.666, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 16.666, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 10.0, true, 0.35, static_threshold,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 64);
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 16.666) < 0.05);
+
+    // 2. Feed 60 frames at 22.2ms (45 FPS):
+    // 22.2 / 16.666 = 1.332 < 2.0 (does NOT trip dynamic relative spike)
+    // 22.2 >= 20.67 (trips static fallback threshold!)
+    // In HYBRID mode, static fallback routes through process_cadence_candidate().
+    int static_reports = 0;
+    for (int i = 1; i <= 60; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(22.2, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 22.2, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 10.0, true, 0.35, static_threshold,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        if (res.is_stutter) {
+            ++static_reports;
+            STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
+        }
+        if (i < 60) {
+            STUTTO_ASSERT(stats.candidate_count == i);
+        } else {
+            // Frame 60: promotion executed!
+            STUTTO_ASSERT(stats.candidate_count == 0);
+            STUTTO_ASSERT(std::abs(res.baseline_avg_ms - 22.2) < 0.1);
+        }
+    }
+    // Exactly 1 report at frame 1 (SEEDED), frames 2..59 ACCUMULATED (suppressed), frame 60 PROMOTED (suppressed)
+    STUTTO_ASSERT(static_reports == 1);
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 22.2) < 0.1);
+
+    // 3. Subsequent 10 frames at 22.2ms are evaluated against newly promoted baseline -> zero reports
+    for (int i = 0; i < 10; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(22.2, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 22.2, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 10.0, true, 0.35, static_threshold,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+        STUTTO_ASSERT(res.reason == stuttometer::TriggerReason::NONE);
+    }
+
+    std::cout << "  -> Static fallback cadence routing and promotion PASSED.\n";
+}
+
+static void test_hybrid_candidate_staleness_sweep_10s() {
+    std::cout << "[TEST] Verifying D6b 10.0s candidate staleness sweep (isolated from D6a)...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 60 FPS baseline (16.67 ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 16.67, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 64);
+
+    // 2. Isolate D6b from D6a using 8 cycles of 1.5 s synthetic QPC advancement
+    // (12.0 s total elapsed time from candidate_first_qpc) with 5 clean frames
+    // at 16.67 ms per cycle (5 <= 10, keeping D6a completely silent throughout).
+    // On cycle 8 (elapsed > 10.0 s), D6b's 10.0 s staleness sweep fires and clears
+    // the candidate (stats.candidate_count drops to 0 specifically due to D6b).
+    int hitches_observed = 0;
+    bool staleness_sweep_observed = false;
+
+    for (int cycle = 1; cycle <= 8; ++cycle) {
+        // 5 clean frames at 16.67 ms (5 <= 10, keeping D6a completely silent)
+        for (int f = 0; f < 5; ++f) {
+            qpc += stuttometer::ms_to_qpc_delta(16.67, qpc_freq);
+            auto res_clean = stuttometer::evaluate_frame_pacing(
+                stats, 16.67, qpc, qpc_freq,
+                stuttometer::FrameTriggerMode::HYBRID,
+                2.0, 4.0, true, 0.35, 25.0,
+                stuttometer::PacingProfile::AUTO_ADAPTIVE
+            );
+            STUTTO_ASSERT(!res_clean.is_stutter);
+        }
+
+        // On cycle 8, elapsed time from candidate_first_qpc exceeds 10.0 s (~10.6 s),
+        // so D6b fires on the clean frames and drops candidate_count to 0.
+        if (cycle == 8) {
+            STUTTO_ASSERT(stats.candidate_count == 0);
+            staleness_sweep_observed = true;
+        }
+
+        // Hitch frame: 40.0 ms
+        qpc += stuttometer::ms_to_qpc_delta(40.0, qpc_freq);
+        auto res_hitch = stuttometer::evaluate_frame_pacing(
+            stats, 40.0, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::AUTO_ADAPTIVE
+        );
+        if (res_hitch.is_stutter) {
+            ++hitches_observed;
+        }
+        if (cycle == 1 || cycle == 8) {
+            // First seed on cycle 1, and reseed on cycle 8 after D6b staleness sweep
+            STUTTO_ASSERT(res_hitch.is_stutter);
+            STUTTO_ASSERT(stats.candidate_count == 1);
+        } else {
+            // Cycles 2..7 accumulate into candidate; stutter suppressed per Bug B (D3)
+            STUTTO_ASSERT(!res_hitch.is_stutter);
+            STUTTO_ASSERT(stats.candidate_count == cycle);
+        }
+
+        // Advance QPC by 1.5 s synthetically per cycle (1.5s < 2.0s PAUSE_CEILING_US)
+        qpc += stuttometer::ms_to_qpc_delta(1500.0, qpc_freq);
+    }
+
+    STUTTO_ASSERT(staleness_sweep_observed);
+    STUTTO_ASSERT(hitches_observed == 2);
+    // Baseline never falsely promoted to 40 ms
+    STUTTO_ASSERT(std::abs(stuttometer::calculate_mean_ms(stats) - 16.67) < 0.1);
+    std::cout << "  -> D6b 10.0s staleness sweep and periodic protection PASSED.\n";
+}
+
+static void test_hybrid_candidate_1000_sample_reseed_policy() {
+    std::cout << "[TEST] Verifying D8 1000-sample cap clear-and-reseed policy...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish 60 FPS baseline (16.666 ms)
+    for (int i = 0; i < 64; ++i) {
+        qpc += stuttometer::ms_to_qpc_delta(16.666, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, 16.666, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 64);
+
+    // 2. Feed frames around 150.0 ms oscillating by +/- 6.0 ms (144.0 ms and 156.0 ms):
+    // Mean = 150.0 ms, tol = max(1.5, 150 * 0.15) = 22.5 ms.
+    // dev = 6.0 ms << 22.5 ms tol -> 100% strict matches (zero grace skips).
+    // stddev = 6.0 ms >= sigma_threshold (5.0 ms) -> promotion gate fails, candidate accumulates continuously.
+    // Frames 1..60 arrive in 9.0s (< 10.0s D6b staleness sweep), disarming D6b once count reaches 60.
+
+    // Frame 1: seeds candidate (count = 1, outcome SEEDED -> is_stutter == true)
+    qpc += stuttometer::ms_to_qpc_delta(150.0, qpc_freq);
+    auto res_seed = stuttometer::evaluate_frame_pacing(
+        stats, 150.0, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::PacingProfile::CUSTOM
+    );
+    STUTTO_ASSERT(res_seed.is_stutter);
+    STUTTO_ASSERT(stats.candidate_count == 1);
+
+    // Frames 2..1000: accumulate without promotion (outcome ACCUMULATED -> is_stutter == false)
+    for (int i = 2; i <= 1000; ++i) {
+        const double dur = (i % 2 == 0) ? 144.0 : 156.0;
+        qpc += stuttometer::ms_to_qpc_delta(dur, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, dur, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            2.0, 4.0, true, 0.35, 25.0,
+            stuttometer::PacingProfile::CUSTOM
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+        STUTTO_ASSERT(stats.candidate_count == i);
+    }
+    STUTTO_ASSERT(stats.candidate_count == 1000);
+
+    // Frame 1001: reaches candidate_count >= 1000 cap!
+    // Must clear and reseed: candidate_count = 1, outcome = SEEDED -> is_stutter == true!
+    const double dur_reseed = 150.0;
+    qpc += stuttometer::ms_to_qpc_delta(dur_reseed, qpc_freq);
+    auto res_reseed = stuttometer::evaluate_frame_pacing(
+        stats, dur_reseed, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::PacingProfile::CUSTOM
+    );
+    STUTTO_ASSERT(res_reseed.is_stutter);
+    STUTTO_ASSERT(res_reseed.reason == stuttometer::TriggerReason::RELATIVE_SPIKE);
+    STUTTO_ASSERT(stats.candidate_count == 1);
+    STUTTO_ASSERT(stats.candidate_sum_us == static_cast<uint64_t>(dur_reseed * 1000.0));
+    STUTTO_ASSERT(stats.candidate_consecutive_skips == 0);
+
+    // Frame 1002: cleanly accumulates past reseed
+    const double dur_post = 150.0;
+    qpc += stuttometer::ms_to_qpc_delta(dur_post, qpc_freq);
+    auto res_post = stuttometer::evaluate_frame_pacing(
+        stats, dur_post, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.0, 4.0, true, 0.35, 25.0,
+        stuttometer::PacingProfile::CUSTOM
+    );
+    STUTTO_ASSERT(!res_post.is_stutter);
+    STUTTO_ASSERT(stats.candidate_count == 2);
+
+    std::cout << "  -> D8 1000-sample cap clear-and-reseed policy PASSED.\n";
+}
+
 int main() {
     std::cout << "================================================================\n";
     std::cout << " STUTTOMETER FRAME PACING & STATISTICAL TRIGGER TEST SUITE\n";
@@ -1498,6 +2387,7 @@ int main() {
         test_hybrid_warmup_reject_then_recover();
         test_hybrid_steady_slow_game_baseline_establishment();
         test_hybrid_warmup_static_suppression_below_200ms();
+        test_hybrid_warmup_100fps_on_200hz_no_static_trigger();
         test_adaptive_pacing_math();
         test_adaptive_trigger_140fps();
         test_adaptive_trigger_60fps();
@@ -1507,13 +2397,27 @@ int main() {
         test_drs_flapping_resistance();
         test_rolling_frame_stats_alignment_and_cache_lines();
         test_cadence_adaptation_clean_frame_interleaving();
-        test_static_gate_block_then_reenter();
+        test_candidate_reset_then_reaccumulate_promotes();
+        test_hybrid_144fps_to_30fps_promotes_cleanly();
+        test_hybrid_candidate_accumulation_progresses_past_seed();
+        test_dynamic_mode_144fps_to_30fps_promotes();
+        test_hybrid_low_framerate_sigma_relative();
+        test_hybrid_noisy_transition_grace_band_preserves_mean();
+        test_hybrid_grace_band_seed_trap_bound();
+        test_hybrid_clean_frame_preserves_active_candidate();
+        test_hybrid_periodic_hitches_not_silenced();
+        test_one_off_spike_no_cascade();
+        test_hybrid_multistage_descending_transition();
         test_pause_reset_clears_candidate_accumulation();
         test_candidate_jitter_tolerance_and_rejection();
         test_independent_stream_candidate_isolation();
         test_scene_transition_reset_2s_boundary();
+        test_hybrid_transition_report_count();
+        test_hybrid_static_fallback_cadence_routing();
+        test_hybrid_candidate_staleness_sweep_10s();
+        test_hybrid_candidate_1000_sample_reseed_policy();
 
-        std::cout << "\n>>> ALL 28 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
+        std::cout << "\n>>> ALL 43 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n[TEST FAILED] Exception: " << e.what() << "\n";

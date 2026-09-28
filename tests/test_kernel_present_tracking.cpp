@@ -641,12 +641,8 @@ static void test_dxgi_mpo_standard_interleaving_dedup() {
     stuttometer::FlightRecorder recorder(4096);
     stuttometer::TriggerConfig trig_cfg;
     trig_cfg.target_pid = 1234;
-    trig_cfg.present_threshold_ms = 5.0; // 200 Hz vblank-derived (would cause false positives without fix)
-    // Use DYNAMIC_ONLY: HYBRID warmup [4,7] window would fire STATIC_THRESHOLD
-    // triggers (5.5 ms effective < 8.33 ms frames), which pollutes the test's
-    // baseline-vs-post-warmup assertions. DYNAMIC_ONLY isolates the MPO dedup
-    // verification from HYBRID warmup behavior.
-    trig_cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::DYNAMIC_ONLY;
+    trig_cfg.present_threshold_ms = 5.0; // 200 Hz vblank-derived
+    trig_cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::HYBRID;
     trig_cfg.pacing_profile = stuttometer::PacingProfile::AUTO_ADAPTIVE;
     trig_cfg.cooldown_ms = 100.0; // Fast cooldown so warmup triggers drain quickly
     stuttometer::TriggerEngine engine(trig_cfg, qpc_freq);
@@ -665,32 +661,28 @@ static void test_dxgi_mpo_standard_interleaving_dedup() {
     const uint64_t frame_ticks = 83333; // ~8.333 ms
 
     // Standard Start-Stop: 0.5 ms API duration; MPO arrives ~0.2 ms after Standard Stop
-    // Intra-frame delta (Stop43 → Stop56) ≈ 0.7 ms << DUPLICATE_PRESENT_PATH_MAX_US (1 ms)
+    // Intra-frame delta (Stop43 → Stop56) ≈ 0.7 ms < dup_max_us (clamped [2ms, 3ms])
     const uint64_t std_api_dur = 5000; // 0.5 ms in ticks at 10 MHz
     const uint64_t mpo_api_dur = 2000; // 0.2 ms in ticks
 
     uint64_t t = 10000000ULL; // starting QPC
     const int frames = 200;
 
-    // HYBRID warmup note: at effective_static = 5.25 ms, frames 4-7 (sample_count 4-7) may
-    // trip STATIC_THRESHOLD while warmup is in progress (8.33 ms > 5.25 ms). This is correct
-    // pre-warmup behavior. The adaptive floor only activates at sample_count >= 8.
-    // We drain these warmup triggers inline so the state machine stays ARMED for subsequent frames.
     int warmup_triggers = 0;
     int post_warmup_triggers = 0;
 
     for (int i = 0; i < frames; ++i) {
         // Drain any trigger from the previous iteration before sending the next frame
         if (engine.current_state() != stuttometer::TriggerState::ARMED) {
+            if (i < 8) {
+                ++warmup_triggers;
+            }
             stuttometer::TriggerInfo dummy_trig;
             uint64_t fq = 0, tq = 0;
             engine.poll_state(t + stuttometer::ms_to_qpc_delta(35.0, qpc_freq), dummy_trig, fq, tq);
             engine.on_report_completed(t + stuttometer::ms_to_qpc_delta(35.0, qpc_freq));
             // Advance t past the cooldown (100 ms)
             t += stuttometer::ms_to_qpc_delta(120.0, qpc_freq);
-            if (i < 8) {
-                ++warmup_triggers;
-            }
         }
 
         // Standard path: 42 at T, 43 at T+0.5ms
@@ -699,7 +691,7 @@ static void test_dxgi_mpo_standard_interleaving_dedup() {
         push_present_start(mgr, 42, pid, tid_std, std_start, swapchain);
         push_present_stop (mgr, 43, pid, tid_std, std_stop);
 
-        // MPO path: 55 at T+0.5ms, 56 at T+0.7ms (intra-frame delta ~0.7ms < 1ms threshold)
+        // MPO path: 55 at T+0.5ms, 56 at T+0.7ms (intra-frame delta ~0.7ms < dup_max_us threshold)
         uint64_t mpo_start = std_stop;
         uint64_t mpo_stop  = std_stop + mpo_api_dur;
         push_present_start(mgr, 55, pid, tid_mpo, mpo_start, swapchain);
@@ -714,8 +706,9 @@ static void test_dxgi_mpo_standard_interleaving_dedup() {
     }
 
     // Post-warmup: after baseline is established (sample_count >= 8), no triggers from normal ~8.33 ms frames
+    STUTTO_ASSERT(warmup_triggers == 0);
     STUTTO_ASSERT(post_warmup_triggers == 0);
-    std::cout << "  -> warmup_triggers=" << warmup_triggers << " (expected; 5.25ms threshold < 8.33ms frame during warmup)\n";
+    std::cout << "  -> warmup_triggers=" << warmup_triggers << " (0 expected with sample_count >= 4 adaptive floor lift)\n";
 
     // Drain any final pending state
     if (engine.current_state() != stuttometer::TriggerState::ARMED) {
@@ -966,9 +959,11 @@ static void test_dxgi_duplicate_not_in_frame_timeline() {
     const uint32_t tid_mpo = 700;
     const uint64_t swapchain = 0xFEEDFACECAFEBABEULL;
     const uint64_t frame_ticks = 83333;
-    const uint64_t std_api_dur = 15000; // 1.5 ms — must exceed 1 ms so the baseline-reset
-                                        // first stop (whose duration is just its API time)
-                                        // does not violate the sub-1ms timeline assertion.
+    const uint64_t std_api_dur = 15000; // 1.5 ms API duration. Must exceed 1.0 ms so that the
+                                        // first Stop's timeline entry (which carries only its API
+                                        // duration, not an inter-Stop delta) satisfies the
+                                        // >= 1.0 ms timeline assertion below. Subsequent frames
+                                        // use inter-Stop deltas (~8.33 ms).
     const uint64_t mpo_api_dur = 2000;
 
     // Feed 30 normal frames, then 1 stutter frame (200 ms)
@@ -1118,35 +1113,19 @@ static void test_hybrid_static_floor_adaptive_high_refresh() {
         const uint64_t base_qpc = stuttometer::get_current_qpc();
         const double normal_frame_ms = 8.5; // 120 FPS game on 200 Hz display
 
-        // Feed 16 clean frames. Warmup frames 0-3 are silent. Frames 4-7 may legitimately
-        // trip STATIC_THRESHOLD in the documented [4,7] warmup window (which pushes a
-        // clamped sample so warmup can complete). Drain those warmup triggers so the
-        // state machine returns to ARMED, then verify that frames 8-15 do not trigger:
-        // once sample_count >= 8, the adaptive static floor lifts the effective threshold
-        // to ~11.05 ms, so normal-cadence 8.5 ms frames must be suppressed.
-        bool any_post_warmup_trigger = false;
+        // Feed 16 clean frames. Warmup frames 0-3 are silent (sample_count < 4, dur < 200ms).
+        // At sample_count >= 4, the adaptive static floor lifts above 8.5ms (mean + delta).
+        // Therefore, all 16 normal-cadence frames produce zero triggers without requiring drainage.
+        int trigger_count = 0;
         uint64_t t = base_qpc;
         for (int i = 0; i < 16; ++i) {
             t += stuttometer::ms_to_qpc_delta(normal_frame_ms, qpc_freq);
             bool trig = engine.on_dxgi_present(1000, 2000, normal_frame_ms, t, 0);
-            if (trig && i >= 8) {
-                any_post_warmup_trigger = true;
-            }
             if (trig) {
-                // Drain: COLLECTING_POST -> FROZEN -> COOLDOWN -> (past cooldown) -> ARMED.
-                // poll_state uses the real QPC domain (post-FileTime-domain fix), so we must pass a
-                // real get_current_qpc()-derived value to reach the post_target_qpc_ deadline.
-                const uint64_t drain_qpc = stuttometer::get_current_qpc()
-                                         + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
-                stuttometer::TriggerInfo dummy;
-                uint64_t fq = 0, tq = 0;
-                engine.poll_state(drain_qpc, dummy, fq, tq);
-                engine.on_report_completed(drain_qpc);
-                engine.poll_state(drain_qpc + stuttometer::ms_to_qpc_delta(1100.0, qpc_freq),
-                                  dummy, fq, tq);
+                ++trigger_count;
             }
         }
-        STUTTO_ASSERT(!any_post_warmup_trigger);
+        STUTTO_ASSERT(trigger_count == 0);
         STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::ARMED);
 
         // Now send a genuine stutter (25 ms) — must trigger

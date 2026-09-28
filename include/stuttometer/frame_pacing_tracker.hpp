@@ -166,22 +166,32 @@ struct AdaptivePacingParams {
     }
 }
 
+enum class CandidateOutcome : uint8_t {
+    NONE         = 0,
+    SEEDED       = 1,
+    ACCUMULATED  = 2,
+    SKIPPED      = 3,
+    RESET        = 4,
+    PROMOTED     = 5,
+    STALLED      = 6
+};
+
 // 64-slot lock-free circular buffer with candidate adaptation
 struct alignas(64) RollingFrameStats {
-    uint32_t durations_us[64]{0};         // Bytes 0..255   (Cache lines 0-3)
-    uint64_t sum_dur_us{0};               // Bytes 256..263 (Cache line 4 start)
-    uint64_t sum_sq_dur_us{0};            // Bytes 264..271
-    uint64_t last_frame_timestamp_qpc{0}; // Bytes 272..279
-    int32_t  last_delta_us{0};            // Bytes 280..283
-    uint16_t sample_count{0};             // Bytes 284..285
-    uint16_t write_idx{0};                // Bytes 286..287
-    uint8_t  alternating_cadence_count{0};// Byte  288
-    uint8_t  _align_pad0{0};              // Byte  289 (Alignment padding)
-    uint16_t candidate_count{0};          // Bytes 290..291 (2-byte aligned)
-    uint32_t _align_pad1{0};              // Bytes 292..295 (Brings offset to 296, 8-byte aligned)
-    uint64_t candidate_first_qpc{0};      // Bytes 296..303 (8-byte aligned)
-    uint64_t candidate_sum_us{0};         // Bytes 304..311 (8-byte aligned)
-    uint64_t candidate_sum_sq_us{0};      // Bytes 312..319 (8-byte aligned)
+    uint32_t durations_us[64]{0};                       // Bytes 0..255   (Cache lines 0-3)
+    uint64_t sum_dur_us{0};                             // Bytes 256..263 (Cache line 4 start)
+    uint64_t sum_sq_dur_us{0};                          // Bytes 264..271
+    uint64_t last_frame_timestamp_qpc{0};               // Bytes 272..279
+    int32_t  last_delta_us{0};                          // Bytes 280..283
+    uint16_t sample_count{0};                           // Bytes 284..285
+    uint16_t write_idx{0};                              // Bytes 286..287
+    uint8_t  alternating_cadence_count{0};              // Byte  288
+    uint8_t  candidate_consecutive_skips{0};            // Byte  289
+    uint16_t candidate_count{0};                        // Bytes 290..291 (2-byte aligned)
+    uint32_t candidate_clean_frames_since_last_match{0};// Bytes 292..295 (Brings offset to 296, 8-byte aligned)
+    uint64_t candidate_first_qpc{0};                    // Bytes 296..303 (8-byte aligned)
+    uint64_t candidate_sum_us{0};                       // Bytes 304..311 (8-byte aligned)
+    uint64_t candidate_sum_sq_us{0};                    // Bytes 312..319 (8-byte aligned)
 };
 static_assert(sizeof(RollingFrameStats) == 320, "RollingFrameStats must be exactly 320 bytes (5 cache lines)");
 static_assert(std::is_trivially_copyable_v<RollingFrameStats>, "RollingFrameStats must be trivially copyable");
@@ -190,6 +200,8 @@ static_assert(std::is_trivially_copyable_v<RollingFrameStats>, "RollingFrameStat
 // pause reset, promotion success, inconsistent-candidate rejection, CADENCE_JUDDER trigger,
 // STATIC_THRESHOLD fallback, and clean-frame tail.
 inline void clear_cadence_candidate(RollingFrameStats& stats) noexcept {
+    stats.candidate_consecutive_skips = 0;
+    stats.candidate_clean_frames_since_last_match = 0;
     stats.candidate_count     = 0;
     stats.candidate_sum_us    = 0;
     stats.candidate_sum_sq_us = 0;
@@ -207,8 +219,8 @@ inline void reset_frame_stats(RollingFrameStats& stats, uint64_t qpc_ts = 0) noe
     stats.sample_count = 0;
     stats.write_idx = 0;
     stats.alternating_cadence_count = 0;
-    stats._align_pad0 = 0;
-    stats._align_pad1 = 0;
+    stats.candidate_consecutive_skips = 0;
+    stats.candidate_clean_frames_since_last_match = 0;
     clear_cadence_candidate(stats);
 }
 
@@ -223,6 +235,11 @@ inline double calculate_stddev_ms(const RollingFrameStats& stats) noexcept {
     const double mean_sq_us = static_cast<double>(stats.sum_sq_dur_us) / stats.sample_count;
     const double var_us = std::max(0.0, mean_sq_us - (mean_us * mean_us));
     return std::sqrt(var_us) / 1000.0;
+}
+
+[[nodiscard]] inline double resolve_candidate_mean_ms(const RollingFrameStats& stats) noexcept {
+    if (stats.candidate_count == 0) return 0.0;
+    return (static_cast<double>(stats.candidate_sum_us) / stats.candidate_count) / 1000.0;
 }
 
 struct CadenceDeltaResult {
@@ -303,13 +320,17 @@ inline void push_clamped_clean_frame(
     push_clean_frame(stats, static_cast<uint32_t>(clamped_us), timestamp_qpc, swing_ratio);
 }
 
+constexpr uint8_t MAX_CONSECUTIVE_SKIPS = 10;
+constexpr uint32_t MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR = 10;
+
 // Accumulates stutter-candidate frames and promotes the candidate to the rolling
 // baseline when 60+ consistent samples with σ < 1.0 ms have been observed and the
 // static gate condition is satisfied.
 //
-// Returns true on promotion, in which case out_promoted_avg_ms holds the new
-// baseline mean in milliseconds and stats.candidate_* have been cleared.
-// Returns false otherwise; the caller must NOT modify res.baseline_* on false.
+// Returns CandidateOutcome: PROMOTED on promotion, in which case out_promoted_avg_ms
+// holds the new baseline mean in milliseconds and stats.candidate_* have been cleared.
+// Returns SEEDED, ACCUMULATED, SKIPPED, RESET, or STALLED otherwise.
+// The caller must NOT modify res.baseline_* unless outcome == PROMOTED.
 //
 // The caller is responsible for setting res.is_stutter / res.reason; this helper
 // touches only the candidate accumulator fields and (on promotion) the rolling
@@ -318,14 +339,13 @@ inline void push_clamped_clean_frame(
 // the caller on every stutter.
 //
 // Uses sum-of-squares variance estimator (not Welford — layout-constrained).
-[[nodiscard]] inline bool process_cadence_candidate(
+[[nodiscard]] inline CandidateOutcome process_cadence_candidate(
     RollingFrameStats& stats,
     double dur_ms,
     uint64_t timestamp_qpc,
-    FrameTriggerMode mode,
-    double effective_static_threshold_ms,
     double& out_promoted_avg_ms
 ) noexcept {
+    stats.candidate_clean_frames_since_last_match = 0;
     const uint32_t dur_us =
         static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, 1.0, DEFENSIVE_DURATION_CLAMP_US));
 
@@ -335,31 +355,48 @@ inline void push_clamped_clean_frame(
         stats.candidate_sum_us     = dur_us;
         stats.candidate_sum_sq_us  = static_cast<uint64_t>(dur_us) * dur_us;
         stats.candidate_count      = 1;
-        return false;
+        stats.candidate_consecutive_skips = 0;
+        return CandidateOutcome::SEEDED;
     }
 
-    // Consistency check: reject frames whose duration deviates from the running
-    // candidate mean beyond a tolerance of max(1.5 ms, 15% of mean).
+    // Consistency check & tolerance triage (D5):
     const double cand_mean_us = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
     const double cand_mean_ms = cand_mean_us / 1000.0;
     const double tol_ms       = std::max(1.5, cand_mean_ms * 0.15);
+    const double dev_ms       = std::abs(dur_ms - cand_mean_ms);
 
-    if (std::abs(dur_ms - cand_mean_ms) > tol_ms) {
-        // Inconsistent candidate: reset. The frame is discarded without seeding.
+    if (dev_ms > 2.0 * tol_ms) {
         clear_cadence_candidate(stats);
-        return false;
+        return CandidateOutcome::RESET;
     }
 
-    // Accumulate (capped at 1000 samples to bound uint64_t sum_sq_dur_us growth).
-    if (stats.candidate_count < 1000) {
-        stats.candidate_sum_us    += dur_us;
-        stats.candidate_sum_sq_us += static_cast<uint64_t>(dur_us) * dur_us;
-        ++stats.candidate_count;
+    if (dev_ms > tol_ms) {
+        if (++stats.candidate_consecutive_skips > MAX_CONSECUTIVE_SKIPS) {
+            clear_cadence_candidate(stats);
+            return CandidateOutcome::STALLED;
+        }
+        return CandidateOutcome::SKIPPED;
     }
+
+    stats.candidate_consecutive_skips = 0;
+
+    // Cap policy: clear and reseed when reaching 1000 without promotion (D8).
+    if (stats.candidate_count >= 1000) {
+        clear_cadence_candidate(stats);
+        stats.candidate_first_qpc  = timestamp_qpc;
+        stats.candidate_sum_us     = dur_us;
+        stats.candidate_sum_sq_us  = static_cast<uint64_t>(dur_us) * dur_us;
+        stats.candidate_count      = 1;
+        return CandidateOutcome::SEEDED;
+    }
+
+    stats.candidate_sum_us    += dur_us;
+    stats.candidate_sum_sq_us += static_cast<uint64_t>(dur_us) * dur_us;
+    ++stats.candidate_count;
 
     // Promotion threshold not yet reached.
     if (stats.candidate_count < 60) {
-        return false;
+        return CandidateOutcome::ACCUMULATED;
     }
 
     const double mean_us    = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
@@ -367,14 +404,9 @@ inline void push_clamped_clean_frame(
     const double var_us     = std::max(0.0, mean_sq_us - (mean_us * mean_us));
     const double sigma_ms   = std::sqrt(var_us) / 1000.0;
 
-    const bool static_gate_passed =
-        (mode == FrameTriggerMode::DYNAMIC_ONLY) ||
-        ((mean_us / 1000.0) < effective_static_threshold_ms);
-
-    if (sigma_ms >= 1.0 || !static_gate_passed) {
-        // IMPORTANT: do NOT clear the candidate here. See docstring above and
-        // test_static_gate_block_then_reenter.
-        return false;
+    const double sigma_threshold_ms = std::clamp(0.10 * (mean_us / 1000.0), 0.5, 5.0);
+    if (sigma_ms >= sigma_threshold_ms || (mean_us / 1000.0) >= CANDIDATE_SANITY_CEILING_MS) {
+        return CandidateOutcome::ACCUMULATED;
     }
 
     // Promote candidate → baseline.
@@ -390,7 +422,7 @@ inline void push_clamped_clean_frame(
     clear_cadence_candidate(stats);
 
     out_promoted_avg_ms = mean_us / 1000.0;
-    return true;
+    return CandidateOutcome::PROMOTED;
 }
 
 struct FramePacingResult {
@@ -399,6 +431,7 @@ struct FramePacingResult {
     double baseline_avg_ms{0.0};
     double baseline_fps{0.0};
     double spike_ratio{0.0};
+    double effective_mean_ms{0.0};
 };
 
 // Evaluates a frame against the stream's rolling statistics
@@ -436,24 +469,36 @@ inline FramePacingResult evaluate_frame_pacing(
         clear_cadence_candidate(stats);
         // Post-pause frame: seed baseline without evaluating as a stutter or polluting with pause duration
         push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
+        res.effective_mean_ms = calculate_mean_ms(stats);
         return res;
+    }
+
+    // Staleness sweep: clear unpromoted candidate accumulator if elapsed QPC time > 10.0 s (D6b)
+    if (stats.candidate_count > 0 && stats.candidate_count < 60 &&
+        stats.candidate_first_qpc > 0 && timestamp_qpc > stats.candidate_first_qpc) {
+        const uint64_t cand_delta_qpc = timestamp_qpc - stats.candidate_first_qpc;
+        const double cand_delta_us = qpc_delta_to_us(cand_delta_qpc, qpc_freq);
+        if (cand_delta_us > static_cast<double>(STALE_CANDIDATE_US)) {
+            clear_cadence_candidate(stats);
+        }
     }
 
     const double mean_ms = calculate_mean_ms(stats);
     res.baseline_avg_ms = mean_ms;
     res.baseline_fps = (mean_ms > 0.0) ? (1000.0 / mean_ms) : 0.0;
     res.spike_ratio = (mean_ms > 0.0) ? (dur_ms / mean_ms) : 1.0;
+    res.effective_mean_ms = (stats.candidate_count >= 2) ? resolve_candidate_mean_ms(stats) : mean_ms;
 
     const auto params = resolve_pacing_params(profile, mean_ms, spike_multiplier, min_spike_delta_ms);
     spike_multiplier = params.spike_multiplier;
     min_spike_delta_ms = params.min_spike_delta_ms;
 
-    // In HYBRID mode, once the baseline is established (>= 8 samples), lift the static ceiling above
+    // In HYBRID mode, once the baseline is established (>= 4 samples), lift the static ceiling above
     // the observed mean if and only if the threshold would otherwise fire on normal-cadence frames.
     // This corrects vblank-derived thresholds that sit below the game's actual frame time
     // (e.g. effective_static = 5.25 ms at 200 Hz vs ~8.5 ms actual for a 120 FPS title).
     // Placed before dynamic checks so both candidate promotion and static fallback share the adjusted ceiling.
-    if (mode == FrameTriggerMode::HYBRID && stats.sample_count >= 8 &&
+    if (mode == FrameTriggerMode::HYBRID && stats.sample_count >= 4 &&
         effective_static_threshold_ms < mean_ms) {
         effective_static_threshold_ms = std::max(
             effective_static_threshold_ms,
@@ -469,9 +514,11 @@ inline FramePacingResult evaluate_frame_pacing(
                 res.reason = TriggerReason::STATIC_THRESHOLD;
                 stats.last_delta_us = 0;
                 stats.alternating_cadence_count = 0;
+                res.effective_mean_ms = res.baseline_avg_ms;
                 return res;
             }
             push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
+            res.effective_mean_ms = calculate_mean_ms(stats);
             return res;
         } else if (mode == FrameTriggerMode::HYBRID) {
             bool is_warmup_stall = false;
@@ -505,11 +552,13 @@ inline FramePacingResult evaluate_frame_pacing(
                     res.is_stutter = true;
                     res.reason     = TriggerReason::STATIC_THRESHOLD;
                 }
+                res.effective_mean_ms = calculate_mean_ms(stats);
                 return res;
             }
 
             // Normal warmup frame: push with the 100 ms clamp.
             push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
+            res.effective_mean_ms = calculate_mean_ms(stats);
             return res;
         } else if (mode == FrameTriggerMode::DYNAMIC_ONLY) {
             // DYNAMIC_ONLY: Suppress static trigger; push a clamped sample so warmup can complete.
@@ -519,9 +568,11 @@ inline FramePacingResult evaluate_frame_pacing(
                 push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
                 stats.last_delta_us = 0;
                 stats.alternating_cadence_count = 0;
+                res.effective_mean_ms = calculate_mean_ms(stats);
                 return res; // Still suppress the trigger, but populate the baseline
             }
             push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
+            res.effective_mean_ms = calculate_mean_ms(stats);
             return res;
         }
     }
@@ -529,21 +580,36 @@ inline FramePacingResult evaluate_frame_pacing(
     // 1. Dynamic Relative Spike Check
     if (mode == FrameTriggerMode::HYBRID || mode == FrameTriggerMode::DYNAMIC_ONLY) {
         if (res.spike_ratio >= spike_multiplier && (dur_ms - mean_ms) >= min_spike_delta_ms) {
-            res.is_stutter = true;
-            res.reason = TriggerReason::RELATIVE_SPIKE;
-            // Baseline Pollution Protection: do not push stuttering frame into baseline
-            // Reset cadence state so delta is not computed across the stutter gap on next clean frame
+            // Reset cadence/idle state prior to candidate processing
             stats.last_delta_us = 0;
             stats.alternating_cadence_count = 0;
+            stats.candidate_clean_frames_since_last_match = 0;
 
             double promoted_avg_ms = 0.0;
-            if (process_cadence_candidate(stats, dur_ms, timestamp_qpc, mode,
-                                          effective_static_threshold_ms, promoted_avg_ms)) {
-                res.baseline_avg_ms = promoted_avg_ms;
-                res.baseline_fps    = (promoted_avg_ms > 0.0) ? (1000.0 / promoted_avg_ms) : 0.0;
-                res.spike_ratio     = 1.0;
+            const auto outcome = process_cadence_candidate(stats, dur_ms, timestamp_qpc, promoted_avg_ms);
+            switch (outcome) {
+                case CandidateOutcome::PROMOTED:
+                    res.is_stutter      = false;
+                    res.reason          = TriggerReason::NONE;
+                    res.baseline_avg_ms = promoted_avg_ms;
+                    res.baseline_fps    = (promoted_avg_ms > 0.0) ? (1000.0 / promoted_avg_ms) : 0.0;
+                    res.spike_ratio     = 1.0;
+                    break;
+                case CandidateOutcome::ACCUMULATED:
+                case CandidateOutcome::SKIPPED:
+                    res.is_stutter      = false;
+                    res.reason          = TriggerReason::NONE;
+                    break;
+                case CandidateOutcome::SEEDED:
+                case CandidateOutcome::RESET:
+                case CandidateOutcome::STALLED:
+                default:
+                    res.is_stutter      = true;
+                    res.reason          = TriggerReason::RELATIVE_SPIKE;
+                    break;
             }
-
+            // effective_mean_ms is populated unconditionally; consumed downstream on is_stutter == false paths
+            res.effective_mean_ms = (stats.candidate_count >= 2) ? resolve_candidate_mean_ms(stats) : res.baseline_avg_ms;
             return res;
         }
 
@@ -556,27 +622,65 @@ inline FramePacingResult evaluate_frame_pacing(
                 stats.last_delta_us = 0;
                 stats.alternating_cadence_count = 0;
                 clear_cadence_candidate(stats);
+                res.effective_mean_ms = res.baseline_avg_ms;
                 return res;
             }
         }
     }
 
     // 3. Static Threshold Ceiling Fallback (effective_static_threshold_ms already adjusted above)
-
-    if (mode == FrameTriggerMode::HYBRID || mode == FrameTriggerMode::STATIC_ONLY) {
+    if (mode == FrameTriggerMode::STATIC_ONLY) {
         if (dur_ms >= effective_static_threshold_ms) {
             res.is_stutter = true;
             res.reason = TriggerReason::STATIC_THRESHOLD;
             stats.last_delta_us = 0;
             stats.alternating_cadence_count = 0;
             clear_cadence_candidate(stats);
+            res.effective_mean_ms = res.baseline_avg_ms;
+            return res;
+        }
+    } else if (mode == FrameTriggerMode::HYBRID) {
+        if (dur_ms >= effective_static_threshold_ms) {
+            stats.last_delta_us = 0;
+            stats.alternating_cadence_count = 0;
+            stats.candidate_clean_frames_since_last_match = 0;
+
+            double promoted_avg_ms = 0.0;
+            const auto outcome = process_cadence_candidate(stats, dur_ms, timestamp_qpc, promoted_avg_ms);
+            switch (outcome) {
+                case CandidateOutcome::PROMOTED:
+                    res.is_stutter      = false;
+                    res.reason          = TriggerReason::NONE;
+                    res.baseline_avg_ms = promoted_avg_ms;
+                    res.baseline_fps    = (promoted_avg_ms > 0.0) ? (1000.0 / promoted_avg_ms) : 0.0;
+                    res.spike_ratio     = 1.0;
+                    break;
+                case CandidateOutcome::ACCUMULATED:
+                case CandidateOutcome::SKIPPED:
+                    res.is_stutter      = false;
+                    res.reason          = TriggerReason::NONE;
+                    break;
+                case CandidateOutcome::SEEDED:
+                case CandidateOutcome::RESET:
+                case CandidateOutcome::STALLED:
+                default:
+                    res.is_stutter      = true;
+                    res.reason          = TriggerReason::STATIC_THRESHOLD;
+                    break;
+            }
+            res.effective_mean_ms = (stats.candidate_count >= 2) ? resolve_candidate_mean_ms(stats) : res.baseline_avg_ms;
             return res;
         }
     }
 
-    // Clean frame: push into rolling statistics
-    clear_cadence_candidate(stats);
+    // Clean frame: push into rolling statistics while preserving candidate (D6, D6a)
+    if (stats.candidate_count > 0) {
+        if (++stats.candidate_clean_frames_since_last_match > MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR) {
+            clear_cadence_candidate(stats);
+        }
+    }
     push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio, DEFENSIVE_DURATION_CLAMP_US);
+    res.effective_mean_ms = (stats.candidate_count >= 2) ? resolve_candidate_mean_ms(stats) : calculate_mean_ms(stats);
     return res;
 }
 

@@ -121,6 +121,7 @@ static void test_provider_guids_and_events() {
     static_assert(stuttometer::EventFlags::MEM_ALLOC_COMMIT == 0x1000);
     static_assert(stuttometer::EventFlags::MEM_WS_TRIM_OUTSWAP == 0x2000);
     static_assert(stuttometer::EventFlags::MEM_PHYSICAL_CONTIGUOUS == 0x4000);
+    static_assert(stuttometer::EventFlags::DXGI_DUPLICATE_PRESENT_PATH == 0x8000);
 
     STUTTO_ASSERT(stuttometer::EventFlags::VRAM_DEMOTED_COMMITMENT == 0x0100);
     STUTTO_ASSERT(stuttometer::EventFlags::VRAM_USAGE_OVER_BUDGET == 0x0200);
@@ -128,6 +129,18 @@ static void test_provider_guids_and_events() {
     STUTTO_ASSERT(stuttometer::EventFlags::MEM_ALLOC_COMMIT == 0x1000);
     STUTTO_ASSERT(stuttometer::EventFlags::MEM_WS_TRIM_OUTSWAP == 0x2000);
     STUTTO_ASSERT(stuttometer::EventFlags::MEM_PHYSICAL_CONTIGUOUS == 0x4000);
+    STUTTO_ASSERT(stuttometer::EventFlags::DXGI_DUPLICATE_PRESENT_PATH == 0x8000);
+
+    // Validate Duplicate Present Path Detection Bounds & Invariants
+    static_assert(stuttometer::DUPLICATE_PRESENT_PATH_FLOOR_US == 2000);
+    static_assert(stuttometer::DUPLICATE_PRESENT_PATH_CEILING_US == 3000);
+    static_assert(stuttometer::DUPLICATE_PRESENT_PATH_DEFAULT_US == 2000);
+    static_assert(stuttometer::DUPLICATE_PRESENT_PATH_FLOOR_US <= stuttometer::DUPLICATE_PRESENT_PATH_CEILING_US);
+
+    STUTTO_ASSERT(stuttometer::DUPLICATE_PRESENT_PATH_FLOOR_US == 2000);
+    STUTTO_ASSERT(stuttometer::DUPLICATE_PRESENT_PATH_CEILING_US == 3000);
+    STUTTO_ASSERT(stuttometer::DUPLICATE_PRESENT_PATH_DEFAULT_US == 2000);
+    STUTTO_ASSERT(stuttometer::DUPLICATE_PRESENT_PATH_VBLANK_FRACTION == 0.5);
 
     std::cout << "  -> DXGI, Audio, D3D12 & Kernel-Memory provider GUIDs and flags PASSED.\n";
 }

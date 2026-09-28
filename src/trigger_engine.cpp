@@ -193,7 +193,9 @@ bool TriggerEngine::evaluate_frame_pacing_common(
 
         SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
         if (sink && active_target_pid() != 0 && pid == active_target_pid() && stats.sample_count >= 8) {
-            const double pushed_baseline = out_pacing_res.is_stutter ? out_pacing_res.baseline_avg_ms : calculate_mean_ms(stats);
+            const double pushed_baseline = (out_pacing_res.effective_mean_ms > 0.0)
+                ? out_pacing_res.effective_mean_ms
+                : calculate_mean_ms(stats);
             sink->update_pacing_telemetry(pushed_baseline, eff_mult, eff_delta);
         }
     });

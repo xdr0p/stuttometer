@@ -39,7 +39,12 @@ void EtwSessionManager::handle_dxgi_event(
             const uint64_t prev_qpc = has_prev ? last_entry.last_present_qpc : 0;
 
             const PresentDeltaResult delta_res = calculate_effective_present_duration(
-                ctx.timestamp, prev_qpc, start_qpc, qpc_freq_, PAUSE_CEILING_US
+                ctx.timestamp,
+                prev_qpc,
+                start_qpc,
+                qpc_freq_,
+                PAUSE_CEILING_US,
+                trigger_engine_.vblank_interval_ms()
             );
 
             // Tag duplicate present path artifacts before pushing so the flight recorder and NDJSON
