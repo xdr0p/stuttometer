@@ -9,6 +9,7 @@
 namespace stuttometer {
 
 CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_config, std::ostream& out, std::ostream& err) {
+    // Future Profile Roadmap: User-defined thresholds can be ingested via JSON configuration profiles (e.g. --profile simracing.json).
     CLI::App app{"Stuttometer - Real-Time Windows ETW Stutter & Glitch Diagnostic Utility"};
 
     double window_pre_ms = 250.0;

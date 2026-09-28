@@ -709,7 +709,7 @@ DiagnosticReport CorrelationEngine::correlate(
         ev.cpu_core = trigger.cpu_index;
         ev.offset_from_trigger_ms = 0.0;
         ev.pid = trigger.target_pid;
-        ev.extra_info = "In titles utilizing GPU DirectStorage (e.g. Marvel's Spider-Man 2), GPU decompression compute shaders share execution queues with graphics rendering. If permitted by the game build/anti-cheat, test temporarily renaming dstorage.dll and dstoragecore.dll to isolate.";
+        ev.extra_info = "In titles utilizing GPU DirectStorage (e.g. titles using DirectStorage 1.2+ / GPU decompression), GPU decompression compute shaders share execution queues with graphics rendering. If permitted by the game build/anti-cheat, test temporarily renaming dstorage.dll and dstoragecore.dll to isolate.";
         diag.evidence.push_back(std::move(ev));
 
         hypotheses.push_back(std::move(diag));
