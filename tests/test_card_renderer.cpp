@@ -2,6 +2,14 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
+// ==============================================================================
+// NOTE ON LAYOUT CONSTANTS:
+// All pixel coordinates, dimensions, padding, and offsets asserted in this test
+// suite represent strict, deterministic visual rendering contracts for PNG card
+// export. They are intentionally defined as literal values to prevent silent UI
+// regressions or layout drift across rendering backend changes.
+// ==============================================================================
+
 #include "test_common.hpp"
 #include "card_renderer.hpp"
 #include "theme.hpp"

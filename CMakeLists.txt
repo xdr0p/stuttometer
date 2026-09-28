@@ -69,7 +69,7 @@ add_library(stuttometer_core STATIC
   src/csv_exporter.cpp
   src/ndjson_writer.cpp
   src/cli_parser.cpp
-  src/etw_kernel_opcodes.hpp
+  include/stuttometer/internal/etw_kernel_opcodes.hpp
   src/etw_handlers_dxgi.cpp
   src/etw_handlers_dxgkrnl.cpp
   src/etw_handlers_user_providers.cpp

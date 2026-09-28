@@ -9,7 +9,7 @@
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/privilege_utils.hpp"
-#include "etw_kernel_opcodes.hpp"
+#include "stuttometer/internal/etw_kernel_opcodes.hpp"
 #include <tdh.h>
 
 namespace stuttometer {
