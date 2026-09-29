@@ -159,8 +159,14 @@ Capture Window:
   --cooldown-ms FLOAT             Minimum cooldown between reports in ms (100.0-10000.0, default: 1000.0)
   --buffer-slots INT              Ring buffer capacity in slots (65536-1048576, default: 262144)
 
-Trigger Configuration:
+Detection Presets & Trigger Configuration:
+  --preset TEXT                   Detection preset: balanced, competitive, conservative, forensic, custom (default: balanced)
+  --min-report-severity TEXT      Minimum severity to trigger a correlated report: all, warning, danger (default: warning)
+  --osd-min-severity TEXT         Minimum severity for in-game OSD toast: all, warning, danger (default: danger)
+  --judder-min-alternations INT   Minimum alternations to trigger judder episode (1-50, default: 5)
   --trigger-mode TEXT             Frame trigger mode: hybrid, dynamic, static (default: hybrid)
+  --pacing-profile TEXT           Pacing sensitivity profile: auto, high-refresh, conservative (default: auto)
+  --high-refresh                  Alias for --pacing-profile high-refresh
   --present-threshold-ms FLOAT    Static Present stutter threshold in ms (2.0-200.0, default: auto-detected vblank, e.g. 16.67 at 60Hz)
   --spike-multiplier FLOAT        Relative stutter spike multiplier (1.2-10.0, default: 2.0)
   --min-spike-delta-ms FLOAT      Minimum absolute spike delta in ms (1.0-50.0, default: 4.0)
@@ -202,11 +208,20 @@ Targeting, Output & General:
 Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 - **Stdout Streaming (`--dump-events -`):** Emits newline-delimited JSON (NDJSON) to standard output. When active, all non-event diagnostic logging is redirected to `stderr`, and stdout is set to binary mode. Can be combined with `--output-dir <dir>` to capture per-trigger reports to disk while streaming raw events.
 - **Categorized Event Stream:** The stream captures all actionable stall categories (DXGI presents, audio glitches, DPC/ISR spikes, Disk I/O, context switches, DWM glitches, page faults, CPU throttling, antimalware scans, D3D12 PSO compilation, VRAM paging, and kernel memory allocations). High-frequency non-stall API trace events (such as per-draw D3D12 calls) are filtered to ensure high signal-to-noise ratio and zero consumer ring buffer saturation.
+- **Filtered Trigger Diagnostics (`cat: "TRIGGER_FILTERED"`):** Sub-threshold triggers (below `--min-report-severity` or dropped by vblank floors) are recorded into a dedicated lock-free MPSC ring and streamed as category 20 (`TRIGGER_FILTERED`), enabling empirical tuning and calibration without state-machine report noise.
 - **NDJSON Schema (v1):**
   ```json
   {"v":1,"ts_qpc":123456789,"cat":"DXGI","id":43,"pid":4568,"tid":8912,"cpu":2,"dur_us":16670,"aux":0,"flags":0}
+  {"v":1,"ts_qpc":123456890,"cat":"TRIGGER_FILTERED","id":4,"pid":4568,"tid":8912,"cpu":2,"dur_us":350000,"aux":16,"flags":3}
   ```
-  `dur_us` is `0` for instant/start events; consumers distinguish start vs. stop by `cat` and event `id`. Disk Init events carry `"aux": 0` rather than leaking kernel virtual addresses (KVA), while completed I/O byte counts remain in `aux` on Stop events.
+  - `dur_us` is `0` for instant/start events; for `TRIGGER_FILTERED`, it contains the trigger stall duration (or full cadence judder episode duration) in microseconds.
+  - Disk Init events carry `"aux": 0` rather than leaking kernel virtual addresses (KVA), while completed I/O byte counts remain in `aux` on Stop events.
+  - For `TRIGGER_FILTERED` (cat 20):
+    - `id`: raw `TriggerReason` enum integer (0: NONE, 1: STATIC_THRESHOLD, 2: RELATIVE_SPIKE, 3: STATISTICAL_OUTLIER, 4: CADENCE_JUDDER, 5: AUDIO_BUFFER_UNDERRUN, 6: DWM_COMPOSITOR_GLITCH).
+    - `flags`: raw `TriggerSource` enum integer (0: NONE, 1: DXGI_PRESENT, 2: FRAME_PACING_SPIKE, 3: FRAME_PACING_JUDDER, 4: AUDIO_GLITCH, 5: DWM_GLITCH, 6: KERNEL_FRAME_STALL).
+    - `aux`: encoded integer containing `severity | (filter_kind << 4)`:
+      - Bits 0..3: `MetricSeverity` (0 = NORMAL, 1 = WARNING, 2 = DANGER).
+      - Bits 4..7: `FilterKind` (0 = SEVERITY_GATE, 1 = VBLANK_FLOOR).
 - **Zero Idle CPU & Latency Trade-Off:** The background NDJSON writer drops idle CPU to 0% via escalating backoff (64 pauses, 64 yields, then 2 ms wait on a condition variable); under active event flow, events stream immediately with zero additional latency.
 - **PowerShell / `jq` Piping Example:**
   ```powershell
