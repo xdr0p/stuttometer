@@ -49,6 +49,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     size_t dump_max_mb = 100;
     size_t dump_max_files = 3;
     std::string export_csv_path;
+    std::string min_report_severity_str = "all";
 
     char present_thresh_help[128];
     std::snprintf(present_thresh_help, sizeof(present_thresh_help),
@@ -63,6 +64,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     app.add_flag("--high-refresh", high_refresh_preset, "Alias for --pacing-profile high-refresh");
     app.add_option("--spike-multiplier", spike_multiplier, "Relative stutter spike multiplier (1.2-10.0, default: 2.0)");
     app.add_option("--min-spike-delta-ms", min_spike_delta_ms, "Minimum absolute spike delta in ms (1.0-50.0, default: 4.0)");
+    app.add_option("--min-report-severity", min_report_severity_str, "Minimum severity to trigger a correlated report: all, warning, danger (default: all)");
     app.add_flag("--judder-detection,!--no-judder", enable_judder, "Enable/disable cadence judder detection (default: enabled)");
     app.add_option("--judder-swing-ratio", judder_swing_ratio, "Judder cadence swing threshold ratio (0.1-0.9, default: 0.35)");
     app.add_flag("--audio-trigger,!--no-audio", enable_audio, "Enable/disable AudioGlitch Event ID 11 trigger");
@@ -225,6 +227,15 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         err << "[STUTTOMETER] Error: Invalid --tier '" << provider_tier << "'. Must be 'minimal', 'standard', or 'full'.\n";
         return CliParseResult::EXIT_ERROR;
     }
+    if (app.count("--min-report-severity") > 0) {
+        if (min_report_severity_str != "all" && min_report_severity_str != "warning" && min_report_severity_str != "danger") {
+            err << "[STUTTOMETER] Error: Invalid --min-report-severity '" << min_report_severity_str << "'. Must be 'all', 'warning', or 'danger'.\n";
+            return CliParseResult::EXIT_ERROR;
+        }
+        out_config.min_report_severity = report_severity_from_string(min_report_severity_str);
+        out_config.min_report_severity_manual = true;
+    }
+
     if (target_process_name.size() > 260) {
         err << "[STUTTOMETER] Error: --target-process name exceeds maximum length (260 characters).\n";
         return CliParseResult::EXIT_ERROR;

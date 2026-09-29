@@ -55,6 +55,8 @@ struct CliConfig {
     bool target_pid_manual{false};
     bool present_threshold_manual{false};
     bool smi_threshold_manual{false};
+    ReportSeverity min_report_severity{ReportSeverity::ALL};
+    bool min_report_severity_manual{false};
 };
 
 struct CliRangeDef {

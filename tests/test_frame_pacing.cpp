@@ -12,11 +12,11 @@ static void test_struct_properties() {
     std::cout << "[TEST] Validating struct properties & trivial copyability...\n";
     static_assert(sizeof(stuttometer::RollingFrameStats) == 320, "RollingFrameStats must be strictly 320 bytes");
     static_assert(std::is_trivially_copyable_v<stuttometer::RollingFrameStats>, "RollingFrameStats must be trivially copyable");
-    static_assert(sizeof(stuttometer::TriggerInfo) == 56, "TriggerInfo must be strictly 56 bytes");
+    static_assert(sizeof(stuttometer::TriggerInfo) == 64, "TriggerInfo must be strictly 64 bytes");
     static_assert(std::is_trivially_copyable_v<stuttometer::TriggerInfo>, "TriggerInfo must be trivially copyable");
 
     STUTTO_ASSERT(sizeof(stuttometer::RollingFrameStats) == 320);
-    STUTTO_ASSERT(sizeof(stuttometer::TriggerInfo) == 56);
+    STUTTO_ASSERT(sizeof(stuttometer::TriggerInfo) == 64);
     std::cout << "  -> Struct size & trivial copyability verified.\n";
 }
 

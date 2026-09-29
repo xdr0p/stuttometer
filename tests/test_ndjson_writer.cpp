@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include "stuttometer/ndjson_writer.hpp"
+#include "stuttometer/trigger_engine.hpp"
 #include "nlohmann/json.hpp"
 #include <iostream>
 #include <fstream>
@@ -397,10 +398,59 @@ static void test_ndjson_rotation_failure_dropped_records() {
               << writer->dropped_records() << " dropped).\n";
 }
 
+static void test_ndjson_trigger_filtered_category() {
+    std::cout << "[TEST] Validating NDJSON Line Schema for TRIGGER_FILTERED (Category 20)...\n";
+
+    const std::filesystem::path test_dir = std::filesystem::temp_directory_path() / "stutto_test_ndjson_cat20";
+    std::error_code ec;
+    std::filesystem::remove_all(test_dir, ec);
+    std::filesystem::create_directories(test_dir, ec);
+    const std::filesystem::path file_path = test_dir / "cat20_test.ndjson";
+
+    {
+        auto writer = stuttometer::NdjsonWriter::create_for_file(file_path, 10 * 1024 * 1024, 3);
+        STUTTO_ASSERT(writer != nullptr);
+
+        stuttometer::EtwEventRecord rec{};
+        rec.category = static_cast<uint16_t>(stuttometer::EventCategory::TRIGGER_FILTERED);
+        rec.event_id = static_cast<uint16_t>(stuttometer::TriggerReason::RELATIVE_SPIKE);
+        rec.flags = static_cast<uint16_t>(stuttometer::TriggerSource::DXGI_PRESENT_STUTTER);
+        rec.pid = 9999;
+        rec.tid = 8888;
+        rec.cpu_index = 5;
+        rec.duration_us = 25000;
+        rec.qpc_timestamp = 123456789ULL;
+        // aux = severity | (filter_kind << 4)
+        rec.auxiliary_data = 1 | (0 << 4);
+
+        bool pushed = writer->push(rec);
+        STUTTO_ASSERT(pushed);
+        writer->stop();
+    }
+
+    std::ifstream in(file_path);
+    STUTTO_ASSERT(in.is_open());
+    std::string line;
+    STUTTO_ASSERT(std::getline(in, line));
+    in.close();
+
+    auto j = nlohmann::json::parse(line);
+    STUTTO_ASSERT(j["v"] == 1);
+    STUTTO_ASSERT(j["cat"] == "TRIGGER_FILTERED");
+    STUTTO_ASSERT(j["id"] == static_cast<int>(stuttometer::TriggerReason::RELATIVE_SPIKE));
+    STUTTO_ASSERT(j["flags"] == static_cast<int>(stuttometer::TriggerSource::DXGI_PRESENT_STUTTER));
+    STUTTO_ASSERT(j["aux"] == 1);
+    STUTTO_ASSERT(j["dur_us"] == 25000);
+
+    std::filesystem::remove_all(test_dir, ec);
+    std::cout << "  -> TRIGGER_FILTERED NDJSON schema validation PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer NDJSON Writer Unit Tests ===\n";
     try {
         test_ndjson_line_schema();
+        test_ndjson_trigger_filtered_category();
         test_deterministic_saturation();
         test_mpsc_concurrency_stress();
         test_file_rotation();

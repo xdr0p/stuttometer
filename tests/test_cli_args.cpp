@@ -525,6 +525,65 @@ static void test_manual_threshold_flags() {
     std::cout << "  -> Manual threshold tracking flags verified.\n";
 }
 
+static void test_min_report_severity_flag() {
+    std::cout << "[TEST] Testing --min-report-severity flag...\n";
+
+    // 1. Default (no flag passed)
+    {
+        const char* argv[] = { "stuttometer.exe" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(1, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(!config.min_report_severity_manual);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::ALL);
+    }
+
+    // 2. Explicit 'all'
+    {
+        const char* argv[] = { "stuttometer.exe", "--min-report-severity", "all" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.min_report_severity_manual);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::ALL);
+    }
+
+    // 3. Explicit 'warning'
+    {
+        const char* argv[] = { "stuttometer.exe", "--min-report-severity", "warning" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.min_report_severity_manual);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
+    }
+
+    // 4. Explicit 'danger'
+    {
+        const char* argv[] = { "stuttometer.exe", "--min-report-severity", "danger" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.min_report_severity_manual);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::DANGER);
+    }
+
+    // 5. Invalid severity value
+    {
+        const char* argv[] = { "stuttometer.exe", "--min-report-severity", "ultra" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+    }
+
+    std::cout << "  -> --min-report-severity flag parsing verified.\n";
+}
+
 static void test_process_watcher_lifecycle() {
     std::cout << "[TEST] Testing ProcessWatcher lifecycle and query interface...\n";
 
@@ -791,6 +850,7 @@ int main() {
         test_cli_ranges_table();
         test_help_flags();
         test_manual_threshold_flags();
+        test_min_report_severity_flag();
         test_process_watcher_lifecycle();
         test_process_watcher_parity();
         test_process_watcher_cadence();

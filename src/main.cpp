@@ -226,6 +226,7 @@ int main(int argc, char** argv) {
     trig_config.min_spike_delta_ms = min_spike_delta_ms;
     trig_config.enable_judder_detection = enable_judder;
     trig_config.judder_swing_ratio = judder_swing_ratio;
+    trig_config.min_report_severity = config.min_report_severity;
 
     stuttometer::DisplayRefreshInfo disp_info = stuttometer::query_display_refresh_info(target_pid);
     trig_config.vblank_interval_ms = disp_info.vblank_interval_ms;
@@ -338,6 +339,25 @@ int main(int argc, char** argv) {
                       << " | Suppressed Triggers: " << trigger_engine.suppressed_trigger_count() << "\n";
         }
 
+        if (ndjson_writer) {
+            stuttometer::FilteredEvent fe;
+            int drained = 0;
+            while (drained < 64 && trigger_engine.pop_filtered_event(fe)) {
+                stuttometer::EtwEventRecord rec{};
+                rec.qpc_timestamp  = fe.qpc_timestamp;
+                rec.duration_us    = static_cast<uint32_t>(fe.duration_ms * 1000.0);
+                rec.pid            = fe.target_pid;
+                rec.tid            = fe.target_tid;
+                rec.cpu_index      = fe.cpu_index;
+                rec.category       = static_cast<uint16_t>(stuttometer::EventCategory::TRIGGER_FILTERED);
+                rec.event_id       = fe.reason;
+                rec.flags          = fe.source;
+                rec.auxiliary_data = static_cast<uint64_t>(fe.severity) | (static_cast<uint64_t>(fe.filter_kind) << 4);
+                ndjson_writer->push(rec);
+                ++drained;
+            }
+        }
+
         if (trigger_engine.poll_state(current_qpc, trigger_info, from_qpc, to_qpc)) {
             struct ReportScopeGuard {
                 stuttometer::TriggerEngine& engine;
@@ -433,6 +453,20 @@ int main(int argc, char** argv) {
     std::cout << "\n[STUTTOMETER] Stopping trace sessions and cleaning up...\n";
     session_mgr.stop();
     if (ndjson_writer) {
+        stuttometer::FilteredEvent fe;
+        while (trigger_engine.pop_filtered_event(fe)) {
+            stuttometer::EtwEventRecord rec{};
+            rec.qpc_timestamp  = fe.qpc_timestamp;
+            rec.duration_us    = static_cast<uint32_t>(fe.duration_ms * 1000.0);
+            rec.pid            = fe.target_pid;
+            rec.tid            = fe.target_tid;
+            rec.cpu_index      = fe.cpu_index;
+            rec.category       = static_cast<uint16_t>(stuttometer::EventCategory::TRIGGER_FILTERED);
+            rec.event_id       = fe.reason;
+            rec.flags          = fe.source;
+            rec.auxiliary_data = static_cast<uint64_t>(fe.severity) | (static_cast<uint64_t>(fe.filter_kind) << 4);
+            ndjson_writer->push(rec);
+        }
         ndjson_writer->stop();
     }
     std::cout << "[STUTTOMETER] Done. Total reports generated: " << report_count << "\n";
