@@ -247,6 +247,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         const uint64_t qpc_freq = get_qpc_frequency();
 
         TriggerConfig trig_config;
+        apply_detection_preset(config.detection_preset, trig_config, config);
         trig_config.window_pre_ms = config.window_pre_ms;
         trig_config.window_post_ms = config.window_post_ms;
         trig_config.present_threshold_ms = config.present_threshold_ms;

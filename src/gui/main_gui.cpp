@@ -172,6 +172,86 @@ static void update_inspector(int selected_index) {
     EnableWindow(g_h_btn_copy_card, can_card ? TRUE : FALSE);
 }
 
+static void insert_record_into_listview(const StutterRecord& rec, int item_index) {
+    LVITEMW lvi{};
+    lvi.mask = LVIF_TEXT | LVIF_PARAM;
+    lvi.iItem = item_index;
+    lvi.iSubItem = 0;
+    std::wstring id_str = std::to_wstring(rec.id);
+    lvi.pszText = id_str.data();
+    lvi.lParam = static_cast<LPARAM>(rec.id);
+
+    ListView_InsertItem(g_h_list_stutters, &lvi);
+
+    std::wstring w_time = utf8_to_wstring(rec.timestamp);
+    std::wstring w_proc = utf8_to_wstring(rec.process_name);
+    std::wstring w_trig = utf8_to_wstring(rec.trigger_reason);
+
+    std::wstring w_dur;
+    if (rec.report && rec.report->trigger.source == TriggerSource::AUDIO_GLITCH) {
+        w_dur = L"Glitch (x" + std::to_wstring(rec.report->trigger.glitch_count) + L")";
+    } else {
+        std::wostringstream oss_dur;
+        oss_dur << std::fixed << std::setprecision(1) << rec.duration_ms << L" ms";
+        w_dur = oss_dur.str();
+    }
+
+    std::wstring w_diag = utf8_to_wstring(rec.top_hypothesis);
+    std::wstring w_conf = std::to_wstring(static_cast<int>(rec.confidence * 100.0 + 0.5)) + L"%";
+
+    ListView_SetItemText(g_h_list_stutters, item_index, 1, w_time.data());
+    ListView_SetItemText(g_h_list_stutters, item_index, 2, w_proc.data());
+    ListView_SetItemText(g_h_list_stutters, item_index, 3, w_trig.data());
+    ListView_SetItemText(g_h_list_stutters, item_index, 4, w_dur.data());
+    ListView_SetItemText(g_h_list_stutters, item_index, 5, w_diag.data());
+    ListView_SetItemText(g_h_list_stutters, item_index, 6, w_conf.data());
+}
+
+static int get_stutter_index_from_listview(int lv_item_idx) {
+    if (lv_item_idx < 0) return -1;
+    LVITEMW lvi{};
+    lvi.mask = LVIF_PARAM;
+    lvi.iItem = lv_item_idx;
+    if (ListView_GetItem(g_h_list_stutters, &lvi)) {
+        uint32_t id = static_cast<uint32_t>(lvi.lParam);
+        for (size_t i = 0; i < g_stutters.size(); ++i) {
+            if (g_stutters[i].id == id) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return -1;
+}
+
+static void refresh_stutter_listview() {
+    SendMessageW(g_h_list_stutters, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(g_h_list_stutters);
+
+    int insert_idx = 0;
+    int reselect_lv_idx = -1;
+    for (size_t i = 0; i < g_stutters.size(); ++i) {
+        const auto& rec = g_stutters[i];
+        if (stuttometer::meets_min_severity(rec.severity, g_settings_config.list_severity_filter)) {
+            insert_record_into_listview(rec, insert_idx);
+            if (g_selected_stutter_index >= 0 && static_cast<size_t>(g_selected_stutter_index) == i) {
+                reselect_lv_idx = insert_idx;
+            }
+            insert_idx++;
+        }
+    }
+
+    if (reselect_lv_idx >= 0) {
+        ListView_SetItemState(g_h_list_stutters, reselect_lv_idx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(g_h_list_stutters, reselect_lv_idx, FALSE);
+    } else {
+        g_selected_stutter_index = -1;
+        update_inspector(-1);
+    }
+
+    SendMessageW(g_h_list_stutters, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_h_list_stutters, NULL, TRUE);
+}
+
 // Insert new report item into UI
 static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
     if (!report) return;
@@ -201,73 +281,52 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
         g_session_stutter_count++;
     }
 
+    rec.severity = stuttometer::classify_severity(report->trigger, report->present_threshold_ms);
     rec.report = std::move(report);
     g_stutters.push_back(std::move(rec));
 
     constexpr size_t MAX_STUTTER_HISTORY = 500;
     if (g_stutters.size() > MAX_STUTTER_HISTORY) {
-        ListView_DeleteItem(g_h_list_stutters, 0);
+        uint32_t popped_id = g_stutters.front().id;
         g_stutters.pop_front();
+
+        LVITEMW lvi{};
+        lvi.mask = LVIF_PARAM;
+        lvi.iItem = 0;
+        if (ListView_GetItem(g_h_list_stutters, &lvi) && static_cast<uint32_t>(lvi.lParam) == popped_id) {
+            ListView_DeleteItem(g_h_list_stutters, 0);
+        }
+
         if (g_selected_stutter_index > 0) {
             --g_selected_stutter_index;
-            if (g_h_list_stutters && IsWindow(g_h_list_stutters)) {
-                ListView_SetItemState(g_h_list_stutters, g_selected_stutter_index,
-                                      LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-            }
         } else if (g_selected_stutter_index == 0) {
             g_selected_stutter_index = -1;
             update_inspector(-1);
         }
     }
 
-    int new_index = static_cast<int>(g_stutters.size() - 1);
+    const auto& last_rec = g_stutters.back();
+    const bool passes_filter = stuttometer::meets_min_severity(last_rec.severity, g_settings_config.list_severity_filter);
+
     g_has_received_data = true;
 
-    LVITEMW lvi{};
-    lvi.mask = LVIF_TEXT | LVIF_PARAM;
-    lvi.iItem = new_index;
-    lvi.iSubItem = 0;
-    std::wstring id_str = std::to_wstring(g_stutters[new_index].id);
-    lvi.pszText = id_str.data();
-    lvi.lParam = static_cast<LPARAM>(g_stutters[new_index].id);
+    if (passes_filter) {
+        int new_lv_index = ListView_GetItemCount(g_h_list_stutters);
+        insert_record_into_listview(last_rec, new_lv_index);
 
-    ListView_InsertItem(g_h_list_stutters, &lvi);
-
-    std::wstring w_time = utf8_to_wstring(g_stutters[new_index].timestamp);
-    std::wstring w_proc = utf8_to_wstring(g_stutters[new_index].process_name);
-    std::wstring w_trig = utf8_to_wstring(g_stutters[new_index].trigger_reason);
-
-    std::wstring w_dur;
-    if (g_stutters[new_index].report && g_stutters[new_index].report->trigger.source == TriggerSource::AUDIO_GLITCH) {
-        w_dur = L"Glitch (x" + std::to_wstring(g_stutters[new_index].report->trigger.glitch_count) + L")";
-    } else {
-        std::wostringstream oss_dur;
-        oss_dur << std::fixed << std::setprecision(1) << g_stutters[new_index].duration_ms << L" ms";
-        w_dur = oss_dur.str();
+        const bool should_follow = (g_selected_stutter_index < 0 || g_selected_stutter_index == static_cast<int>(g_stutters.size() - 2));
+        if (should_follow) {
+            ListView_SetItemState(g_h_list_stutters, new_lv_index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(g_h_list_stutters, new_lv_index, FALSE);
+            g_selected_stutter_index = static_cast<int>(g_stutters.size() - 1);
+            update_inspector(g_selected_stutter_index);
+        }
     }
 
-    std::wstring w_diag = utf8_to_wstring(g_stutters[new_index].top_hypothesis);
-    std::wstring w_conf = std::to_wstring(static_cast<int>(g_stutters[new_index].confidence * 100.0 + 0.5)) + L"%";
-
-    // ListView_SetItemText and LVM_INSERTITEM synchronously copy pszText into control-managed
-    // memory during message processing, so stack-local .data() is safe without lifetime extension.
-    ListView_SetItemText(g_h_list_stutters, new_index, 1, w_time.data());
-    ListView_SetItemText(g_h_list_stutters, new_index, 2, w_proc.data());
-    ListView_SetItemText(g_h_list_stutters, new_index, 3, w_trig.data());
-    ListView_SetItemText(g_h_list_stutters, new_index, 4, w_dur.data());
-    ListView_SetItemText(g_h_list_stutters, new_index, 5, w_diag.data());
-    ListView_SetItemText(g_h_list_stutters, new_index, 6, w_conf.data());
-
-    const bool should_follow = (g_selected_stutter_index < 0 || g_selected_stutter_index == new_index - 1);
-    if (should_follow) {
-        ListView_SetItemState(g_h_list_stutters, new_index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(g_h_list_stutters, new_index, FALSE);
-        g_selected_stutter_index = new_index;
-        update_inspector(new_index);
-    }
     update_clear_button_state();
     update_metrics_text();
 
+    std::wstring w_proc = utf8_to_wstring(last_rec.process_name);
     g_status_text = L"Stutter Captured (" + w_proc + L")";
     RECT client_rc;
     GetClientRect(g_hwnd_main, &client_rc);
@@ -573,6 +632,11 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     MoveWindow(g_h_btn_stop, bx, act_y, btn_w, act_h, TRUE);
     bx += btn_w + btn_gap;
     MoveWindow(g_h_btn_clear, bx, act_y, scale_dpi(75), act_h, TRUE);
+    bx += scale_dpi(75) + scale_dpi(20);
+
+    MoveWindow(g_h_lbl_sev_filter, bx, act_y, scale_dpi(48), act_h, TRUE);
+    bx += scale_dpi(48) + scale_dpi(4);
+    MoveWindow(g_h_combo_sev_filter, bx, act_y + scale_dpi(3), scale_dpi(175), scale_dpi(150), TRUE);
 
     // 3. Stutter Events Table (ListView) and Diagnostic Inspector Card
     int content_top = act_y + act_h + scale_dpi(10);
@@ -710,6 +774,25 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             g_h_btn_clear = CreateWindowExW(0, L"BUTTON", L"Clear", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_CLEAR, NULL, NULL);
             SetPropW(g_h_btn_clear, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
             EnableWindow(g_h_btn_clear, FALSE);
+
+            // Severity Filter Controls
+            g_h_lbl_sev_filter = CreateWindowExW(0, L"STATIC", L"Filter:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
+            SendMessageW(g_h_lbl_sev_filter, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+            apply_control_dark_theme(g_h_lbl_sev_filter);
+
+            g_h_combo_sev_filter = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, scale_dpi(175), scale_dpi(150), hwnd, (HMENU)(INT_PTR)IDC_COMBO_SEVERITY_FILTER, NULL, NULL);
+            SendMessageW(g_h_combo_sev_filter, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
+            SendMessageW(g_h_combo_sev_filter, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
+            SendMessageW(g_h_combo_sev_filter, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
+            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"All Severities");
+            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"Warning+ (Noticeable)");
+            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"Danger Only (Severe)");
+            int sev_idx = 1;
+            if (g_settings_config.list_severity_filter == ReportSeverity::ALL) sev_idx = 0;
+            else if (g_settings_config.list_severity_filter == ReportSeverity::DANGER) sev_idx = 2;
+            SendMessageW(g_h_combo_sev_filter, CB_SETCURSEL, sev_idx, 0);
+            apply_control_dark_theme(g_h_combo_sev_filter);
+            SetWindowSubclass(g_h_combo_sev_filter, DarkComboSubclassProc, IDC_COMBO_SEVERITY_FILTER, 0);
 
             // Inspector Header Action Buttons
             g_h_btn_copy_card = CreateWindowExW(0, L"BUTTON", L"Copy Card", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_COPY_CARD, NULL, NULL);
@@ -1168,6 +1251,17 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     }
                     break;
                 }
+
+                case IDC_COMBO_SEVERITY_FILTER: {
+                    if (wmEvent == CBN_SELCHANGE) {
+                        int sel = static_cast<int>(SendMessageW(g_h_combo_sev_filter, CB_GETCURSEL, 0, 0));
+                        if (sel == 0) g_settings_config.list_severity_filter = ReportSeverity::ALL;
+                        else if (sel == 2) g_settings_config.list_severity_filter = ReportSeverity::DANGER;
+                        else g_settings_config.list_severity_filter = ReportSeverity::WARNING;
+                        refresh_stutter_listview();
+                    }
+                    break;
+                }
             }
             return 0;
         }
@@ -1178,7 +1272,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 if (pnm->code == LVN_ITEMCHANGED) {
                     LPNMLISTVIEW pnmlv = reinterpret_cast<LPNMLISTVIEW>(lParam);
                     if ((pnmlv->uChanged & LVIF_STATE) && (pnmlv->uNewState & LVIS_SELECTED)) {
-                        g_selected_stutter_index = pnmlv->iItem;
+                        g_selected_stutter_index = get_stutter_index_from_listview(pnmlv->iItem);
                         update_inspector(g_selected_stutter_index);
                         if (g_h_edit_inspector && IsWindow(g_h_edit_inspector)) {
                             RECT client_rc{};
@@ -1212,15 +1306,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                                 pCustomDraw->clrTextBk = (item_idx % 2 == 0) ? COLOR_LIST_BG : COLOR_LIST_ROW_ALT;
                                 pCustomDraw->clrText = COLOR_TEXT_BRIGHT;
 
-                                if (item_idx >= 0 && item_idx < static_cast<int>(g_stutters.size())) {
-                                    const auto& rec = g_stutters[item_idx];
+                                int stutter_idx = get_stutter_index_from_listview(item_idx);
+                                if (stutter_idx >= 0 && stutter_idx < static_cast<int>(g_stutters.size())) {
+                                    const auto& rec = g_stutters[stutter_idx];
                                     if (sub_idx == 4) { // Duration
-                                        if (!rec.report) {
-                                            pCustomDraw->clrText = COLOR_SEV_NORMAL;
-                                            return CDRF_DODEFAULT;
-                                        }
-                                        MetricSeverity sev = classify_severity(rec.report->trigger, rec.report->present_threshold_ms);
-                                        pCustomDraw->clrText = get_severity_color(sev);
+                                        pCustomDraw->clrText = get_severity_color(rec.severity);
                                     } else if (sub_idx == 6) { // Confidence
                                         if (rec.confidence >= 0.80) {
                                             pCustomDraw->clrText = COLOR_ACCENT_EMERALD;
@@ -1237,8 +1327,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
                         case CDDS_ITEMPOSTPAINT: {
                             int item_idx = static_cast<int>(pCustomDraw->nmcd.dwItemSpec);
-                            if (item_idx >= 0 && item_idx < static_cast<int>(g_stutters.size())) {
-                                const auto& rec = g_stutters[item_idx];
+                            int stutter_idx = get_stutter_index_from_listview(item_idx);
+                            if (stutter_idx >= 0 && stutter_idx < static_cast<int>(g_stutters.size())) {
+                                const auto& rec = g_stutters[stutter_idx];
                                 HBRUSH h_stripe_br = get_attribution_brush(rec.report ? rec.report->attribution : AttributionTag::UNKNOWN);
                                 RECT rc_stripe = pCustomDraw->nmcd.rc;
                                 rc_stripe.right = rc_stripe.left + scale_dpi(3);
@@ -1320,7 +1411,10 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_STUTTO_TRIGGER: {
             std::unique_ptr<DiagnosticReport> report(reinterpret_cast<DiagnosticReport*>(lParam));
             if (report && g_settings_config.enable_osd) {
-                g_osd_toast.show(*report, g_settings_config.osd_duration_ms, g_settings_config.osd_position);
+                const auto sev = stuttometer::classify_severity(report->trigger, report->present_threshold_ms);
+                if (stuttometer::meets_min_severity(sev, g_settings_config.min_osd_severity)) {
+                    g_osd_toast.show(*report, g_settings_config.osd_duration_ms, g_settings_config.osd_position);
+                }
             }
             handle_new_report(std::move(report));
             return 0;
@@ -1377,6 +1471,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 SetBkColor(hdcStatic, COLOR_CARD_BG);
                 SetTextColor(hdcStatic, COLOR_TEXT_PRI);
                 return (LRESULT)g_theme.br_card;
+            }
+            if (hCtl == g_h_lbl_sev_filter) {
+                SetBkColor(hdcStatic, COLOR_BG);
+                SetTextColor(hdcStatic, COLOR_TEXT_PRI);
+                return (LRESULT)g_theme.br_bg;
             }
             SetBkColor(hdcStatic, COLOR_BG);
             SetTextColor(hdcStatic, COLOR_TEXT_PRI);

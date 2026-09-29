@@ -3,6 +3,7 @@
 #include "theme.hpp"
 #include "dark_controls.hpp"
 #include <stuttometer/gui_config.hpp>
+#include <stuttometer/correlator.hpp>
 #include "gui_controller.hpp"
 #include "osd_toast.hpp"
 
@@ -26,6 +27,7 @@ constexpr int IDC_BTN_CLEAR          = 1004;
 constexpr int IDC_BTN_EXPORT_JSON    = 1006;
 constexpr int IDC_BTN_COPY_JSON      = 1007;
 constexpr int IDC_COMBO_PROCESS      = 1008;
+constexpr int IDC_COMBO_SEVERITY_FILTER = 1009;
 constexpr int IDC_LIST_STUTTERS      = 1014;
 constexpr int IDC_EDIT_INSPECTOR     = 1015;
 constexpr int IDC_BTN_COPY_CARD      = 1016;
@@ -44,6 +46,7 @@ struct StutterRecord {
     double duration_ms{0.0};
     std::string top_hypothesis;
     double confidence{0.0};
+    MetricSeverity severity{MetricSeverity::NORMAL};
     std::unique_ptr<DiagnosticReport> report;
 };
 
@@ -58,6 +61,8 @@ extern int g_selected_stutter_index;
 
 extern HWND g_h_lbl_target;
 extern HWND g_h_combo_process;
+extern HWND g_h_lbl_sev_filter;
+extern HWND g_h_combo_sev_filter;
 
 extern HWND g_h_btn_start;
 extern HWND g_h_btn_stop;

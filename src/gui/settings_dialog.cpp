@@ -53,6 +53,7 @@ constexpr int IDC_SET_COMBO_OSD_POS        = 2033;
 constexpr int IDC_SET_BTN_CANCEL           = 2034;
 constexpr int IDC_SET_COMBO_PACING_PROFILE = 2035;
 constexpr int IDC_SET_LBL_PROFILE_HINT     = 2036;
+constexpr int IDC_SET_COMBO_PRESET         = 2037;
 
 
 
@@ -93,6 +94,7 @@ struct SettingsDialogState {
     HWND h_edit_mem_phys{nullptr};
     HWND h_edit_d3d12_pso{nullptr};
     HWND h_edit_vram_demoted{nullptr};
+    HWND h_combo_preset{nullptr};
     HWND h_combo_trig_mode{nullptr};
     HWND h_combo_pacing_profile{nullptr};
     HWND h_edit_target_fps{nullptr};
@@ -104,6 +106,7 @@ struct SettingsDialogState {
     HWND h_btn_cancel{nullptr};
     HWND h_btn_save{nullptr};
 
+    DetectionPreset current_preset{DetectionPreset::BALANCED};
     PacingProfile current_profile{PacingProfile::AUTO_ADAPTIVE};
     PacingProfile previous_preset{PacingProfile::AUTO_ADAPTIVE};
     double custom_spike_mult{2.0};
@@ -489,13 +492,16 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     const int c2_y = scale_y(266);
     const int c2_w = col_w;
 
-    int p1_y = c2_y + scale_y(30);
+    int p0_y = c2_y + scale_y(26);
+    MoveWindow(state->h_combo_preset, c2_x + scale_dpi(134), p0_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
+
+    int p1_y = c2_y + scale_y(52);
     MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(134), p1_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
 
-    int p2_y = c2_y + scale_y(60);
+    int p2_y = c2_y + scale_y(78);
     MoveWindow(state->h_combo_pacing_profile, c2_x + scale_dpi(134), p2_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
 
-    int p3_y = c2_y + scale_y(90);
+    int p3_y = c2_y + scale_y(104);
     MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(134), p3_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
 
     int p4_y = c2_y + scale_y(132);
@@ -697,6 +703,23 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             }
 
             // Frame Pacing & Dynamic Relative Trigger Controls
+            state->h_combo_preset = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_PRESET, NULL, NULL);
+            SendMessageW(state->h_combo_preset, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
+            SendMessageW(state->h_combo_preset, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
+            SendMessageW(state->h_combo_preset, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
+            SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Balanced (General Gaming)");
+            SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Competitive (High Refresh / Esports)");
+            SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Conservative (High Floor / Minimal Alerts)");
+            SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Forensic (Full Micro-Stutter Analysis)");
+            SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Custom Calibration");
+
+            state->current_preset = g_settings_config.detection_preset;
+            int preset_idx = static_cast<int>(state->current_preset);
+            if (preset_idx < 0 || preset_idx > 4) preset_idx = 0;
+            SendMessageW(state->h_combo_preset, CB_SETCURSEL, preset_idx, 0);
+            apply_control_dark_theme(state->h_combo_preset);
+            SetWindowSubclass(state->h_combo_preset, DarkComboSubclassProc, IDC_SET_COMBO_PRESET, 0);
+
             state->h_combo_trig_mode = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_COMBO_TRIG_MODE, NULL, NULL);
             SendMessageW(state->h_combo_trig_mode, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             SendMessageW(state->h_combo_trig_mode, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
@@ -1002,7 +1025,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             // Card 2 Labels (Frame Pacing & Judder Triggers)
             SelectObject(mem_dc, g_font_ui_bold);
 
-            int p1_y = c2_y + scale_y(30);
+            int p0_y = c2_y + scale_y(26);
+            RECT rc_lbl_preset = { c2_x + scale_dpi(14), p0_y, c2_x + scale_dpi(130), p0_y + ctrl_h };
+            SetTextColor(mem_dc, COLOR_TEXT_LABEL);
+            DrawTextW(mem_dc, L"Detection Preset:", -1, &rc_lbl_preset, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            int p1_y = c2_y + scale_y(52);
             RECT rc_lbl_tm = { c2_x + scale_dpi(14), p1_y, c2_x + scale_dpi(130), p1_y + ctrl_h };
             SetTextColor(mem_dc, adv_lbl_color);
             DrawTextW(mem_dc, L"Trigger Mode:", -1, &rc_lbl_tm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -1012,12 +1040,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             COLORREF prof_lbl_color = (mode_paint != FrameTriggerMode::STATIC_ONLY) ? COLOR_TEXT_LABEL : COLOR_TEXT_MUTED;
             SetTextColor(mem_dc, prof_lbl_color);
-            int p2_y = c2_y + scale_y(60);
+            int p2_y = c2_y + scale_y(78);
             RECT rc_lbl_prof = { c2_x + scale_dpi(14), p2_y, c2_x + scale_dpi(130), p2_y + ctrl_h };
             DrawTextW(mem_dc, L"Sensitivity Profile:", -1, &rc_lbl_prof, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SetTextColor(mem_dc, adv_lbl_color);
-            int p3_y = c2_y + scale_y(90);
+            int p3_y = c2_y + scale_y(104);
             RECT rc_lbl_fps = { c2_x + scale_dpi(14), p3_y, c2_x + scale_dpi(130), p3_y + ctrl_h };
             DrawTextW(mem_dc, L"Target FPS Floor:", -1, &rc_lbl_fps, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
@@ -1280,6 +1308,47 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 return 0;
             }
 
+            if (wmId == IDC_SET_COMBO_PRESET && HIWORD(wParam) == CBN_SELCHANGE) {
+                int sel = static_cast<int>(SendMessageW(state->h_combo_preset, CB_GETCURSEL, 0, 0));
+                DetectionPreset p = DetectionPreset::BALANCED;
+                if (sel == 1) p = DetectionPreset::COMPETITIVE;
+                else if (sel == 2) p = DetectionPreset::CONSERVATIVE;
+                else if (sel == 3) p = DetectionPreset::FORENSIC;
+                else if (sel == 4) p = DetectionPreset::CUSTOM;
+
+                state->current_preset = p;
+                if (p != DetectionPreset::CUSTOM) {
+                    TriggerConfig tc;
+                    GuiConfig gc;
+                    apply_detection_preset(p, tc, gc);
+
+                    state->current_profile = gc.pacing_profile;
+                    state->previous_preset = gc.pacing_profile;
+                    int prof_idx = 0;
+                    switch (gc.pacing_profile) {
+                        case PacingProfile::AUTO_ADAPTIVE: prof_idx = 0; break;
+                        case PacingProfile::HIGH_REFRESH: prof_idx = 1; break;
+                        case PacingProfile::CONSERVATIVE: prof_idx = 2; break;
+                        case PacingProfile::CUSTOM: prof_idx = 3; break;
+                    }
+                    SendMessageW(state->h_combo_pacing_profile, CB_SETCURSEL, prof_idx, 0);
+
+                    if (gc.pacing_profile == PacingProfile::AUTO_ADAPTIVE) {
+                        SetWindowTextW(state->h_edit_spike_mult, L"Auto");
+                        SetWindowTextW(state->h_edit_min_delta, L"Auto");
+                    } else if (gc.pacing_profile == PacingProfile::HIGH_REFRESH) {
+                        SetWindowTextW(state->h_edit_spike_mult, L"1.4");
+                        SetWindowTextW(state->h_edit_min_delta, L"1.5");
+                    } else if (gc.pacing_profile == PacingProfile::CONSERVATIVE) {
+                        SetWindowTextW(state->h_edit_spike_mult, L"3.0");
+                        SetWindowTextW(state->h_edit_min_delta, L"8.0");
+                    }
+                }
+                update_settings_dependencies(state);
+                InvalidateRect(hwnd, NULL, TRUE);
+                return 0;
+            }
+
             if (wmId == IDC_SET_COMBO_TRIG_MODE && HIWORD(wParam) == CBN_SELCHANGE) {
                 update_settings_dependencies(state);
                 InvalidateRect(hwnd, NULL, TRUE);
@@ -1294,6 +1363,8 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 else if (sel == 3) new_profile = PacingProfile::CUSTOM;
 
                 if (new_profile == PacingProfile::CUSTOM) {
+                    state->current_preset = DetectionPreset::CUSTOM;
+                    SendMessageW(state->h_combo_preset, CB_SETCURSEL, 4, 0);
                     if (!state->advanced_unlocked) {
                         int res = MessageBoxW(hwnd,
                             L"Custom Calibration allows modifying frame pacing multipliers and minimum spike deltas, which directly affect stutter detection sensitivity.\n\nAre you sure you want to unlock advanced settings?",
@@ -1450,6 +1521,8 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 state->target_pid = active_cfg.target_pid;
                 state->detected_display = query_display_refresh_info(state->target_pid);
 
+                state->current_preset = DetectionPreset::BALANCED;
+                SendMessageW(state->h_combo_preset, CB_SETCURSEL, 0, 0);
                 state->current_profile = PacingProfile::AUTO_ADAPTIVE;
                 state->previous_preset = PacingProfile::AUTO_ADAPTIVE;
                 state->custom_spike_mult = 2.0;
@@ -1570,6 +1643,15 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 g_settings_config.present_threshold_ms = new_present_threshold_ms;
                 g_settings_config.present_threshold_manual = new_present_manual;
                 g_settings_config.smi_threshold_manual = state->smi_threshold_manual;
+
+                g_settings_config.detection_preset = state->current_preset;
+                if (state->current_profile == PacingProfile::CUSTOM) {
+                    g_settings_config.detection_preset = DetectionPreset::CUSTOM;
+                }
+                if (g_settings_config.detection_preset != DetectionPreset::CUSTOM) {
+                    TriggerConfig dummy_tc;
+                    apply_detection_preset(g_settings_config.detection_preset, dummy_tc, g_settings_config);
+                }
 
                 g_settings_config.pacing_profile = state->current_profile;
                 if (state->current_profile == PacingProfile::CUSTOM) {
@@ -1771,6 +1853,7 @@ void settings_dialog_apply_fonts(HWND hDlg) {
         { &state->h_edit_mem_phys,        g_font_ui_bold, false },
         { &state->h_edit_d3d12_pso,       g_font_ui_bold, false },
         { &state->h_edit_vram_demoted,    g_font_ui_bold, false },
+        { &state->h_combo_preset,         g_font_ui,      true  },
         { &state->h_combo_trig_mode,      g_font_ui,      true  },
         { &state->h_combo_pacing_profile, g_font_ui,      true  }, // FIXED: Now scaled on DPI change
         { &state->h_edit_target_fps,      g_font_ui_bold, false },
