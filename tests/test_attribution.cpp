@@ -461,39 +461,45 @@ static void test_classify_severity() {
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
     }
 
-    // 6. Judder promotion:
-    // Cadence judder with spike_ratio = 3.2 -> promoted to DANGER
+    // 6. Judder magnitude classification:
+    // Cadence judder with high magnitude (high_alt >= 30, long_dur >= 500, or high_swing >= 60 & alt >= 5) -> DANGER
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.duration_ms = 53.0;
+        trig.duration_ms = 550.0;
         trig.baseline_avg_ms = 16.67;
         trig.baseline_fps = 60.0;
-        trig.spike_ratio = 3.2;
+        trig.spike_ratio = 1.0;
+        trig.judder_alternations = 32;
+        trig.judder_max_swing_q100 = 65;
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
     }
-    // Cadence judder with spike_ratio = 2.1 -> WARNING
+    // Cadence judder with mid magnitude (mid_alt >= 10, mid_dur >= 150, or mid_swing >= 40 & alt >= 3) -> WARNING
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.duration_ms = 35.0;
+        trig.duration_ms = 200.0;
         trig.baseline_avg_ms = 16.67;
         trig.baseline_fps = 60.0;
-        trig.spike_ratio = 2.1;
+        trig.spike_ratio = 1.0;
+        trig.judder_alternations = 12;
+        trig.judder_max_swing_q100 = 45;
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
     }
-    // Cadence judder with spike_ratio < 2.0 -> WARNING (judder is WARNING by default)
+    // Cadence judder with low magnitude (< mid thresholds) -> NORMAL
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.duration_ms = 25.0;
+        trig.duration_ms = 50.0;
         trig.baseline_avg_ms = 16.67;
         trig.baseline_fps = 60.0;
-        trig.spike_ratio = 1.5;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+        trig.spike_ratio = 1.0;
+        trig.judder_alternations = 2;
+        trig.judder_max_swing_q100 = 20;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
     }
 
     // 7. Fallback without baseline (baseline_avg_ms == 0.0 or spike_ratio == 0.0)
@@ -560,11 +566,11 @@ static void test_classify_severity() {
         trig.duration_ms = 45.0;
         STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_30hz) == MetricSeverity::NORMAL);
     }
-    // Fallback without baseline for Judder -> WARNING even if duration < 25.0
+    // Fallback without baseline for Judder with mid magnitude (duration >= 150.0) -> WARNING
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.duration_ms = 10.0;
+        trig.duration_ms = 150.0;
         trig.baseline_avg_ms = 0.0;
         trig.spike_ratio = 0.0;
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);

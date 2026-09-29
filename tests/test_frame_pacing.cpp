@@ -10,12 +10,12 @@
 
 static void test_struct_properties() {
     std::cout << "[TEST] Validating struct properties & trivial copyability...\n";
-    static_assert(sizeof(stuttometer::RollingFrameStats) == 320, "RollingFrameStats must be strictly 320 bytes");
+    static_assert(sizeof(stuttometer::RollingFrameStats) == 384, "RollingFrameStats must be strictly 384 bytes");
     static_assert(std::is_trivially_copyable_v<stuttometer::RollingFrameStats>, "RollingFrameStats must be trivially copyable");
     static_assert(sizeof(stuttometer::TriggerInfo) == 64, "TriggerInfo must be strictly 64 bytes");
     static_assert(std::is_trivially_copyable_v<stuttometer::TriggerInfo>, "TriggerInfo must be trivially copyable");
 
-    STUTTO_ASSERT(sizeof(stuttometer::RollingFrameStats) == 320);
+    STUTTO_ASSERT(sizeof(stuttometer::RollingFrameStats) == 384);
     STUTTO_ASSERT(sizeof(stuttometer::TriggerInfo) == 64);
     std::cout << "  -> Struct size & trivial copyability verified.\n";
 }
@@ -166,7 +166,7 @@ static void test_cadence_judder_detection() {
         engine.on_dxgi_present(pid, tid, 20.0, qpc, stream_key, 0);
     }
 
-    // Deliver alternating pattern (13ms, 27ms, 13ms, 27ms - 3 sign alternations >= 35% swing)
+    // Deliver alternating pattern (13ms, 27ms, 13ms, 27ms, 13ms, 27ms -> 5 alternations >= 35% swing)
     qpc += stuttometer::ms_to_qpc_delta(13.0, qpc_freq);
     engine.on_dxgi_present(pid, tid, 13.0, qpc, stream_key, 0);
 
@@ -177,6 +177,18 @@ static void test_cadence_judder_detection() {
     engine.on_dxgi_present(pid, tid, 13.0, qpc, stream_key, 0);
 
     qpc += stuttometer::ms_to_qpc_delta(27.0, qpc_freq);
+    engine.on_dxgi_present(pid, tid, 27.0, qpc, stream_key, 0);
+
+    qpc += stuttometer::ms_to_qpc_delta(13.0, qpc_freq);
+    engine.on_dxgi_present(pid, tid, 13.0, qpc, stream_key, 0);
+
+    qpc += stuttometer::ms_to_qpc_delta(27.0, qpc_freq);
+    bool judder_during = engine.on_dxgi_present(pid, tid, 27.0, qpc, stream_key, 0);
+    STUTTO_ASSERT(!judder_during); // Episode still active, not emitted until close
+    const uint64_t last_alt_qpc = qpc;
+
+    // Close episode on gap >= 500 ms (e.g. 505 ms) with non-alternating frame (27.0ms -> delta 0)
+    qpc += stuttometer::ms_to_qpc_delta(505.0, qpc_freq);
     bool judder_trig = engine.on_dxgi_present(pid, tid, 27.0, qpc, stream_key, 0);
     STUTTO_ASSERT(judder_trig);
 
@@ -189,6 +201,8 @@ static void test_cadence_judder_detection() {
     STUTTO_ASSERT(polled);
     STUTTO_ASSERT(info.reason == stuttometer::TriggerReason::CADENCE_JUDDER);
     STUTTO_ASSERT(info.source == stuttometer::TriggerSource::FRAME_PACING_JUDDER);
+    STUTTO_ASSERT(info.trigger_timestamp_qpc == last_alt_qpc);
+    STUTTO_ASSERT(info.judder_alternations >= 5);
 
     std::cout << "  -> Cadence judder pattern successfully detected with reason CADENCE_JUDDER.\n";
 }
@@ -431,16 +445,32 @@ static void test_cadence_helper_no_double_increment() {
     STUTTO_ASSERT(!res3.is_stutter);
     STUTTO_ASSERT(stats.alternating_cadence_count == 2);
 
-    // Frame 4: -13.0ms swing (opposite sign) -> hits 3 alternations -> triggers CADENCE_JUDDER!
+    // Frame 4: -13.0ms swing (opposite sign) -> hits 3 alternations -> episode continues active
     current_qpc += stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+    const uint64_t last_alt_qpc = current_qpc;
     auto res4 = stuttometer::evaluate_frame_pacing(
         stats, 10.0, current_qpc, qpc_freq,
         stuttometer::FrameTriggerMode::HYBRID,
-        2.5, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0
+        2.5, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0,
+        stuttometer::PacingProfile::CUSTOM, 3
     );
-    STUTTO_ASSERT(res4.is_stutter);
-    STUTTO_ASSERT(res4.reason == stuttometer::TriggerReason::CADENCE_JUDDER);
-    STUTTO_ASSERT(stats.alternating_cadence_count == 0);
+    STUTTO_ASSERT(!res4.is_stutter);
+    STUTTO_ASSERT(stats.judder_episode_alternations == 3);
+    STUTTO_ASSERT(stats.judder_episode_active == 1);
+
+    // Frame 5: Close episode on gap >= 500ms with non-alternating frame (10.0ms -> delta 0)
+    current_qpc += stuttometer::ms_to_qpc_delta(505.0, qpc_freq);
+    auto res5 = stuttometer::evaluate_frame_pacing(
+        stats, 10.0, current_qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        2.5, 10.0, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 50.0,
+        stuttometer::PacingProfile::CUSTOM, 3
+    );
+    STUTTO_ASSERT(res5.is_stutter);
+    STUTTO_ASSERT(res5.reason == stuttometer::TriggerReason::CADENCE_JUDDER);
+    STUTTO_ASSERT(res5.judder_alternations == 3);
+    STUTTO_ASSERT(res5.trigger_timestamp_qpc == last_alt_qpc);
+    STUTTO_ASSERT(stats.judder_episode_active == 0);
 
     std::cout << "  -> Cadence helper single-increment & judder trigger PASSED.\n";
 }
@@ -972,13 +1002,13 @@ static void test_drs_flapping_resistance() {
 }
 
 static void test_rolling_frame_stats_alignment_and_cache_lines() {
-    std::cout << "[TEST] Verifying RollingFrameStats layout, size (320 bytes), and cache alignment...\n";
+    std::cout << "[TEST] Verifying RollingFrameStats layout, size (384 bytes), and cache alignment...\n";
 
-    static_assert(sizeof(stuttometer::RollingFrameStats) == 320, "RollingFrameStats must be exactly 320 bytes (5 cache lines)");
+    static_assert(sizeof(stuttometer::RollingFrameStats) == 384, "RollingFrameStats must be exactly 384 bytes (6 cache lines)");
     static_assert(alignof(stuttometer::RollingFrameStats) == 64, "RollingFrameStats must be 64-byte cache line aligned");
     static_assert(std::is_trivially_copyable_v<stuttometer::RollingFrameStats>, "RollingFrameStats must be trivially copyable");
 
-    STUTTO_ASSERT(sizeof(stuttometer::RollingFrameStats) == 320);
+    STUTTO_ASSERT(sizeof(stuttometer::RollingFrameStats) == 384);
     STUTTO_ASSERT(alignof(stuttometer::RollingFrameStats) == 64);
     STUTTO_ASSERT(std::is_trivially_copyable_v<stuttometer::RollingFrameStats>);
 
@@ -997,6 +1027,9 @@ static void test_rolling_frame_stats_alignment_and_cache_lines() {
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_first_qpc) == 296);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_sum_us) == 304);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_sum_sq_us) == 312);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, judder_episode_active) == 320);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, judder_episode_start_qpc) == 328);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, judder_episode_last_alt_qpc) == 336);
 
     std::cout << "  -> RollingFrameStats alignment and cache line verification PASSED.\n";
 }

@@ -218,7 +218,7 @@ enum class CandidateOutcome : uint8_t {
     STALLED      = 6
 };
 
-// 64-slot lock-free circular buffer with candidate adaptation
+// 64-slot lock-free circular buffer with candidate adaptation and judder episode tracking
 struct alignas(64) RollingFrameStats {
     uint32_t durations_us[64]{0};                       // Bytes 0..255   (Cache lines 0-3)
     uint64_t sum_dur_us{0};                             // Bytes 256..263 (Cache line 4 start)
@@ -230,13 +230,31 @@ struct alignas(64) RollingFrameStats {
     uint8_t  alternating_cadence_count{0};              // Byte  288
     uint8_t  candidate_consecutive_skips{0};            // Byte  289
     uint16_t candidate_count{0};                        // Bytes 290..291 (2-byte aligned)
-    uint32_t candidate_clean_frames_since_last_match{0};// Bytes 292..295 (Brings offset to 296, 8-byte aligned)
-    uint64_t candidate_first_qpc{0};                    // Bytes 296..303 (8-byte aligned)
-    uint64_t candidate_sum_us{0};                       // Bytes 304..311 (8-byte aligned)
-    uint64_t candidate_sum_sq_us{0};                    // Bytes 312..319 (8-byte aligned)
+    uint32_t candidate_clean_frames_since_last_match{0};// Bytes 292..295
+    uint64_t candidate_first_qpc{0};                    // Bytes 296..303
+    uint64_t candidate_sum_us{0};                       // Bytes 304..311
+    uint64_t candidate_sum_sq_us{0};                    // Bytes 312..319
+    uint8_t  judder_episode_active{0};                  // Byte  320 (Cache line 5 start)
+    uint8_t  _judder_reserved_0{0};                     // Byte  321
+    uint16_t judder_episode_alternations{0};            // Bytes 322..323
+    uint16_t judder_episode_max_swing_q100{0};          // Bytes 324..325
+    uint16_t _judder_pad{0};                            // Bytes 326..327
+    uint64_t judder_episode_start_qpc{0};               // Bytes 328..335
+    uint64_t judder_episode_last_alt_qpc{0};            // Bytes 336..343
+    uint64_t _judder_reserved[5]{};                     // Bytes 344..383 (40 bytes)
 };
-static_assert(sizeof(RollingFrameStats) == 320, "RollingFrameStats must be exactly 320 bytes (5 cache lines)");
+static_assert(sizeof(RollingFrameStats) == 384, "RollingFrameStats must be exactly 384 bytes (6 cache lines)");
+static_assert(offsetof(RollingFrameStats, judder_episode_active) == 320);
+static_assert(offsetof(RollingFrameStats, judder_episode_start_qpc) == 328);
+static_assert(offsetof(RollingFrameStats, judder_episode_last_alt_qpc) == 336);
 static_assert(std::is_trivially_copyable_v<RollingFrameStats>, "RollingFrameStats must be trivially copyable");
+
+inline void reset_cadence_state(RollingFrameStats& stats) noexcept {
+    if (stats.judder_episode_active == 0) {
+        stats.last_delta_us = 0;
+    }
+    stats.alternating_cadence_count = 0;
+}
 
 // Clears all four candidate accumulator fields. Used at 7 sites: reset_frame_stats,
 // pause reset, promotion success, inconsistent-candidate rejection, CADENCE_JUDDER trigger,
@@ -264,6 +282,11 @@ inline void reset_frame_stats(RollingFrameStats& stats, uint64_t qpc_ts = 0) noe
     stats.candidate_consecutive_skips = 0;
     stats.candidate_clean_frames_since_last_match = 0;
     clear_cadence_candidate(stats);
+    stats.judder_episode_active = 0;
+    stats.judder_episode_alternations = 0;
+    stats.judder_episode_max_swing_q100 = 0;
+    stats.judder_episode_start_qpc = 0;
+    stats.judder_episode_last_alt_qpc = 0;
 }
 
 inline double calculate_mean_ms(const RollingFrameStats& stats) noexcept {
@@ -474,6 +497,10 @@ struct FramePacingResult {
     double baseline_fps{0.0};
     double spike_ratio{0.0};
     double effective_mean_ms{0.0};
+    uint16_t judder_alternations{0};
+    uint16_t judder_max_swing_q100{0};
+    uint64_t trigger_timestamp_qpc{0};
+    double   duration_ms{0.0};
 };
 
 // Evaluates a frame against the stream's rolling statistics
@@ -488,8 +515,10 @@ inline FramePacingResult evaluate_frame_pacing(
     bool enable_judder,
     double judder_swing_ratio,
     double effective_static_threshold_ms,
-    PacingProfile profile = PacingProfile::CUSTOM
+    PacingProfile profile = PacingProfile::CUSTOM,
+    uint8_t judder_min_alternations = 3
 ) noexcept {
+    judder_min_alternations = std::max<uint8_t>(1, judder_min_alternations);
     FramePacingResult res{};
 
     bool pause_reset_occurred = false;
@@ -554,8 +583,7 @@ inline FramePacingResult evaluate_frame_pacing(
             if (dur_ms >= effective_static_threshold_ms) {
                 res.is_stutter = true;
                 res.reason = TriggerReason::STATIC_THRESHOLD;
-                stats.last_delta_us = 0;
-                stats.alternating_cadence_count = 0;
+                reset_cadence_state(stats);
                 res.effective_mean_ms = res.baseline_avg_ms;
                 return res;
             }
@@ -588,8 +616,7 @@ inline FramePacingResult evaluate_frame_pacing(
 
             if (is_warmup_stall) {
                 push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
-                stats.last_delta_us = 0;
-                stats.alternating_cadence_count = 0;
+                reset_cadence_state(stats);
                 if (static_trigger) {
                     res.is_stutter = true;
                     res.reason     = TriggerReason::STATIC_THRESHOLD;
@@ -608,8 +635,7 @@ inline FramePacingResult evaluate_frame_pacing(
             // (e.g. 200 Hz display with 5 ms threshold, 8 ms actual frames -> permanent starvation).
             if (dur_ms >= effective_static_threshold_ms) {
                 push_clamped_clean_frame(stats, dur_ms, timestamp_qpc, judder_swing_ratio);
-                stats.last_delta_us = 0;
-                stats.alternating_cadence_count = 0;
+                reset_cadence_state(stats);
                 res.effective_mean_ms = calculate_mean_ms(stats);
                 return res; // Still suppress the trigger, but populate the baseline
             }
@@ -623,8 +649,7 @@ inline FramePacingResult evaluate_frame_pacing(
     if (mode == FrameTriggerMode::HYBRID || mode == FrameTriggerMode::DYNAMIC_ONLY) {
         if (res.spike_ratio >= spike_multiplier && (dur_ms - mean_ms) >= min_spike_delta_ms) {
             // Reset cadence/idle state prior to candidate processing
-            stats.last_delta_us = 0;
-            stats.alternating_cadence_count = 0;
+            reset_cadence_state(stats);
             stats.candidate_clean_frames_since_last_match = 0;
 
             double promoted_avg_ms = 0.0;
@@ -655,17 +680,107 @@ inline FramePacingResult evaluate_frame_pacing(
             return res;
         }
 
-        // 2. Cadence Judder Check: >= 3 sign alternations (4 consecutive oscillating deltas)
+        // 2. Cadence Judder Block:
         if (enable_judder && stats.sample_count > 0) {
-            const auto cadence = calculate_cadence_delta(stats, static_cast<uint32_t>(dur_ms * 1000.0), judder_swing_ratio);
-            if (cadence.is_alternating && (stats.alternating_cadence_count + 1) >= 3) {
-                res.is_stutter = true;
-                res.reason = TriggerReason::CADENCE_JUDDER;
-                stats.last_delta_us = 0;
-                stats.alternating_cadence_count = 0;
-                clear_cadence_candidate(stats);
-                res.effective_mean_ms = res.baseline_avg_ms;
-                return res;
+            const auto cadence = calculate_cadence_delta(
+                stats, static_cast<uint32_t>(dur_ms * 1000.0), judder_swing_ratio);
+            const uint64_t ts = timestamp_qpc;
+
+            if (cadence.is_alternating) {
+                if (stats.judder_episode_alternations < 0xFFFF) {
+                    ++stats.judder_episode_alternations;
+                }
+                if (stats.judder_episode_alternations == 1) {
+                    stats.judder_episode_active = 1;
+                    stats.judder_episode_start_qpc = ts;
+                }
+                stats.judder_episode_last_alt_qpc = ts;
+
+                if (stats.sum_dur_us > 0 && stats.sample_count > 0) {
+                    const double mean_us = static_cast<double>(stats.sum_dur_us) / stats.sample_count;
+                    const double swing_ratio =
+                        std::abs(static_cast<double>(cadence.delta_us)) / mean_us;
+                    const uint32_t swing_q100 = static_cast<uint32_t>(
+                        std::min(99999.0, swing_ratio * 100.0));
+                    const uint16_t clamped =
+                        static_cast<uint16_t>(std::min<uint32_t>(65535u, swing_q100));
+                    if (clamped > stats.judder_episode_max_swing_q100) {
+                        stats.judder_episode_max_swing_q100 = clamped;
+                    }
+                }
+
+                const uint64_t ep_dur_qpc =
+                    (stats.judder_episode_last_alt_qpc >= stats.judder_episode_start_qpc)
+                        ? (stats.judder_episode_last_alt_qpc - stats.judder_episode_start_qpc) : 0;
+                const double ep_dur_ms = qpc_delta_to_ms(ep_dur_qpc, qpc_freq);
+
+                if (ep_dur_ms >= 5000.0) {
+                    if (stats.judder_episode_alternations >= judder_min_alternations) {
+                        res.is_stutter = true;
+                        res.reason = TriggerReason::CADENCE_JUDDER;
+                        res.judder_alternations = stats.judder_episode_alternations;
+                        res.judder_max_swing_q100 = stats.judder_episode_max_swing_q100;
+                        res.duration_ms = ep_dur_ms;
+                        res.trigger_timestamp_qpc = (stats.judder_episode_last_alt_qpc > 0)
+                            ? stats.judder_episode_last_alt_qpc : ts;
+                        res.baseline_avg_ms = calculate_mean_ms(stats);
+                        res.baseline_fps = (res.baseline_avg_ms > 0.0)
+                            ? 1000.0 / res.baseline_avg_ms : 0.0;
+                        res.spike_ratio = 1.0;
+                    }
+                    stats.judder_episode_active = 0;
+                    stats.judder_episode_alternations = 0;
+                    stats.judder_episode_max_swing_q100 = 0;
+                    stats.judder_episode_start_qpc = 0;
+                    stats.judder_episode_last_alt_qpc = 0;
+                    stats.last_delta_us = 0;
+                    stats.alternating_cadence_count = 0;
+                    if (res.is_stutter) {
+                        res.effective_mean_ms = res.baseline_avg_ms;
+                        return res;
+                    }
+                }
+            } else {
+                if (stats.judder_episode_active) {
+                    const uint64_t gap_qpc = (ts >= stats.judder_episode_last_alt_qpc)
+                        ? (ts - stats.judder_episode_last_alt_qpc) : 0;
+                    const double gap_ms = qpc_delta_to_ms(gap_qpc, qpc_freq);
+
+                    const uint64_t ep_dur_qpc =
+                        (stats.judder_episode_last_alt_qpc >= stats.judder_episode_start_qpc)
+                            ? (stats.judder_episode_last_alt_qpc - stats.judder_episode_start_qpc) : 0;
+                    const double ep_dur_ms = qpc_delta_to_ms(ep_dur_qpc, qpc_freq);
+
+                    const bool close_by_gap = (gap_ms >= 500.0);
+                    const bool close_by_cap = (ep_dur_ms >= 5000.0);
+
+                    if (close_by_gap || close_by_cap) {
+                        if (stats.judder_episode_alternations >= judder_min_alternations) {
+                            res.is_stutter = true;
+                            res.reason = TriggerReason::CADENCE_JUDDER;
+                            res.judder_alternations = stats.judder_episode_alternations;
+                            res.judder_max_swing_q100 = stats.judder_episode_max_swing_q100;
+                            res.duration_ms = ep_dur_ms;
+                            res.trigger_timestamp_qpc = (stats.judder_episode_last_alt_qpc > 0)
+                                ? stats.judder_episode_last_alt_qpc : ts;
+                            res.baseline_avg_ms = calculate_mean_ms(stats);
+                            res.baseline_fps = (res.baseline_avg_ms > 0.0)
+                                ? 1000.0 / res.baseline_avg_ms : 0.0;
+                            res.spike_ratio = 1.0;
+                        }
+                        stats.judder_episode_active = 0;
+                        stats.judder_episode_alternations = 0;
+                        stats.judder_episode_max_swing_q100 = 0;
+                        stats.judder_episode_start_qpc = 0;
+                        stats.judder_episode_last_alt_qpc = 0;
+                        stats.last_delta_us = 0;
+                        stats.alternating_cadence_count = 0;
+                        if (res.is_stutter) {
+                            res.effective_mean_ms = res.baseline_avg_ms;
+                            return res;
+                        }
+                    }
+                }
             }
         }
     }
@@ -675,16 +790,14 @@ inline FramePacingResult evaluate_frame_pacing(
         if (dur_ms >= effective_static_threshold_ms) {
             res.is_stutter = true;
             res.reason = TriggerReason::STATIC_THRESHOLD;
-            stats.last_delta_us = 0;
-            stats.alternating_cadence_count = 0;
+            reset_cadence_state(stats);
             clear_cadence_candidate(stats);
             res.effective_mean_ms = res.baseline_avg_ms;
             return res;
         }
     } else if (mode == FrameTriggerMode::HYBRID) {
         if (dur_ms >= effective_static_threshold_ms) {
-            stats.last_delta_us = 0;
-            stats.alternating_cadence_count = 0;
+            reset_cadence_state(stats);
             stats.candidate_clean_frames_since_last_match = 0;
 
             double promoted_avg_ms = 0.0;

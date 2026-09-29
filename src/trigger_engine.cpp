@@ -250,7 +250,8 @@ bool TriggerEngine::evaluate_frame_pacing_common(
             config_.enable_judder_detection,
             config_.judder_swing_ratio,
             effective_static_threshold,
-            config_.pacing_profile
+            config_.pacing_profile,
+            config_.judder_min_alternations
         );
 
         SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
@@ -297,18 +298,25 @@ bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_
     const TriggerSource src =
         resolve_trigger_source(pacing_res.reason, TriggerSource::DXGI_PRESENT_STUTTER);
 
+    const uint64_t trig_ts = (pacing_res.trigger_timestamp_qpc > 0)
+        ? pacing_res.trigger_timestamp_qpc : timestamp_qpc;
+    const double trig_dur = (pacing_res.duration_ms > 0.0)
+        ? pacing_res.duration_ms : duration_ms;
+
     return initiate_trigger_atomic(
         src,
         pacing_res.reason,
-        timestamp_qpc,
-        duration_ms,
+        trig_ts,
+        trig_dur,
         pid,
         tid,
         cpu_index,
         0,
         pacing_res.baseline_avg_ms,
         pacing_res.baseline_fps,
-        pacing_res.spike_ratio
+        pacing_res.spike_ratio,
+        pacing_res.judder_alternations,
+        pacing_res.judder_max_swing_q100
     );
 }
 
@@ -335,18 +343,25 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
         resolve_trigger_source(pacing_res.reason, TriggerSource::KERNEL_FRAME_STALL);
 
     if (current == TriggerState::ARMED) {
+        const uint64_t trig_ts = (pacing_res.trigger_timestamp_qpc > 0)
+            ? pacing_res.trigger_timestamp_qpc : timestamp_qpc;
+        const double trig_dur = (pacing_res.duration_ms > 0.0)
+            ? pacing_res.duration_ms : duration_ms;
+
         return initiate_trigger_atomic(
             src,
             pacing_res.reason,
-            timestamp_qpc,
-            duration_ms,
+            trig_ts,
+            trig_dur,
             pid,
             tid,
             cpu_index,
             0,
             pacing_res.baseline_avg_ms,
             pacing_res.baseline_fps,
-            pacing_res.spike_ratio
+            pacing_res.spike_ratio,
+            pacing_res.judder_alternations,
+            pacing_res.judder_max_swing_q100
         );
     }
 

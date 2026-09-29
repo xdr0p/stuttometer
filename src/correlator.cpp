@@ -153,6 +153,20 @@ MetricSeverity classify_severity(const TriggerInfo& trigger, double present_thre
         return MetricSeverity::DANGER;
     }
 
+    if (trigger.reason == TriggerReason::CADENCE_JUDDER || trigger.source == TriggerSource::FRAME_PACING_JUDDER) {
+        const uint16_t clamped_swing = std::min<uint16_t>(trigger.judder_max_swing_q100, 1000);
+        const bool high_alt   = trigger.judder_alternations >= 30;
+        const bool long_dur   = trigger.duration_ms >= 500.0;
+        const bool high_swing = (clamped_swing >= 60) && (trigger.judder_alternations >= 5);
+        if (high_alt || long_dur || high_swing) return MetricSeverity::DANGER;
+
+        const bool mid_alt   = trigger.judder_alternations >= 10;
+        const bool mid_dur   = trigger.duration_ms >= 150.0;
+        const bool mid_swing = (clamped_swing >= 40) && (trigger.judder_alternations >= 3);
+        if (mid_alt || mid_dur || mid_swing) return MetricSeverity::WARNING;
+        return MetricSeverity::NORMAL;
+    }
+
     // Baseline availability predicate: baseline is available iff both spike_ratio and baseline_avg_ms are positive.
     const bool has_baseline = (trigger.spike_ratio > 0.0 && trigger.baseline_avg_ms > 0.0);
 
@@ -161,23 +175,14 @@ MetricSeverity classify_severity(const TriggerInfo& trigger, double present_thre
         if (trigger.spike_ratio >= 3.0) return MetricSeverity::DANGER;
 
         // 2. WARNING checks (evaluated second):
-        // Note: Cadence judder is WARNING by default, but promoted to DANGER if spike_ratio >= 3.0 above.
-        if (trigger.spike_ratio >= 2.0 ||
-            trigger.source == TriggerSource::FRAME_PACING_JUDDER ||
-            trigger.reason == TriggerReason::CADENCE_JUDDER) {
+        if (trigger.spike_ratio >= 2.0) {
             return MetricSeverity::WARNING;
         }
         return MetricSeverity::NORMAL;
     }
 
     // Fallback: only reached when baseline is pending or unavailable
-    MetricSeverity sev = compute_duration_severity_fallback(trigger.duration_ms, present_threshold_ms);
-    if (sev == MetricSeverity::NORMAL &&
-        (trigger.source == TriggerSource::FRAME_PACING_JUDDER ||
-         trigger.reason == TriggerReason::CADENCE_JUDDER)) {
-        return MetricSeverity::WARNING;
-    }
-    return sev;
+    return compute_duration_severity_fallback(trigger.duration_ms, present_threshold_ms);
 }
 
 AttributionResult compute_attribution(const DiagnosticReport& report, uint32_t cached_dwm_pid) {
