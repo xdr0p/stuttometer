@@ -70,7 +70,7 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
     emit_event(rec);
 
     if (!is_dedup) {
-        trigger_engine_.on_dwm_glitch(ctx.pid, ctx.tid, dur_ms, ctx.timestamp, ctx.cpu);
+        trigger_engine_.on_dwm_glitch(ctx.pid, ctx.tid, missed_vblanks, dur_ms, ctx.timestamp, ctx.cpu);
     }
 }
 

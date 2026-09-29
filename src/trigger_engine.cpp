@@ -325,6 +325,20 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
         return false;
     }
 
+    const double vblank_ms = vblank_interval_ms();
+    if (vblank_ms > 0.0) {
+        const uint32_t missed = static_cast<uint32_t>(std::round(duration_ms / vblank_ms));
+        if (missed < config_.kernel_frame_stall_min_missed_vblanks) {
+            record_filtered_event(
+                TriggerSource::KERNEL_FRAME_STALL,
+                TriggerReason::NONE,
+                timestamp_qpc, duration_ms, /*baseline_avg_ms=*/0.0, /*spike_ratio=*/1.0,
+                pid, tid, cpu_index,
+                FilterKind::VBLANK_FLOOR);
+            return false;
+        }
+    }
+
     SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
     if (sink && !dxgi_observed_for_target_.load(std::memory_order_acquire)) {
         const uint64_t attach_qpc = target_attach_qpc_.load(std::memory_order_acquire);
@@ -380,7 +394,17 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
     return false;
 }
 
-bool TriggerEngine::on_dwm_glitch(uint32_t /*pid*/, uint32_t /*tid*/, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
+bool TriggerEngine::on_dwm_glitch(uint32_t pid, uint32_t tid, uint32_t missed_vblanks, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
+    if (missed_vblanks < config_.dwm_min_missed_vblanks) {
+        record_filtered_event(
+            TriggerSource::DWM_GLITCH,
+            TriggerReason::DWM_COMPOSITOR_GLITCH,
+            timestamp_qpc, duration_ms, /*baseline_avg_ms=*/0.0, /*spike_ratio=*/1.0,
+            pid, tid, cpu_index,
+            FilterKind::VBLANK_FLOOR);
+        return false;
+    }
+
     const double vb = vblank_interval_ms();
     const double vblank_ms = (vb > 0.0) ? vb : DEFAULT_60HZ_VBLANK_MS;
     const double jitter_guard = std::max(0.5, vblank_ms * 0.05);

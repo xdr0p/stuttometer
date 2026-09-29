@@ -272,10 +272,10 @@ static void test_dwm_glitch_trigger_attribution() {
     const uint64_t base_qpc = stuttometer::get_current_qpc();
 
     // 1. Duration below effective threshold (16.67 - 0.833 = 15.837ms) -> 14.0ms rejected
-    STUTTO_ASSERT(!engine.on_dwm_glitch(888, 999, 14.0, base_qpc, 0));
+    STUTTO_ASSERT(!engine.on_dwm_glitch(888, 999, 1, 14.0, base_qpc, 0));
 
     // 2. 1-vblank glitch at 60Hz (16.67ms) -> accepted and attributed to target PID 4321, TID 0
-    STUTTO_ASSERT(engine.on_dwm_glitch(888, 999, 16.67, base_qpc, 1));
+    STUTTO_ASSERT(engine.on_dwm_glitch(888, 999, 1, 16.67, base_qpc, 1));
 
     stuttometer::TriggerInfo info;
     uint64_t from_qpc = 0, to_qpc = 0;
@@ -296,7 +296,7 @@ static void test_dwm_glitch_trigger_attribution() {
     stuttometer::TriggerEngine engine120(cfg120, qpc_freq);
     const uint64_t base120_qpc = stuttometer::get_current_qpc();
     // 1-vblank glitch at 120Hz (8.33ms) -> must NOT be dropped!
-    STUTTO_ASSERT(engine120.on_dwm_glitch(888, 999, 8.33, base120_qpc, 0));
+    STUTTO_ASSERT(engine120.on_dwm_glitch(888, 999, 1, 8.33, base120_qpc, 0));
 
     std::cout << "  -> DWM_GLITCH target attribution and 1-vblank thresholding (60Hz & 120Hz) PASSED.\n";
 }
@@ -497,10 +497,10 @@ static void test_dwm_pipeline_high_refresh() {
     const uint64_t base_qpc = stuttometer::get_current_qpc();
 
     // Sub-threshold glitch (< 3.667 ms) rejected
-    STUTTO_ASSERT(!engine.on_dwm_glitch(100, 200, 3.0, base_qpc, 0));
+    STUTTO_ASSERT(!engine.on_dwm_glitch(100, 200, 1, 3.0, base_qpc, 0));
 
     // Single 240Hz vblank glitch (4.167 ms) accepted even though present_threshold_ms = 16.67 ms!
-    STUTTO_ASSERT(engine.on_dwm_glitch(100, 200, VBLANK_240HZ_MS, base_qpc, 0));
+    STUTTO_ASSERT(engine.on_dwm_glitch(100, 200, 1, VBLANK_240HZ_MS, base_qpc, 0));
 
     stuttometer::TriggerInfo trig;
     uint64_t from_qpc = 0, to_qpc = 0;
@@ -1208,6 +1208,60 @@ static void test_hybrid_static_floor_adaptive_high_refresh() {
 }
 
 
+static void test_missed_vblank_floors() {
+    std::cout << "[TEST] Validating DWM and Kernel missed-vblank floors and VBLANK_FLOOR recording...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::TriggerConfig cfg;
+    cfg.present_threshold_ms = 16.67;
+    cfg.window_post_ms = 30.0;
+    cfg.vblank_interval_ms = 16.666;
+    cfg.target_pid = 5555;
+    cfg.dwm_min_missed_vblanks = 2;
+    cfg.kernel_frame_stall_min_missed_vblanks = 2;
+
+    stuttometer::TriggerEngine engine(cfg, qpc_freq);
+    engine.update_target_pid(5555);
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+
+    // 1. DWM glitch with missed_vblanks = 1 (< 2 minimum floor)
+    // Must be rejected by floor and recorded with FilterKind::VBLANK_FLOOR
+    bool dwm1 = engine.on_dwm_glitch(888, 999, 1, 16.67, base_qpc, 0);
+    STUTTO_ASSERT(!dwm1);
+    STUTTO_ASSERT(engine.filtered_reports() == 1);
+
+    stuttometer::FilteredEvent fe1{};
+    STUTTO_ASSERT(engine.pop_filtered_event(fe1));
+    STUTTO_ASSERT(fe1.filter_kind == static_cast<uint8_t>(stuttometer::FilterKind::VBLANK_FLOOR));
+    STUTTO_ASSERT(fe1.source == static_cast<uint16_t>(stuttometer::TriggerSource::DWM_GLITCH));
+    STUTTO_ASSERT(fe1.reason == static_cast<uint16_t>(stuttometer::TriggerReason::DWM_COMPOSITOR_GLITCH));
+
+    // 2. DWM glitch with missed_vblanks = 2 (>= 2 minimum floor)
+    // Must be accepted
+    bool dwm2 = engine.on_dwm_glitch(888, 999, 2, 33.34, base_qpc + 100000, 0);
+    STUTTO_ASSERT(dwm2);
+
+    // Drain engine to ARMED
+    stuttometer::TriggerInfo info{};
+    uint64_t from_qpc = 0, to_qpc = 0;
+    const uint64_t poll_qpc = stuttometer::get_current_qpc() + stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
+    STUTTO_ASSERT(engine.poll_state(poll_qpc, info, from_qpc, to_qpc));
+    engine.on_report_completed(poll_qpc);
+
+    // 3. Kernel frame stall with duration = 16.67 ms (missed = round(16.67 / 16.666) = 1 < 2)
+    // Must be rejected by floor and recorded with FilterKind::VBLANK_FLOOR
+    bool k1 = engine.on_kernel_frame_stall(5555, 6666, 16.67, base_qpc + 10000000ULL, 0x1234, 0);
+    STUTTO_ASSERT(!k1);
+    STUTTO_ASSERT(engine.filtered_reports() == 2);
+
+    stuttometer::FilteredEvent fe2{};
+    STUTTO_ASSERT(engine.pop_filtered_event(fe2));
+    STUTTO_ASSERT(fe2.filter_kind == static_cast<uint8_t>(stuttometer::FilterKind::VBLANK_FLOOR));
+    STUTTO_ASSERT(fe2.source == static_cast<uint16_t>(stuttometer::TriggerSource::KERNEL_FRAME_STALL));
+
+    std::cout << "  -> DWM and Kernel missed-vblank floors and FilterKind::VBLANK_FLOOR PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Kernel Present & GPU Tracking Tests ===\n";
     try {
@@ -1229,6 +1283,7 @@ int main() {
         test_dxgi_duplicate_not_in_frame_timeline();
         test_session_benchmark_isolated_from_duplicates();
         test_hybrid_static_floor_adaptive_high_refresh();
+        test_missed_vblank_floors();
         std::cout << ">>> All Kernel Present & GPU Tracking tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

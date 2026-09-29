@@ -1448,7 +1448,7 @@ static void test_monitor_all_glitch_attribution() {
         stuttometer::TriggerConfig trg_cfg;
         stuttometer::TriggerEngine engine(trg_cfg, qpc_freq);
         engine.update_target_pid(0); // Monitor all mode
-        bool dwm_fired = engine.on_dwm_glitch(999, 1000, 33.3, 1000000, 0);
+        bool dwm_fired = engine.on_dwm_glitch(999, 1000, 2, 33.3, 1000000, 0);
         STUTTO_ASSERT(dwm_fired);
         stuttometer::TriggerInfo trg_out{};
         uint64_t from_q = 0, to_q = 0;

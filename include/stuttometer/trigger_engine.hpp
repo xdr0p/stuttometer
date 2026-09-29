@@ -116,7 +116,7 @@ public:
     bool on_kernel_frame_stall(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc, uint64_t stream_key = 0, uint8_t cpu_index = 0) noexcept;
 
     // Evaluates DWM composition glitch (lock-free, zero-allocation, noexcept)
-    bool on_dwm_glitch(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index = 0) noexcept;
+    bool on_dwm_glitch(uint32_t pid, uint32_t tid, uint32_t missed_vblanks, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index = 0) noexcept;
 
     // Evaluates AudioGlitch event (lock-free, zero-allocation, noexcept)
     bool on_audio_glitch(uint32_t pid, uint32_t tid, uint32_t glitch_count, uint64_t timestamp_qpc, uint8_t cpu_index = 0) noexcept;
