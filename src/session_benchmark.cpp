@@ -20,6 +20,11 @@ std::string BenchmarkSummary::to_markdown() const {
         << std::setfill('0') << std::setw(2) << secs << "\n";
     oss << "- **Total Frames:** " << total_frames << "\n";
     oss << "- **Stutters Detected:** " << stutters_detected << "\n";
+    if (minor_stutters > 0) {
+        oss << "- **Minor Stutters (Filtered):** " << minor_stutters << " ("
+            << std::fixed << std::setprecision(1) << minor_stall_ms << " ms)\n";
+    }
+    oss << "- **Total Triggers:** " << total_triggers << "\n";
     oss << "- **Audio Glitches:** " << audio_glitches_detected << "\n";
     oss << "- **Net Stall Time:** " << std::fixed << std::setprecision(1) << net_stall_ms << " ms\n\n";
 
@@ -88,13 +93,16 @@ std::string BenchmarkSummary::to_markdown() const {
 
 std::string BenchmarkSummary::to_json() const {
     nlohmann::json j;
-    // Schema 1.2: audio_glitches_detected added as backward-compatible additive field
-    j["schema_version"] = "1.2";
+    // Schema 1.3: minor_stutters, minor_stall_ms, and total_triggers added
+    j["schema_version"] = "1.3";
     j["target_process"] = target_process;
     j["target_pid"] = target_pid;
     j["duration_ms"] = duration_ms;
     j["total_frames"] = total_frames;
     j["stutters_detected"] = stutters_detected;
+    j["minor_stutters"] = minor_stutters;
+    j["minor_stall_ms"] = minor_stall_ms;
+    j["total_triggers"] = total_triggers;
     j["audio_glitches_detected"] = audio_glitches_detected;
     j["dropped_pause_frames"] = dropped_pause_frames;
     j["redacted"] = redacted;
@@ -221,9 +229,16 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
         return;
     }
 
-    stutters_detected_++;
+    const MetricSeverity sev = classify_severity(report.trigger, report.present_threshold_ms);
     const double stall_ms = report.trigger.duration_ms;
-    net_stall_ms_ += stall_ms;
+
+    if (sev < MetricSeverity::WARNING) {
+        minor_stutters_.fetch_add(1, std::memory_order_relaxed);
+        minor_stall_us_.fetch_add(static_cast<uint64_t>(stall_ms * 1000.0), std::memory_order_relaxed);
+    } else {
+        stutters_detected_++;
+        net_stall_ms_ += stall_ms;
+    }
 
     std::string hyp = "unattributed";
     double conf = 0.0;
@@ -259,6 +274,23 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
     t_rec.tag = report.attribution;
     t_rec.count++;
     t_rec.total_stall_ms += stall_ms;
+}
+
+void SessionBenchmark::ingest_filtered_event(double duration_ms) noexcept {
+    ingest_filtered_event(0, duration_ms);
+}
+
+void SessionBenchmark::ingest_filtered_event(uint32_t pid, double duration_ms) noexcept {
+    if (duration_ms <= 0.0) {
+        return;
+    }
+    const uint64_t cur_state = target_state_.load(std::memory_order_acquire);
+    const uint32_t target_pid = benchmark_detail::unpack_pid(cur_state);
+    if (target_pid != 0 && pid != 0 && pid != target_pid) {
+        return;
+    }
+    minor_stutters_.fetch_add(1, std::memory_order_relaxed);
+    minor_stall_us_.fetch_add(static_cast<uint64_t>(duration_ms * 1000.0), std::memory_order_relaxed);
 }
 
 BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
@@ -460,6 +492,9 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
         std::lock_guard<std::mutex> attr_lock(attribution_mutex_);
         summary.stutters_detected = stutters_detected_;
         summary.audio_glitches_detected = audio_glitches_detected_;
+        summary.minor_stutters = minor_stutters_.load(std::memory_order_relaxed);
+        summary.minor_stall_ms = static_cast<double>(minor_stall_us_.load(std::memory_order_relaxed)) / 1000.0;
+        summary.total_triggers = summary.stutters_detected + summary.minor_stutters;
         summary.net_stall_ms = net_stall_ms_;
         summary.worst_stutter_ms = worst_stutter_ms_;
         summary.worst_stutter_hypothesis = worst_stutter_hypothesis_;
@@ -558,6 +593,8 @@ void SessionBenchmark::clear_attribution_locked() {
     tag_stats_.clear();
     stutters_detected_ = 0;
     audio_glitches_detected_ = 0;
+    minor_stutters_.store(0, std::memory_order_relaxed);
+    minor_stall_us_.store(0, std::memory_order_relaxed);
     net_stall_ms_ = 0.0;
     worst_stutter_ms_ = 0.0;
     worst_stutter_hypothesis_.clear();

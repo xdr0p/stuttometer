@@ -79,6 +79,9 @@ struct BenchmarkSummary {
     uint64_t total_frames{0};
     uint64_t stutters_detected{0};
     uint64_t audio_glitches_detected{0};
+    uint64_t minor_stutters{0};
+    double minor_stall_ms{0.0};
+    uint64_t total_triggers{0};
     uint64_t dropped_pause_frames{0};
     FrametimePercentiles frametimes;
     std::vector<HypothesisAttributionStat> culprits; // Top 5 + "Other"
@@ -131,6 +134,8 @@ public:
 
     void ingest_frame(uint32_t pid, double duration_ms, uint64_t timestamp_qpc) noexcept;
     void ingest_report(const DiagnosticReport& report);
+    void ingest_filtered_event(double duration_ms) noexcept;
+    void ingest_filtered_event(uint32_t pid, double duration_ms) noexcept;
 
     void set_pacing_context(
         PacingProfile profile,
@@ -201,6 +206,8 @@ private:
     std::unordered_map<AttributionTag, TagAttributionStat> tag_stats_;
     uint64_t stutters_detected_{0};
     uint64_t audio_glitches_detected_{0};
+    std::atomic<uint64_t> minor_stutters_{0};
+    std::atomic<uint64_t> minor_stall_us_{0};
     double net_stall_ms_{0.0};
     double worst_stutter_ms_{0.0};
     std::string worst_stutter_hypothesis_;

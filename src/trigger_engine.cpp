@@ -51,6 +51,11 @@ void TriggerEngine::record_filtered_event(
     filtered_stall_us_.fetch_add(
         static_cast<uint64_t>(duration_ms * 1000.0), std::memory_order_relaxed);
 
+    SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
+    if (sink) {
+        sink->ingest_filtered_event(pid, duration_ms);
+    }
+
     TriggerInfo tmp{};
     tmp.source = src;
     tmp.reason = reason;

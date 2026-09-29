@@ -128,8 +128,9 @@ enum class MetricSeverity : uint8_t { NORMAL = 0, WARNING = 1, DANGER = 2 };
     double duration_ms, double ref_ms = DEFAULT_60HZ_VBLANK_MS
 ) noexcept {
     const double ref = (ref_ms > 0.0) ? ref_ms : DEFAULT_60HZ_VBLANK_MS;
-    if (duration_ms >= (3.0 * ref)) return MetricSeverity::DANGER;
-    if (duration_ms >= (1.5 * ref)) return MetricSeverity::WARNING;
+    // Allow 0.05ms tolerance for rounding of 60Hz interval (16.67 vs 16.6667ms)
+    if (duration_ms + 0.05 >= (3.0 * ref)) return MetricSeverity::DANGER;
+    if (duration_ms + 0.05 >= (1.5 * ref)) return MetricSeverity::WARNING;
     return MetricSeverity::NORMAL;
 }
 

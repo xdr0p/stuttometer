@@ -659,10 +659,15 @@ static void test_audio_glitch_separation() {
     // Verify JSON serialization
     std::string json_str = summary.to_json();
     auto root = nlohmann::json::parse(json_str);
-    STUTTO_ASSERT(root["schema_version"] == "1.2");
+    STUTTO_ASSERT(root["schema_version"] == "1.3");
     STUTTO_ASSERT(root.contains("audio_glitches_detected"));
     STUTTO_ASSERT(root["audio_glitches_detected"] == 1);
     STUTTO_ASSERT(root["stutters_detected"] == 1);
+    STUTTO_ASSERT(root.contains("minor_stutters"));
+    STUTTO_ASSERT(root["minor_stutters"] == 0);
+    STUTTO_ASSERT(root.contains("minor_stall_ms"));
+    STUTTO_ASSERT(root.contains("total_triggers"));
+    STUTTO_ASSERT(root["total_triggers"] == 1);
 
     // Verify Markdown serialization
     std::string md_str = summary.to_markdown();
@@ -763,6 +768,107 @@ static void test_top_5_boundary_six_hypotheses() {
     std::cout << "[TEST 21] PASSED\n";
 }
 
+static void test_schema_1_3_dual_counters_and_filtering() {
+    std::cout << "[TEST 22] Schema 1.3 Dual Counters & Filtering Test...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(1234);
+
+    // Initial state: 0 stutters, 0 minor, 0 total triggers
+    auto init_summary = benchmark.get_summary();
+    STUTTO_ASSERT(init_summary.stutters_detected == 0);
+    STUTTO_ASSERT(init_summary.minor_stutters == 0);
+    STUTTO_ASSERT(init_summary.minor_stall_ms == 0.0);
+    STUTTO_ASSERT(init_summary.total_triggers == 0);
+
+    // 1. Ingest a WARNING report (duration 35.0ms, present threshold 16.67ms -> 35.0 >= 1.5 * 16.67 = 25.0ms)
+    stuttometer::DiagnosticReport rep_warn;
+    rep_warn.target_process = "Game.exe";
+    rep_warn.present_threshold_ms = 16.67;
+    rep_warn.trigger.target_pid = 1234;
+    rep_warn.trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    rep_warn.trigger.reason = stuttometer::TriggerReason::STATIC_THRESHOLD;
+    rep_warn.trigger.duration_ms = 35.0;
+    rep_warn.attribution = stuttometer::AttributionTag::GAME_ENGINE;
+    stuttometer::Diagnosis d_warn;
+    d_warn.hypothesis = "render_thread_block";
+    d_warn.confidence = 0.95;
+    rep_warn.diagnoses.push_back(d_warn);
+    benchmark.ingest_report(rep_warn);
+
+    auto s1 = benchmark.get_summary();
+    STUTTO_ASSERT(s1.stutters_detected == 1);
+    STUTTO_ASSERT(s1.minor_stutters == 0);
+    STUTTO_ASSERT(s1.total_triggers == 1);
+    STUTTO_ASSERT(std::abs(s1.net_stall_ms - 35.0) < 0.01);
+    STUTTO_ASSERT(s1.minor_stall_ms == 0.0);
+
+    // 2. Ingest a NORMAL report (duration 18.0ms < 25.0ms -> MetricSeverity::NORMAL)
+    stuttometer::DiagnosticReport rep_norm;
+    rep_norm.target_process = "Game.exe";
+    rep_norm.present_threshold_ms = 16.67;
+    rep_norm.trigger.target_pid = 1234;
+    rep_norm.trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    rep_norm.trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    rep_norm.trigger.duration_ms = 18.0;
+    rep_norm.attribution = stuttometer::AttributionTag::GAME_ENGINE;
+    benchmark.ingest_report(rep_norm);
+
+    auto s2 = benchmark.get_summary();
+    STUTTO_ASSERT(s2.stutters_detected == 1);
+    STUTTO_ASSERT(s2.minor_stutters == 1);
+    STUTTO_ASSERT(s2.total_triggers == 2);
+    STUTTO_ASSERT(std::abs(s2.net_stall_ms - 35.0) < 0.01);
+    STUTTO_ASSERT(std::abs(s2.minor_stall_ms - 18.0) < 0.01);
+
+    // 3. Ingest raw filtered event via ingest_filtered_event (12.5ms)
+    benchmark.ingest_filtered_event(12.5);
+
+    auto s3 = benchmark.get_summary();
+    STUTTO_ASSERT(s3.stutters_detected == 1);
+    STUTTO_ASSERT(s3.minor_stutters == 2);
+    STUTTO_ASSERT(s3.total_triggers == 3);
+    STUTTO_ASSERT(std::abs(s3.minor_stall_ms - 30.5) < 0.01);
+
+    // 4. Test PID-filtered overload: different PID (9999) is dropped, matching PID (1234) is accepted
+    benchmark.ingest_filtered_event(9999, 10.0);
+    auto s4_drop = benchmark.get_summary();
+    STUTTO_ASSERT(s4_drop.minor_stutters == 2);
+    STUTTO_ASSERT(std::abs(s4_drop.minor_stall_ms - 30.5) < 0.01);
+
+    benchmark.ingest_filtered_event(1234, 10.0);
+    auto s4 = benchmark.get_summary();
+    STUTTO_ASSERT(s4.stutters_detected == 1);
+    STUTTO_ASSERT(s4.minor_stutters == 3);
+    STUTTO_ASSERT(s4.total_triggers == 4);
+    STUTTO_ASSERT(std::abs(s4.minor_stall_ms - 40.5) < 0.01);
+
+    // 5. JSON serialization validation
+    std::string json_str = s4.to_json();
+    auto root = nlohmann::json::parse(json_str);
+    STUTTO_ASSERT(root["schema_version"] == "1.3");
+    STUTTO_ASSERT(root["stutters_detected"] == 1);
+    STUTTO_ASSERT(root["minor_stutters"] == 3);
+    STUTTO_ASSERT(std::abs(root["minor_stall_ms"].get<double>() - 40.5) < 0.01);
+    STUTTO_ASSERT(root["total_triggers"] == 4);
+
+    // 6. Markdown serialization validation
+    std::string md_str = s4.to_markdown();
+    STUTTO_ASSERT(md_str.find("- **Stutters Detected:** 1") != std::string::npos);
+    STUTTO_ASSERT(md_str.find("- **Minor Stutters (Filtered):** 3 (40.5 ms)") != std::string::npos);
+    STUTTO_ASSERT(md_str.find("- **Total Triggers:** 4") != std::string::npos);
+
+    // 7. Reset validation
+    benchmark.reset();
+    auto s_reset = benchmark.get_summary();
+    STUTTO_ASSERT(s_reset.stutters_detected == 0);
+    STUTTO_ASSERT(s_reset.minor_stutters == 0);
+    STUTTO_ASSERT(s_reset.minor_stall_ms == 0.0);
+    STUTTO_ASSERT(s_reset.total_triggers == 0);
+
+    std::cout << "[TEST 22] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -786,8 +892,9 @@ int main() {
         test_pause_ceiling_2s_boundary();
         test_standalone_fallback_denominator_invariant();
         test_top_5_boundary_six_hypotheses();
+        test_schema_1_3_dual_counters_and_filtering();
 
-        std::cout << "\nAll 21 Session Benchmark tests PASSED successfully!\n";
+        std::cout << "\nAll 22 Session Benchmark tests PASSED successfully!\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\nTest suite failed with exception: " << ex.what() << "\n";
