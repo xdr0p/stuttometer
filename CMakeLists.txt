@@ -317,6 +317,13 @@ target_link_libraries(test_report_filtering PRIVATE stuttometer_core)
 add_test(NAME test_report_filtering COMMAND test_report_filtering)
 set_tests_properties(test_report_filtering PROPERTIES TIMEOUT 30)
 
+add_executable(test_judder_episodes
+  tests/test_judder_episodes.cpp
+)
+target_link_libraries(test_judder_episodes PRIVATE stuttometer_core)
+add_test(NAME test_judder_episodes COMMAND test_judder_episodes)
+set_tests_properties(test_judder_episodes PROPERTIES TIMEOUT 30)
+
 
 
 
