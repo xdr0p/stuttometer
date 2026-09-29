@@ -254,6 +254,22 @@ bool TriggerEngine::evaluate_frame_pacing_common(
             config_.judder_min_alternations
         );
 
+        if (!config_.enable_relative_spike && out_pacing_res.reason == TriggerReason::RELATIVE_SPIKE) {
+            if (config_.frame_trigger_mode != FrameTriggerMode::DYNAMIC_ONLY &&
+                duration_ms >= effective_static_threshold) {
+                out_pacing_res.is_stutter = true;
+                out_pacing_res.reason = TriggerReason::STATIC_THRESHOLD;
+                out_pacing_res.baseline_avg_ms = calculate_mean_ms(stats);
+                out_pacing_res.baseline_fps = (out_pacing_res.baseline_avg_ms > 0.0)
+                    ? 1000.0 / out_pacing_res.baseline_avg_ms : 0.0;
+                out_pacing_res.spike_ratio = (out_pacing_res.baseline_avg_ms > 0.0)
+                    ? duration_ms / out_pacing_res.baseline_avg_ms : 1.0;
+            } else {
+                out_pacing_res.is_stutter = false;
+                out_pacing_res.reason = TriggerReason::NONE;
+            }
+        }
+
         SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
         if (sink && active_target_pid() != 0 && pid == active_target_pid() && stats.sample_count >= 8) {
             const double pushed_baseline = (out_pacing_res.effective_mean_ms > 0.0)
@@ -321,6 +337,9 @@ bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_
 }
 
 bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double duration_ms, uint64_t timestamp_qpc, uint64_t stream_key, uint8_t cpu_index) noexcept {
+    if (!config_.enable_kernel_frame_stall) {
+        return false;
+    }
     if (!should_trigger_on_process(pid)) {
         return false;
     }
@@ -395,6 +414,9 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
 }
 
 bool TriggerEngine::on_dwm_glitch(uint32_t pid, uint32_t tid, uint32_t missed_vblanks, double duration_ms, uint64_t timestamp_qpc, uint8_t cpu_index) noexcept {
+    if (!config_.enable_dwm_glitch) {
+        return false;
+    }
     if (missed_vblanks < config_.dwm_min_missed_vblanks) {
         record_filtered_event(
             TriggerSource::DWM_GLITCH,

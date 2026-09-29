@@ -235,6 +235,43 @@ void test_trigger_engine_preclaim_gate() {
     STUTTO_ASSERT(fe.duration_ms == 20.0);
 }
 
+static void test_diagnostic_toggles() {
+    std::cout << "[TEST] Running test_diagnostic_toggles...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    TriggerConfig config{};
+    config.present_threshold_ms = 50.0;
+    config.min_report_severity = ReportSeverity::ALL;
+    config.enable_relative_spike = false;
+    config.enable_kernel_frame_stall = false;
+    config.enable_dwm_glitch = false;
+
+    TriggerEngine engine(config, qpc_freq);
+    engine.update_target_pid(1234);
+
+    STUTTO_ASSERT(!engine.enable_relative_spike());
+    STUTTO_ASSERT(!engine.enable_kernel_frame_stall());
+    STUTTO_ASSERT(!engine.enable_dwm_glitch());
+
+    // 1. Ingest DXGI frames: 10 warmup at 16.6ms, then 35ms spike (ratio > 2.0x, but < 50ms static threshold)
+    uint64_t ts = 1000000ULL;
+    for (int i = 0; i < 10; ++i) {
+        engine.on_dxgi_present(1234, 5678, 16.6, ts);
+        ts += 166000ULL;
+    }
+    bool dxgi_trig = engine.on_dxgi_present(1234, 5678, 35.0, ts);
+    STUTTO_ASSERT(!dxgi_trig); // Suppressed by enable_relative_spike = false
+
+    // 2. Ingest Kernel frame stall: must be suppressed immediately by enable_kernel_frame_stall = false
+    bool kern_trig = engine.on_kernel_frame_stall(1234, 5678, 60.0, ts + 100000ULL, 0, 0);
+    STUTTO_ASSERT(!kern_trig);
+
+    // 3. Ingest DWM glitch: must be suppressed immediately by enable_dwm_glitch = false
+    bool dwm_trig = engine.on_dwm_glitch(888, 999, 3, 50.0, ts + 200000ULL, 0);
+    STUTTO_ASSERT(!dwm_trig);
+
+    std::cout << "  -> Diagnostic toggles verification PASSED.\n";
+}
+
 int main() {
     try {
         test_filtered_event_layout();
@@ -243,6 +280,7 @@ int main() {
         test_lapped_cell_drain();
         test_mpsc_concurrency_stress();
         test_trigger_engine_preclaim_gate();
+        test_diagnostic_toggles();
         std::cout << "[PASS] All test_report_filtering tests passed successfully!\n";
         return 0;
     } catch (const std::exception& ex) {

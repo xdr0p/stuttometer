@@ -178,6 +178,9 @@ public:
             ? config_.vblank_interval_ms 
             : config_.present_threshold_ms;
     }
+    bool enable_relative_spike() const noexcept { return config_.enable_relative_spike; }
+    bool enable_kernel_frame_stall() const noexcept { return config_.enable_kernel_frame_stall; }
+    bool enable_dwm_glitch() const noexcept { return config_.enable_dwm_glitch; }
 
     void evict_stale_pacing_entries(uint64_t current_qpc, uint64_t max_age_qpc) noexcept {
         pacing_table_.evict_stale(current_qpc, max_age_qpc, [](const RollingFrameStats& s) {
