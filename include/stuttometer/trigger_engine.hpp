@@ -7,6 +7,7 @@
 #include "frame_pacing_tracker.hpp"
 #include "constants.hpp"
 #include "fixed_table.hpp"
+#include "filtered_event_ring.hpp"
 
 namespace stuttometer {
 
@@ -53,26 +54,26 @@ enum class TriggerState : uint8_t {
 
 // POD trivially-copyable trigger record with explicit 8-byte alignment ordering
 struct TriggerInfo {
-    // 8-byte aligned
-    uint64_t trigger_timestamp_qpc{0};
-    double duration_ms{0.0};
-    double baseline_avg_ms{0.0};
-    double baseline_fps{0.0};
-    double spike_ratio{0.0};
-
-    // 4-byte aligned
-    uint32_t glitch_count{0};
-    uint32_t target_pid{0};
-    uint32_t target_tid{0};
-
-    // 1-byte aligned
-    TriggerSource source{TriggerSource::NONE};
-    TriggerReason reason{TriggerReason::NONE};
-    uint8_t cpu_index{0};
-    uint8_t _pad[1]{0};
+    uint64_t trigger_timestamp_qpc{0};  // offset  0, size 8
+    double   duration_ms{0.0};          // offset  8, size 8
+    double   baseline_avg_ms{0.0};      // offset 16, size 8
+    double   baseline_fps{0.0};         // offset 24, size 8
+    double   spike_ratio{0.0};          // offset 32, size 8
+    uint32_t glitch_count{0};           // offset 40, size 4
+    uint32_t target_pid{0};             // offset 44, size 4
+    uint32_t target_tid{0};             // offset 48, size 4
+    TriggerSource source{TriggerSource::NONE};   // offset 52, size 1
+    TriggerReason reason{TriggerReason::NONE};   // offset 53, size 1
+    uint8_t  cpu_index{0};              // offset 54, size 1
+    uint8_t  _pad1{0};                  // offset 55, size 1 (alignment padding, must be zero)
+    uint16_t judder_alternations{0};    // offset 56, size 2
+    uint16_t judder_max_swing_q100{0};  // offset 58, size 2 (ratio * 100)
+    uint32_t _pad2{0};                  // offset 60, size 4 (tail padding)
 };
 
-static_assert(sizeof(TriggerInfo) == 56, "TriggerInfo must be exactly 56 bytes");
+static_assert(sizeof(TriggerInfo) == 64, "TriggerInfo must be exactly 64 bytes");
+static_assert(offsetof(TriggerInfo, judder_alternations) == 56);
+static_assert(offsetof(TriggerInfo, judder_max_swing_q100) == 58);
 static_assert(std::is_trivially_copyable_v<TriggerInfo>, "TriggerInfo must be trivially copyable");
 
 struct TriggerConfig {
@@ -92,6 +93,15 @@ struct TriggerConfig {
     double min_spike_delta_ms{4.0};
     bool enable_judder_detection{true};
     double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
+
+    // Preset & Filtering Additions
+    ReportSeverity min_report_severity{ReportSeverity::ALL};  // flipped to WARNING by presets
+    uint8_t  judder_min_alternations{5};
+    uint8_t  dwm_min_missed_vblanks{1};
+    uint8_t  kernel_frame_stall_min_missed_vblanks{1};
+    bool     enable_relative_spike{true};
+    bool     enable_kernel_frame_stall{true};
+    bool     enable_dwm_glitch{true};
 };
 
 class TriggerEngine {
@@ -148,6 +158,21 @@ public:
 
     TriggerState current_state() const noexcept { return state_.load(std::memory_order_relaxed); }
     uint64_t suppressed_trigger_count() const noexcept { return suppressed_triggers_.load(std::memory_order_relaxed); }
+    void set_min_report_severity(ReportSeverity s) noexcept {
+        min_report_severity_.store(s, std::memory_order_release);
+    }
+    uint64_t filtered_reports() const noexcept {
+        return filtered_reports_.load(std::memory_order_relaxed);
+    }
+    uint64_t filtered_stall_ms() const noexcept {
+        return filtered_stall_us_.load(std::memory_order_relaxed) / 1000;
+    }
+    uint64_t filtered_events_dropped() const noexcept {
+        return filtered_events_.dropped_filtered();
+    }
+    bool pop_filtered_event(FilteredEvent& out) noexcept {
+        return filtered_events_.pop(out);
+    }
     [[nodiscard]] double vblank_interval_ms() const noexcept {
         return (config_.vblank_interval_ms > 0.0) 
             ? config_.vblank_interval_ms 
@@ -216,7 +241,22 @@ private:
         uint32_t glitch_count = 0,
         double baseline_avg_ms = 0.0,
         double baseline_fps = 0.0,
-        double spike_ratio = 0.0
+        double spike_ratio = 0.0,
+        uint16_t judder_alternations = 0,
+        uint16_t judder_max_swing_q100 = 0
+    ) noexcept;
+
+    void record_filtered_event(
+        TriggerSource src,
+        TriggerReason reason,
+        uint64_t timestamp_qpc,
+        double duration_ms,
+        double baseline_avg_ms,
+        double spike_ratio,
+        uint32_t pid,
+        uint32_t tid,
+        uint8_t cpu_index,
+        FilterKind kind
     ) noexcept;
 
     void on_target_changed(uint32_t new_pid) noexcept;
@@ -266,6 +306,11 @@ private:
 
     // Stream-level lock-free rolling statistics table
     FixedInFlightTable<RollingFrameStats, 256> pacing_table_;
+
+    std::atomic<ReportSeverity> min_report_severity_{ReportSeverity::ALL};
+    std::atomic<uint64_t> filtered_reports_{0};
+    std::atomic<uint64_t> filtered_stall_us_{0};
+    FilteredEventRing filtered_events_;
 };
 
 } // namespace stuttometer

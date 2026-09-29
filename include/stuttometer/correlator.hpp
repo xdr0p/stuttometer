@@ -133,6 +133,17 @@ enum class MetricSeverity : uint8_t { NORMAL = 0, WARNING = 1, DANGER = 2 };
     return MetricSeverity::NORMAL;
 }
 
+[[nodiscard]] constexpr inline bool meets_min_severity(
+    MetricSeverity trigger_sev, ReportSeverity min_sev
+) noexcept {
+    switch (min_sev) {
+        case ReportSeverity::ALL:     return true;
+        case ReportSeverity::WARNING: return trigger_sev >= MetricSeverity::WARNING;
+        case ReportSeverity::DANGER:  return trigger_sev >= MetricSeverity::DANGER;
+    }
+    return true;
+}
+
 [[nodiscard]] AttributionTag attribution_tag_for_hypothesis(std::string_view hypothesis) noexcept;
 [[nodiscard]] MetricSeverity classify_severity(const TriggerInfo& trigger, double present_threshold_ms = DEFAULT_60HZ_VBLANK_MS) noexcept;
 

@@ -1,4 +1,5 @@
 #include "stuttometer/trigger_engine.hpp"
+#include "stuttometer/correlator.hpp"
 #include "stuttometer/constants.hpp"
 #include "stuttometer/session_benchmark.hpp"
 #include "stuttometer/privilege_utils.hpp"
@@ -16,6 +17,7 @@ TriggerEngine::TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq)
     , cooldown_qpc_(ms_to_qpc_delta(config.cooldown_ms, qpc_freq))
     , watchdog_qpc_(ms_to_qpc_delta(TRIGGER_WATCHDOG_MS, qpc_freq)) // 5.0s recovery
     , last_target_pid_(config.target_pid)
+    , min_report_severity_(config.min_report_severity)
 {
     const bool waiting = (!config.target_process_name.empty() && config.target_pid == 0);
     const uint64_t initial_state = (static_cast<uint64_t>(config.target_pid) << 32) | (waiting ? 1ULL : 0ULL);
@@ -33,6 +35,49 @@ void TriggerEngine::on_target_changed(uint32_t new_pid) noexcept {
     target_attach_qpc_.store(get_current_qpc(), std::memory_order_release);
 }
 
+void TriggerEngine::record_filtered_event(
+    TriggerSource src,
+    TriggerReason reason,
+    uint64_t timestamp_qpc,
+    double duration_ms,
+    double baseline_avg_ms,
+    double spike_ratio,
+    uint32_t pid,
+    uint32_t tid,
+    uint8_t cpu_index,
+    FilterKind kind
+) noexcept {
+    filtered_reports_.fetch_add(1, std::memory_order_relaxed);
+    filtered_stall_us_.fetch_add(
+        static_cast<uint64_t>(duration_ms * 1000.0), std::memory_order_relaxed);
+
+    TriggerInfo tmp{};
+    tmp.source = src;
+    tmp.reason = reason;
+    tmp.duration_ms = duration_ms;
+    tmp.baseline_avg_ms = baseline_avg_ms;
+    tmp.spike_ratio = spike_ratio;
+    tmp.target_pid = pid;
+    tmp.target_tid = tid;
+    tmp.cpu_index = cpu_index;
+
+    const MetricSeverity sev = classify_severity(tmp, config_.present_threshold_ms);
+
+    FilteredEvent fe{};
+    fe.qpc_timestamp   = timestamp_qpc;
+    fe.duration_ms     = duration_ms;
+    fe.baseline_avg_ms = baseline_avg_ms;
+    fe.spike_ratio     = spike_ratio;
+    fe.target_pid      = pid;
+    fe.target_tid      = tid;
+    fe.reason          = static_cast<uint16_t>(reason);
+    fe.source          = static_cast<uint16_t>(src);
+    fe.severity        = static_cast<uint8_t>(sev);
+    fe.cpu_index       = cpu_index;
+    fe.filter_kind     = static_cast<uint8_t>(kind);
+    filtered_events_.push(fe);
+}
+
 bool TriggerEngine::initiate_trigger_atomic(
     TriggerSource src,
     TriggerReason reason,
@@ -44,8 +89,34 @@ bool TriggerEngine::initiate_trigger_atomic(
     uint32_t glitch_count,
     double baseline_avg_ms,
     double baseline_fps,
-    double spike_ratio
+    double spike_ratio,
+    uint16_t judder_alternations,
+    uint16_t judder_max_swing_q100
 ) noexcept {
+    // ---- Pre-Claim Severity Gate (Evaluated before acquiring writer_lock_) ----
+    TriggerInfo candidate{};
+    candidate.source = src;
+    candidate.reason = reason;
+    candidate.trigger_timestamp_qpc = timestamp_qpc;
+    candidate.duration_ms = duration_ms;
+    candidate.baseline_avg_ms = baseline_avg_ms;
+    candidate.baseline_fps = baseline_fps;
+    candidate.spike_ratio = spike_ratio;
+    candidate.glitch_count = glitch_count;
+    candidate.target_pid = pid;
+    candidate.target_tid = tid;
+    candidate.cpu_index = cpu_index;
+    candidate.judder_alternations = judder_alternations;
+    candidate.judder_max_swing_q100 = judder_max_swing_q100;
+
+    const MetricSeverity sev = classify_severity(candidate, config_.present_threshold_ms);
+    if (!meets_min_severity(sev, min_report_severity_.load(std::memory_order_acquire))) {
+        record_filtered_event(src, reason, timestamp_qpc, duration_ms,
+                              baseline_avg_ms, spike_ratio, pid, tid, cpu_index,
+                              FilterKind::SEVERITY_GATE);
+        return false;
+    }
+
     // ---- Phase 1: Claim state + generation, atomic together under writer_lock_ ----
     uint64_t my_gen = 0;
     {
@@ -108,17 +179,7 @@ bool TriggerEngine::initiate_trigger_atomic(
         active_trigger_seq_.store(seq + 1, std::memory_order_release); // Mark odd (write in progress)
         std::atomic_thread_fence(std::memory_order_release);
 
-        active_trigger_.source = src;
-        active_trigger_.reason = reason;
-        active_trigger_.trigger_timestamp_qpc = timestamp_qpc;
-        active_trigger_.duration_ms = duration_ms;
-        active_trigger_.baseline_avg_ms = baseline_avg_ms;
-        active_trigger_.baseline_fps = baseline_fps;
-        active_trigger_.spike_ratio = spike_ratio;
-        active_trigger_.glitch_count = glitch_count;
-        active_trigger_.target_pid = pid;
-        active_trigger_.target_tid = tid;
-        active_trigger_.cpu_index = cpu_index;
+        active_trigger_ = candidate;
 
         std::atomic_thread_fence(std::memory_order_release);
         active_trigger_seq_.store(seq + 2, std::memory_order_release); // Mark even (valid data published)

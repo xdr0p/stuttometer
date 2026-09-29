@@ -27,7 +27,8 @@ enum class EventCategory : uint16_t {
     MEM_VIRTUAL_ALLOC = 16,
     MEM_WORKING_SET_TRIM = 17,
     MEM_PHYSICAL_ALLOC = 18,
-    PROCESS          = 19
+    PROCESS          = 19,
+    TRIGGER_FILTERED = 20
 };
 
 inline std::string_view category_to_string(EventCategory cat) noexcept {
@@ -51,6 +52,7 @@ inline std::string_view category_to_string(EventCategory cat) noexcept {
         case EventCategory::MEM_WORKING_SET_TRIM: return "MEM_WORKING_SET_TRIM";
         case EventCategory::MEM_PHYSICAL_ALLOC:   return "MEM_PHYSICAL_ALLOC";
         case EventCategory::PROCESS:              return "PROCESS";
+        case EventCategory::TRIGGER_FILTERED:     return "TRIGGER_FILTERED";
         default:                                  return "UNKNOWN";
     }
 }

@@ -67,6 +67,28 @@ inline std::string_view frame_trigger_mode_to_string(FrameTriggerMode m) noexcep
     }
 }
 
+enum class ReportSeverity : uint8_t {
+    ALL     = 0,  // Forensic
+    WARNING = 1,  // Balanced, Competitive
+    DANGER  = 2   // Conservative, OSD default
+};
+
+inline std::string_view report_severity_to_string(ReportSeverity s) noexcept {
+    switch (s) {
+        case ReportSeverity::ALL:     return "all";
+        case ReportSeverity::WARNING: return "warning";
+        case ReportSeverity::DANGER:  return "danger";
+    }
+    return "warning";
+}
+
+inline ReportSeverity report_severity_from_string(std::string_view s) noexcept {
+    if (s == "all")     return ReportSeverity::ALL;
+    if (s == "warning") return ReportSeverity::WARNING;
+    if (s == "danger")  return ReportSeverity::DANGER;
+    return ReportSeverity::WARNING;
+}
+
 enum class PacingProfile : uint8_t {
     AUTO_ADAPTIVE = 0,
     HIGH_REFRESH  = 1,

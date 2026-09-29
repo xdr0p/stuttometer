@@ -49,6 +49,9 @@ struct GuiMetrics {
     uint64_t unpaired_evictions{0};
     uint64_t insertion_failures{0};
     uint32_t suppressed_triggers{0};
+    uint64_t filtered_reports{0};
+    uint64_t filtered_stall_ms{0};
+    uint64_t filtered_events_dropped{0};
 };
 
 struct ProcessEntry {

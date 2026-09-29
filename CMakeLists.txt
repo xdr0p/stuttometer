@@ -310,6 +310,14 @@ target_link_libraries(test_gui_settings PRIVATE stuttometer_core)
 add_test(NAME test_gui_settings COMMAND test_gui_settings)
 set_tests_properties(test_gui_settings PROPERTIES TIMEOUT 30)
 
+add_executable(test_report_filtering
+  tests/test_report_filtering.cpp
+)
+target_link_libraries(test_report_filtering PRIVATE stuttometer_core)
+add_test(NAME test_report_filtering COMMAND test_report_filtering)
+set_tests_properties(test_report_filtering PROPERTIES TIMEOUT 30)
+
+
 
 
 

@@ -415,6 +415,9 @@ void GuiController::session_worker_loop(GuiConfig config) {
                 std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
                 if (active_trigger_engine_) {
                     p_metrics->suppressed_triggers = static_cast<uint32_t>(active_trigger_engine_->suppressed_trigger_count());
+                    p_metrics->filtered_reports = active_trigger_engine_->filtered_reports();
+                    p_metrics->filtered_stall_ms = active_trigger_engine_->filtered_stall_ms();
+                    p_metrics->filtered_events_dropped = active_trigger_engine_->filtered_events_dropped();
                 }
             }
 
