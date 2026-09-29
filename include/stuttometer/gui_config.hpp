@@ -8,6 +8,34 @@
 
 namespace stuttometer {
 
+enum class DetectionPreset : uint8_t {
+    BALANCED     = 0,
+    COMPETITIVE  = 1,
+    CONSERVATIVE = 2,
+    FORENSIC     = 3,
+    CUSTOM       = 4
+};
+
+inline std::string_view detection_preset_to_string(DetectionPreset p) noexcept {
+    switch (p) {
+        case DetectionPreset::BALANCED:     return "balanced";
+        case DetectionPreset::COMPETITIVE:  return "competitive";
+        case DetectionPreset::CONSERVATIVE: return "conservative";
+        case DetectionPreset::FORENSIC:     return "forensic";
+        case DetectionPreset::CUSTOM:       return "custom";
+    }
+    return "balanced";
+}
+
+inline DetectionPreset detection_preset_from_string(std::string_view s) noexcept {
+    if (s == "balanced")     return DetectionPreset::BALANCED;
+    if (s == "competitive")  return DetectionPreset::COMPETITIVE;
+    if (s == "conservative") return DetectionPreset::CONSERVATIVE;
+    if (s == "forensic")     return DetectionPreset::FORENSIC;
+    if (s == "custom")       return DetectionPreset::CUSTOM;
+    return DetectionPreset::BALANCED;
+}
+
 enum class OsdPosition : uint32_t {
     TOP_RIGHT = 0,
     BOTTOM_RIGHT = 1,
@@ -15,7 +43,14 @@ enum class OsdPosition : uint32_t {
     BOTTOM_LEFT = 3
 };
 
+struct TriggerConfig;
+
 struct GuiConfig {
+    // Detection Preset & Severity Gate
+    DetectionPreset detection_preset{DetectionPreset::BALANCED};
+    ReportSeverity  min_osd_severity{ReportSeverity::DANGER};
+    ReportSeverity  list_severity_filter{ReportSeverity::WARNING};
+
     // Window & Timing
     double window_pre_ms{250.0};
     double window_post_ms{30.0};
@@ -81,5 +116,8 @@ void deserialize_gui_settings_from_json(
     bool& out_sound_cues,
     std::string& out_last_target_process
 );
+
+void apply_detection_preset(DetectionPreset p, TriggerConfig& trig, GuiConfig& gui) noexcept;
+void apply_detection_preset(DetectionPreset p, TriggerConfig& trig) noexcept;
 
 } // namespace stuttometer

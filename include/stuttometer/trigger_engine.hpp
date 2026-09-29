@@ -95,7 +95,7 @@ struct TriggerConfig {
     double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
 
     // Preset & Filtering Additions
-    ReportSeverity min_report_severity{ReportSeverity::ALL};  // flipped to WARNING by presets
+    ReportSeverity min_report_severity{ReportSeverity::WARNING};
     uint8_t  judder_min_alternations{5};
     uint8_t  dwm_min_missed_vblanks{1};
     uint8_t  kernel_frame_stall_min_missed_vblanks{1};

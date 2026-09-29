@@ -505,9 +505,137 @@ static void test_full_settings_roundtrip_manual() {
     std::cout << "  -> PASSED\n";
 }
 
+// 10. Detection Presets Round-Trip for all 5 presets
+static void test_detection_presets_roundtrip() {
+    std::cout << "[TEST] 10. Detection Presets Round-Trip (All 5 presets)...\n";
+    const DetectionPreset presets[5] = {
+        DetectionPreset::BALANCED,
+        DetectionPreset::COMPETITIVE,
+        DetectionPreset::CONSERVATIVE,
+        DetectionPreset::FORENSIC,
+        DetectionPreset::CUSTOM
+    };
+
+    for (auto p : presets) {
+        GuiConfig in_cfg;
+        in_cfg.detection_preset = p;
+        if (p == DetectionPreset::CUSTOM) {
+            in_cfg.pacing_profile = PacingProfile::CUSTOM;
+            in_cfg.spike_multiplier = 3.5;
+            in_cfg.min_spike_delta_ms = 8.0;
+            in_cfg.judder_swing_ratio = 0.42;
+        }
+
+        nlohmann::json j = serialize_gui_settings_to_json(in_cfg, 0, 0, false);
+        GuiConfig out_cfg;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, proc);
+
+        STUTTO_ASSERT(out_cfg.detection_preset == p);
+        if (p == DetectionPreset::CUSTOM) {
+            STUTTO_ASSERT(std::abs(out_cfg.spike_multiplier - 3.5) < 1e-6);
+            STUTTO_ASSERT(std::abs(out_cfg.min_spike_delta_ms - 8.0) < 1e-6);
+            STUTTO_ASSERT(std::abs(out_cfg.judder_swing_ratio - 0.42) < 1e-6);
+        } else if (p == DetectionPreset::CONSERVATIVE) {
+            STUTTO_ASSERT(out_cfg.pacing_profile == PacingProfile::CONSERVATIVE);
+            STUTTO_ASSERT(std::abs(out_cfg.judder_swing_ratio - 0.60) < 1e-6);
+        } else if (p == DetectionPreset::BALANCED) {
+            STUTTO_ASSERT(out_cfg.pacing_profile == PacingProfile::AUTO_ADAPTIVE);
+            STUTTO_ASSERT(std::abs(out_cfg.judder_swing_ratio - 0.50) < 1e-6);
+        }
+    }
+    std::cout << "  -> PASSED\n";
+}
+
+// 11. Schema 1 Migration Predicates
+static void test_v1_settings_migration() {
+    std::cout << "[TEST] 11. Schema 1 Settings Migration Predicates...\n";
+
+    // 11a. Default v1 settings -> BALANCED
+    {
+        nlohmann::json j;
+        j["settings_version"] = 1;
+        j["spike_multiplier"] = 2.0;
+        j["min_spike_delta_ms"] = 4.0;
+        j["judder_swing_ratio"] = 0.35;
+        j["pacing_profile"] = "auto_adaptive";
+
+        GuiConfig out;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
+
+        STUTTO_ASSERT(out.detection_preset == DetectionPreset::BALANCED);
+        STUTTO_ASSERT(out.min_osd_severity == ReportSeverity::DANGER);
+        STUTTO_ASSERT(out.list_severity_filter == ReportSeverity::WARNING);
+    }
+
+    // 11b. v1 with high_refresh pacing profile -> CUSTOM
+    {
+        nlohmann::json j;
+        j["settings_version"] = 1;
+        j["spike_multiplier"] = 2.0;
+        j["min_spike_delta_ms"] = 4.0;
+        j["pacing_profile"] = "high_refresh";
+
+        GuiConfig out;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
+
+        STUTTO_ASSERT(out.detection_preset == DetectionPreset::CUSTOM);
+    }
+
+    // 11c. v1 with non-default spike_multiplier -> CUSTOM
+    {
+        nlohmann::json j;
+        j["settings_version"] = 1;
+        j["spike_multiplier"] = 3.0;
+        j["min_spike_delta_ms"] = 4.0;
+
+        GuiConfig out;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
+
+        STUTTO_ASSERT(out.detection_preset == DetectionPreset::CUSTOM);
+    }
+
+    std::cout << "  -> PASSED\n";
+}
+
+// 12. Deserialization Authority (Preset table overrides conflicting fields for non-CUSTOM presets)
+static void test_deserialization_authority() {
+    std::cout << "[TEST] 12. Deserialization Authority...\n";
+
+    nlohmann::json j;
+    j["settings_version"] = 2;
+    j["detection_preset"] = "competitive";
+    // Conflicting raw fields that should be overridden by competitive preset
+    j["pacing_profile"] = "conservative";
+    j["judder_swing_ratio"] = 0.85;
+
+    GuiConfig out;
+    uint32_t vk = 0, mods = 0;
+    bool snd = false;
+    std::string proc;
+    deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
+
+    STUTTO_ASSERT(out.detection_preset == DetectionPreset::COMPETITIVE);
+    STUTTO_ASSERT(out.pacing_profile == PacingProfile::AUTO_ADAPTIVE);
+    STUTTO_ASSERT(std::abs(out.judder_swing_ratio - 0.35) < 1e-6);
+
+    std::cout << "  -> PASSED\n";
+}
+
 int main() {
     std::cout << "========================================\n";
-    std::cout << "Running test_gui_settings (9 scenarios)\n";
+    std::cout << "Running test_gui_settings (12 scenarios)\n";
     std::cout << "========================================\n";
 
     try {
@@ -520,11 +648,14 @@ int main() {
         test_manual_mode_serialization();
         test_full_settings_roundtrip_auto();
         test_full_settings_roundtrip_manual();
+        test_detection_presets_roundtrip();
+        test_v1_settings_migration();
+        test_deserialization_authority();
     } catch (const std::exception& e) {
         std::cerr << "Test failed with exception: " << e.what() << "\n";
         return 1;
     }
 
-    std::cout << "All 9 GUI settings test scenarios PASSED!\n";
+    std::cout << "All 12 GUI settings test scenarios PASSED!\n";
     return 0;
 }

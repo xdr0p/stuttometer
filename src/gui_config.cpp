@@ -1,4 +1,5 @@
 #include "stuttometer/gui_config.hpp"
+#include "stuttometer/trigger_engine.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -44,7 +45,7 @@ nlohmann::json serialize_gui_settings_to_json(
     const std::string& last_target_process
 ) {
     nlohmann::json j;
-    j["settings_version"] = 1;
+    j["settings_version"] = 2;
     j["hotkey_vk"] = hotkey_vk;
     j["hotkey_modifiers"] = hotkey_mods;
     j["sound_cues_enabled"] = sound_cues;
@@ -95,6 +96,16 @@ nlohmann::json serialize_gui_settings_to_json(
     j["spike_multiplier"] = config.spike_multiplier;
     j["min_spike_delta_ms"] = config.min_spike_delta_ms;
     j["enable_judder_detection"] = config.enable_judder_detection;
+    j["judder_swing_ratio"] = config.judder_swing_ratio;
+
+    DetectionPreset preset = config.detection_preset;
+    if (preset == DetectionPreset::BALANCED && config.pacing_profile != PacingProfile::AUTO_ADAPTIVE) {
+        preset = DetectionPreset::CUSTOM;
+    }
+    j["detection_preset"] = std::string(detection_preset_to_string(preset));
+    j["min_osd_severity"] = std::string(report_severity_to_string(config.min_osd_severity));
+    j["list_severity_filter"] = std::string(report_severity_to_string(config.list_severity_filter));
+
     j["auto_save_dir"] = wstring_to_utf8_helper(config.output_dir);
     j["last_target_process"] = last_target_process;
 
@@ -244,23 +255,74 @@ void deserialize_gui_settings_from_json(
             else out_config.frame_trigger_mode = FrameTriggerMode::HYBRID;
         }
 
-        if (j.contains("spike_multiplier") && j["spike_multiplier"].is_number()) {
-            double v = j["spike_multiplier"].get<double>();
-            if (v >= 1.2 && v <= 10.0) out_config.spike_multiplier = v;
+        // Preset & Severity Settings (Schema 2)
+        int version = 1;
+        if (j.contains("settings_version") && j["settings_version"].is_number_integer()) {
+            version = j["settings_version"].get<int>();
         }
 
-        if (j.contains("min_spike_delta_ms") && j["min_spike_delta_ms"].is_number()) {
-            double v = j["min_spike_delta_ms"].get<double>();
-            if (v >= 1.0 && v <= 50.0) out_config.min_spike_delta_ms = v;
-        }
+        if (version < 2) {
+            // Migration for v1 settings:
+            double sm = 2.0;
+            if (j.contains("spike_multiplier") && j["spike_multiplier"].is_number()) {
+                sm = j["spike_multiplier"].get<double>();
+            }
+            double md = 4.0;
+            if (j.contains("min_spike_delta_ms") && j["min_spike_delta_ms"].is_number()) {
+                md = j["min_spike_delta_ms"].get<double>();
+            }
+            double jr = 0.35;
+            if (j.contains("judder_swing_ratio") && j["judder_swing_ratio"].is_number()) {
+                jr = j["judder_swing_ratio"].get<double>();
+            }
+            std::string prof_str;
+            if (j.contains("pacing_profile") && j["pacing_profile"].is_string()) {
+                prof_str = j["pacing_profile"].get<std::string>();
+            }
 
-        if (j.contains("pacing_profile") && j["pacing_profile"].is_string()) {
-            std::string p_str = j["pacing_profile"].get<std::string>();
-            out_config.pacing_profile = pacing_profile_from_string(p_str);
+            if (std::abs(sm - 2.0) < 1e-6 && std::abs(md - 4.0) < 1e-6 && std::abs(jr - 0.35) < 1e-6 && prof_str != "high_refresh") {
+                out_config.detection_preset = DetectionPreset::BALANCED;
+            } else {
+                out_config.detection_preset = DetectionPreset::CUSTOM;
+            }
+            out_config.min_osd_severity = ReportSeverity::DANGER;
+            out_config.list_severity_filter = ReportSeverity::WARNING;
         } else {
-            bool is_custom = (std::abs(out_config.spike_multiplier - 2.0) > 1e-9 ||
-                              std::abs(out_config.min_spike_delta_ms - 4.0) > 1e-9);
-            out_config.pacing_profile = is_custom ? PacingProfile::CUSTOM : PacingProfile::AUTO_ADAPTIVE;
+            if (j.contains("detection_preset") && j["detection_preset"].is_string()) {
+                out_config.detection_preset = detection_preset_from_string(j["detection_preset"].get<std::string>());
+            }
+            if (j.contains("min_osd_severity") && j["min_osd_severity"].is_string()) {
+                out_config.min_osd_severity = report_severity_from_string(j["min_osd_severity"].get<std::string>());
+            }
+            if (j.contains("list_severity_filter") && j["list_severity_filter"].is_string()) {
+                out_config.list_severity_filter = report_severity_from_string(j["list_severity_filter"].get<std::string>());
+            }
+        }
+
+        if (out_config.detection_preset != DetectionPreset::CUSTOM) {
+            TriggerConfig trig{};
+            apply_detection_preset(out_config.detection_preset, trig, out_config);
+        } else {
+            if (j.contains("spike_multiplier") && j["spike_multiplier"].is_number()) {
+                double v = j["spike_multiplier"].get<double>();
+                if (v >= 1.2 && v <= 10.0) out_config.spike_multiplier = v;
+            }
+            if (j.contains("min_spike_delta_ms") && j["min_spike_delta_ms"].is_number()) {
+                double v = j["min_spike_delta_ms"].get<double>();
+                if (v >= 1.0 && v <= 50.0) out_config.min_spike_delta_ms = v;
+            }
+            if (j.contains("pacing_profile") && j["pacing_profile"].is_string()) {
+                std::string p_str = j["pacing_profile"].get<std::string>();
+                out_config.pacing_profile = pacing_profile_from_string(p_str);
+            } else {
+                bool is_custom = (std::abs(out_config.spike_multiplier - 2.0) > 1e-9 ||
+                                  std::abs(out_config.min_spike_delta_ms - 4.0) > 1e-9);
+                out_config.pacing_profile = is_custom ? PacingProfile::CUSTOM : PacingProfile::AUTO_ADAPTIVE;
+            }
+            if (j.contains("judder_swing_ratio") && j["judder_swing_ratio"].is_number()) {
+                double v = j["judder_swing_ratio"].get<double>();
+                if (v >= 0.1 && v <= 1.0) out_config.judder_swing_ratio = v;
+            }
         }
 
         if (j.contains("enable_judder_detection") && j["enable_judder_detection"].is_boolean()) {
