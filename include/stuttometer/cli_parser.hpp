@@ -1,6 +1,7 @@
 #pragma once
 
 #include "stuttometer/frame_pacing_tracker.hpp"
+#include "stuttometer/gui_config.hpp"
 #include "stuttometer/constants.hpp"
 #include <string>
 #include <cstdint>
@@ -55,8 +56,14 @@ struct CliConfig {
     bool target_pid_manual{false};
     bool present_threshold_manual{false};
     bool smi_threshold_manual{false};
-    ReportSeverity min_report_severity{ReportSeverity::ALL};
+    DetectionPreset preset{DetectionPreset::BALANCED};
+    bool preset_manual{false};
+    ReportSeverity min_report_severity{ReportSeverity::WARNING};
     bool min_report_severity_manual{false};
+    ReportSeverity osd_min_severity{ReportSeverity::DANGER};
+    bool osd_min_severity_manual{false};
+    uint8_t judder_min_alternations{5};
+    bool judder_min_alternations_manual{false};
 };
 
 struct CliRangeDef {
@@ -85,7 +92,8 @@ inline constexpr CliRangeDef CLI_RANGES[] = {
     {"--buffer-slots",            static_cast<double>(MIN_BUFFER_SLOTS), static_cast<double>(MAX_BUFFER_SLOTS), "",   [](const CliConfig& c) { return static_cast<double>(c.buffer_slots); }},
     {"--spike-multiplier",        1.2,     10.0,     "",    [](const CliConfig& c) { return c.spike_multiplier; }},
     {"--min-spike-delta-ms",      1.0,     50.0,     "ms",  [](const CliConfig& c) { return c.min_spike_delta_ms; }},
-    {"--judder-swing-ratio",      0.1,     0.9,      "",    [](const CliConfig& c) { return c.judder_swing_ratio; }}
+    {"--judder-swing-ratio",      0.1,     0.9,      "",    [](const CliConfig& c) { return c.judder_swing_ratio; }},
+    {"--judder-min-alternations", 1.0,     50.0,     "",    [](const CliConfig& c) { return static_cast<double>(c.judder_min_alternations); }}
 };
 
 template <typename T>

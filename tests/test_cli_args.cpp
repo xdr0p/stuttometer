@@ -536,7 +536,7 @@ static void test_min_report_severity_flag() {
         auto res = parse_cli_args(1, argv, config, out, err);
         STUTTO_ASSERT(res == CliParseResult::SUCCESS);
         STUTTO_ASSERT(!config.min_report_severity_manual);
-        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::ALL);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
     }
 
     // 2. Explicit 'all'
@@ -582,6 +582,145 @@ static void test_min_report_severity_flag() {
     }
 
     std::cout << "  -> --min-report-severity flag parsing verified.\n";
+}
+
+static void test_presets_and_cli_flags() {
+    std::cout << "[TEST] Testing --preset, --osd-min-severity, and --judder-min-alternations flags...\n";
+
+    // 1. Default preset is BALANCED
+    {
+        const char* argv[] = { "stuttometer.exe" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(1, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(!config.preset_manual);
+        STUTTO_ASSERT(config.preset == DetectionPreset::BALANCED);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
+        STUTTO_ASSERT(config.osd_min_severity == ReportSeverity::DANGER);
+        STUTTO_ASSERT(config.judder_min_alternations == 5);
+        STUTTO_ASSERT(config.judder_swing_ratio == 0.50);
+    }
+
+    // 2. --preset competitive
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "competitive" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.preset_manual);
+        STUTTO_ASSERT(config.preset == DetectionPreset::COMPETITIVE);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
+        STUTTO_ASSERT(config.judder_min_alternations == 3);
+        STUTTO_ASSERT(config.judder_swing_ratio == 0.35);
+    }
+
+    // 3. --preset conservative
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "conservative" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.preset_manual);
+        STUTTO_ASSERT(config.preset == DetectionPreset::CONSERVATIVE);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::DANGER);
+        STUTTO_ASSERT(config.judder_min_alternations == 8);
+        STUTTO_ASSERT(config.judder_swing_ratio == 0.60);
+    }
+
+    // 4. --preset forensic
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "forensic" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.preset_manual);
+        STUTTO_ASSERT(config.preset == DetectionPreset::FORENSIC);
+        STUTTO_ASSERT(config.min_report_severity == ReportSeverity::ALL);
+        STUTTO_ASSERT(config.judder_min_alternations == 3);
+        STUTTO_ASSERT(config.judder_swing_ratio == 0.35);
+    }
+
+    // 5. Invalid --preset
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "invalid_preset" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+    }
+
+    // 6. --osd-min-severity
+    {
+        const char* argv[] = { "stuttometer.exe", "--osd-min-severity", "warning" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.osd_min_severity_manual);
+        STUTTO_ASSERT(config.osd_min_severity == ReportSeverity::WARNING);
+    }
+    {
+        const char* argv[] = { "stuttometer.exe", "--osd-min-severity", "bogus" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+    }
+
+    // 7. --judder-min-alternations
+    {
+        const char* argv[] = { "stuttometer.exe", "--judder-min-alternations", "10" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.judder_min_alternations_manual);
+        STUTTO_ASSERT(config.judder_min_alternations == 10);
+    }
+    {
+        const char* argv[] = { "stuttometer.exe", "--judder-min-alternations", "0" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+    }
+    {
+        const char* argv[] = { "stuttometer.exe", "--judder-min-alternations", "51" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+    }
+
+    // 8. Override flips preset to CUSTOM
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "competitive", "--spike-multiplier", "3.0" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(5, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.preset == DetectionPreset::CUSTOM);
+        STUTTO_ASSERT(config.spike_multiplier == 3.0);
+        STUTTO_ASSERT(err.str().find("CUSTOM preset") != std::string::npos);
+    }
+
+    // 9. Override with judder swing ratio flips to CUSTOM
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "balanced", "--judder-swing-ratio", "0.45" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(5, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.preset == DetectionPreset::CUSTOM);
+        STUTTO_ASSERT(config.judder_swing_ratio == 0.45);
+        STUTTO_ASSERT(err.str().find("CUSTOM preset") != std::string::npos);
+    }
+
+    std::cout << "  -> Presets and new CLI flags verified successfully.\n";
 }
 
 static void test_process_watcher_lifecycle() {
@@ -851,6 +990,7 @@ int main() {
         test_help_flags();
         test_manual_threshold_flags();
         test_min_report_severity_flag();
+        test_presets_and_cli_flags();
         test_process_watcher_lifecycle();
         test_process_watcher_parity();
         test_process_watcher_cadence();

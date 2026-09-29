@@ -1,4 +1,6 @@
 #include "stuttometer/cli_parser.hpp"
+#include "stuttometer/gui_config.hpp"
+#include "stuttometer/trigger_engine.hpp"
 #include "stuttometer/version.hpp"
 #include <CLI/CLI.hpp>
 #include <set>
@@ -45,17 +47,23 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     double min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     bool enable_judder = true;
     double judder_swing_ratio = pacing_tuning::DEFAULT_JUDDER_SWING_RATIO;
+    uint32_t judder_min_alternations = 5;
     std::string dump_events_path;
     size_t dump_max_mb = 100;
     size_t dump_max_files = 3;
     std::string export_csv_path;
-    std::string min_report_severity_str = "all";
+    std::string min_report_severity_str = "warning";
+    std::string preset_str = "balanced";
+    std::string osd_min_severity_str = "danger";
 
     char present_thresh_help[128];
     std::snprintf(present_thresh_help, sizeof(present_thresh_help),
                   "DXGI Present stutter threshold in ms (2.0-200.0, default: %.2f)",
                   DEFAULT_60HZ_VBLANK_MS);
 
+    app.add_option("--preset", preset_str, "Detection preset: balanced, competitive, conservative, forensic, custom (default: balanced)");
+    app.add_option("--osd-min-severity", osd_min_severity_str, "Minimum severity for in-game OSD toast: all, warning, danger (default: danger)");
+    app.add_option("--judder-min-alternations", judder_min_alternations, "Minimum alternations to trigger judder episode (1-50, default: 5)");
     app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (50-1000, default: 250)");
     app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (0-200, default: 30)");
     app.add_option("--present-threshold-ms", present_threshold_ms, present_thresh_help);
@@ -64,7 +72,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     app.add_flag("--high-refresh", high_refresh_preset, "Alias for --pacing-profile high-refresh");
     app.add_option("--spike-multiplier", spike_multiplier, "Relative stutter spike multiplier (1.2-10.0, default: 2.0)");
     app.add_option("--min-spike-delta-ms", min_spike_delta_ms, "Minimum absolute spike delta in ms (1.0-50.0, default: 4.0)");
-    app.add_option("--min-report-severity", min_report_severity_str, "Minimum severity to trigger a correlated report: all, warning, danger (default: all)");
+    app.add_option("--min-report-severity", min_report_severity_str, "Minimum severity to trigger a correlated report: all, warning, danger (default: warning)");
     app.add_flag("--judder-detection,!--no-judder", enable_judder, "Enable/disable cadence judder detection (default: enabled)");
     app.add_option("--judder-swing-ratio", judder_swing_ratio, "Judder cadence swing threshold ratio (0.1-0.9, default: 0.35)");
     app.add_flag("--audio-trigger,!--no-audio", enable_audio, "Enable/disable AudioGlitch Event ID 11 trigger");
@@ -125,13 +133,58 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     }
 
     // Pacing profile resolution, alias, and overrides
+    bool has_preset = (app.count("--preset") > 0);
+    bool has_osd_min_sev = (app.count("--osd-min-severity") > 0);
+    bool has_judder_alt = (app.count("--judder-min-alternations") > 0);
+    bool has_min_report_sev = (app.count("--min-report-severity") > 0);
     bool has_pacing_profile = (app.count("--pacing-profile") > 0);
     bool has_high_refresh = (app.count("--high-refresh") > 0);
     bool has_spike_mult = (app.count("--spike-multiplier") > 0);
     bool has_min_delta = (app.count("--min-spike-delta-ms") > 0);
+    bool has_swing_ratio = (app.count("--judder-swing-ratio") > 0);
 
-    PacingProfile resolved_profile = PacingProfile::AUTO_ADAPTIVE;
+    if (has_preset) {
+        if (preset_str != "balanced" && preset_str != "competitive" &&
+            preset_str != "conservative" && preset_str != "forensic" &&
+            preset_str != "custom") {
+            err << "[STUTTOMETER] Error: Invalid --preset '" << preset_str << "'. Must be 'balanced', 'competitive', 'conservative', 'forensic', or 'custom'.\n";
+            return CliParseResult::EXIT_ERROR;
+        }
+    }
 
+    if (has_osd_min_sev) {
+        if (osd_min_severity_str != "all" && osd_min_severity_str != "warning" && osd_min_severity_str != "danger") {
+            err << "[STUTTOMETER] Error: Invalid --osd-min-severity '" << osd_min_severity_str << "'. Must be 'all', 'warning', or 'danger'.\n";
+            return CliParseResult::EXIT_ERROR;
+        }
+    }
+
+    if (has_min_report_sev) {
+        if (min_report_severity_str != "all" && min_report_severity_str != "warning" && min_report_severity_str != "danger") {
+            err << "[STUTTOMETER] Error: Invalid --min-report-severity '" << min_report_severity_str << "'. Must be 'all', 'warning', or 'danger'.\n";
+            return CliParseResult::EXIT_ERROR;
+        }
+    }
+
+    // 1. Apply --preset (or BALANCED default)
+    DetectionPreset resolved_preset = detection_preset_from_string(preset_str);
+    TriggerConfig trig_defaults{};
+    GuiConfig gui_defaults{};
+    apply_detection_preset(resolved_preset, trig_defaults, gui_defaults);
+
+    PacingProfile resolved_profile = trig_defaults.pacing_profile;
+    ReportSeverity resolved_min_report_sev = trig_defaults.min_report_severity;
+    if (has_min_report_sev) {
+        resolved_min_report_sev = report_severity_from_string(min_report_severity_str);
+    }
+    if (!has_judder_alt) {
+        judder_min_alternations = trig_defaults.judder_min_alternations;
+    }
+    if (!has_swing_ratio) {
+        judder_swing_ratio = trig_defaults.judder_swing_ratio;
+    }
+
+    // 2. Apply explicit --pacing-profile
     if (has_pacing_profile) {
         auto opt = pacing_profile_from_cli_string(pacing_profile_str);
         if (!opt.has_value()) {
@@ -146,11 +199,21 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         resolved_profile = PacingProfile::HIGH_REFRESH;
     } else if (has_spike_mult || has_min_delta) {
         resolved_profile = PacingProfile::CUSTOM;
-    } else {
-        resolved_profile = PacingProfile::AUTO_ADAPTIVE;
     }
 
-    // If explicit parameter overrides are supplied with a preset
+    // 3. Apply explicit threshold flags
+    // 4. If explicit pacing overrides are supplied and preset is not CUSTOM, flip to CUSTOM and emit:
+    // [Config] Note: Explicit parameter override active; operating in CUSTOM preset.
+    const bool has_pacing_override = (has_pacing_profile || has_high_refresh || has_spike_mult || has_min_delta || has_swing_ratio || has_judder_alt);
+    if (has_pacing_override) {
+        if (has_preset && resolved_preset != DetectionPreset::CUSTOM) {
+            resolved_preset = DetectionPreset::CUSTOM;
+            err << "[Config] Note: Explicit parameter override active; operating in CUSTOM preset.\n";
+        } else if (!has_preset) {
+            resolved_preset = DetectionPreset::CUSTOM;
+        }
+    }
+
     if ((has_spike_mult || has_min_delta) && (has_pacing_profile || has_high_refresh)) {
         resolved_profile = PacingProfile::CUSTOM;
         err << "[Config] Note: Explicit parameter override active; operating in CUSTOM profile.\n";
@@ -158,14 +221,14 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     // Assign multiplier & delta based on resolved profile
     if (resolved_profile == PacingProfile::AUTO_ADAPTIVE) {
-        spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
-        min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
+        if (!has_spike_mult) spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
+        if (!has_min_delta) min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     } else if (resolved_profile == PacingProfile::HIGH_REFRESH) {
-        spike_multiplier = HIGH_REFRESH_SPIKE_MULTIPLIER;
-        min_spike_delta_ms = HIGH_REFRESH_MIN_DELTA_MS;
+        if (!has_spike_mult) spike_multiplier = HIGH_REFRESH_SPIKE_MULTIPLIER;
+        if (!has_min_delta) min_spike_delta_ms = HIGH_REFRESH_MIN_DELTA_MS;
     } else if (resolved_profile == PacingProfile::CONSERVATIVE) {
-        spike_multiplier = CONSERVATIVE_SPIKE_MULTIPLIER;
-        min_spike_delta_ms = CONSERVATIVE_MIN_DELTA_MS;
+        if (!has_spike_mult) spike_multiplier = CONSERVATIVE_SPIKE_MULTIPLIER;
+        if (!has_min_delta) min_spike_delta_ms = CONSERVATIVE_MIN_DELTA_MS;
     } else if (resolved_profile == PacingProfile::CUSTOM) {
         if (!has_spike_mult) spike_multiplier = DEFAULT_SPIKE_MULTIPLIER;
         if (!has_min_delta) min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
@@ -211,6 +274,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     temp_config.spike_multiplier = spike_multiplier;
     temp_config.min_spike_delta_ms = min_spike_delta_ms;
     temp_config.judder_swing_ratio = judder_swing_ratio;
+    temp_config.judder_min_alternations = static_cast<uint8_t>(judder_min_alternations);
 
     if (!validate_all_cli_ranges(err, temp_config)) {
         return CliParseResult::EXIT_ERROR;
@@ -226,14 +290,6 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     if (valid_tiers.find(provider_tier) == valid_tiers.end()) {
         err << "[STUTTOMETER] Error: Invalid --tier '" << provider_tier << "'. Must be 'minimal', 'standard', or 'full'.\n";
         return CliParseResult::EXIT_ERROR;
-    }
-    if (app.count("--min-report-severity") > 0) {
-        if (min_report_severity_str != "all" && min_report_severity_str != "warning" && min_report_severity_str != "danger") {
-            err << "[STUTTOMETER] Error: Invalid --min-report-severity '" << min_report_severity_str << "'. Must be 'all', 'warning', or 'danger'.\n";
-            return CliParseResult::EXIT_ERROR;
-        }
-        out_config.min_report_severity = report_severity_from_string(min_report_severity_str);
-        out_config.min_report_severity_manual = true;
     }
 
     if (target_process_name.size() > 260) {
@@ -277,6 +333,14 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     out_config.dump_max_mb = dump_max_mb;
     out_config.dump_max_files = dump_max_files;
     out_config.export_csv_path = export_csv_path;
+    out_config.preset = resolved_preset;
+    out_config.preset_manual = has_preset;
+    out_config.min_report_severity = resolved_min_report_sev;
+    out_config.min_report_severity_manual = has_min_report_sev;
+    out_config.osd_min_severity = report_severity_from_string(osd_min_severity_str);
+    out_config.osd_min_severity_manual = has_osd_min_sev;
+    out_config.judder_min_alternations = static_cast<uint8_t>(judder_min_alternations);
+    out_config.judder_min_alternations_manual = has_judder_alt;
     out_config.target_pid_manual = (app.count("--target-pid") > 0 && target_pid != 0);
     out_config.present_threshold_manual = (app.count("--present-threshold-ms") > 0);
     out_config.smi_threshold_manual = (app.count("--smi-threshold-ms") > 0);
