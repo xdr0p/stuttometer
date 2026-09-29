@@ -9,6 +9,52 @@
 #include "stuttometer/trigger_engine.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include <iostream>
+#include <new>
+#include <cstdlib>
+
+static thread_local bool g_disallow_allocations = false;
+static thread_local bool g_allocation_detected = false;
+
+void* operator new(size_t size) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete(void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete(void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void* operator new[](size_t size) {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+void operator delete[](void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete[](void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+    if (g_disallow_allocations) {
+        g_allocation_detected = true;
+    }
+    return std::malloc(size);
+}
 
 static void test_dpc_spike_correlation() {
     std::cout << "[TEST] Validating DPC Latency Spike Hypothesis...\n";
@@ -1625,9 +1671,169 @@ static void test_smi_auto_scaling_and_hardware_vblank() {
     std::cout << "  -> SMI auto-scaling with high-refresh cadence and hardware_vblank_ms PASSED.\n";
 }
 
+static void test_meets_min_severity_matrix() {
+    std::cout << "[TEST] Validating meets_min_severity 3x3 Truth Matrix...\n";
+
+    using stuttometer::MetricSeverity;
+    using stuttometer::ReportSeverity;
+    using stuttometer::meets_min_severity;
+
+    // ReportSeverity::ALL accepts all
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::NORMAL, ReportSeverity::ALL) == true);
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::WARNING, ReportSeverity::ALL) == true);
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::DANGER, ReportSeverity::ALL) == true);
+
+    // ReportSeverity::WARNING accepts WARNING and DANGER, rejects NORMAL
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::NORMAL, ReportSeverity::WARNING) == false);
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::WARNING, ReportSeverity::WARNING) == true);
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::DANGER, ReportSeverity::WARNING) == true);
+
+    // ReportSeverity::DANGER accepts DANGER only
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::NORMAL, ReportSeverity::DANGER) == false);
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::WARNING, ReportSeverity::DANGER) == false);
+    STUTTO_ASSERT(meets_min_severity(MetricSeverity::DANGER, ReportSeverity::DANGER) == true);
+
+    std::cout << "  -> meets_min_severity 3x3 Truth Matrix PASSED.\n";
+}
+
+static void test_classify_severity_allocation_free() {
+    std::cout << "[TEST] Validating classify_severity Zero-Allocation Invariant...\n";
+
+    using stuttometer::TriggerInfo;
+    using stuttometer::TriggerSource;
+    using stuttometer::TriggerReason;
+    using stuttometer::MetricSeverity;
+
+    TriggerInfo trig{};
+    trig.source = TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.duration_ms = 45.0;
+    trig.baseline_avg_ms = 16.67;
+    trig.spike_ratio = 2.7;
+
+    g_allocation_detected = false;
+    g_disallow_allocations = true;
+
+    for (int i = 0; i < 100; ++i) {
+        // Test branch: has_baseline with spike_ratio >= 3.0 (DANGER)
+        trig.spike_ratio = 3.5;
+        trig.baseline_avg_ms = 16.67;
+        auto sev1 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev1;
+
+        // Test branch: has_baseline with spike_ratio >= 2.0 (WARNING)
+        trig.spike_ratio = 2.2;
+        auto sev2 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev2;
+
+        // Test branch: has_baseline with spike_ratio < 2.0 (NORMAL)
+        trig.spike_ratio = 1.2;
+        auto sev3 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev3;
+
+        // Test branch: audio glitch (DANGER)
+        trig.source = TriggerSource::AUDIO_GLITCH;
+        auto sev4 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev4;
+        trig.source = TriggerSource::DXGI_PRESENT_STUTTER;
+
+        // Test branch: no baseline (fallback) -> DANGER (>= 3.0 * ref)
+        trig.baseline_avg_ms = 0.0;
+        trig.spike_ratio = 0.0;
+        trig.duration_ms = 60.0;
+        auto sev5 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev5;
+
+        // Test branch: no baseline (fallback) -> WARNING (>= 1.5 * ref)
+        trig.duration_ms = 30.0;
+        auto sev6 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev6;
+
+        // Test branch: no baseline (fallback) -> NORMAL (< 1.5 * ref)
+        trig.duration_ms = 18.0;
+        auto sev7 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev7;
+
+        // Test branch: cadence judder
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        auto sev8 = stuttometer::classify_severity(trig, 16.67);
+        (void)sev8;
+        trig.reason = TriggerReason::NONE;
+    }
+
+    g_disallow_allocations = false;
+    STUTTO_ASSERT(!g_allocation_detected);
+    std::cout << "  -> classify_severity 100 iterations 0 heap allocations PASSED.\n";
+}
+
+static void test_danger_invariants() {
+    std::cout << "[TEST] Validating DANGER Invariants & Gate Bypass...\n";
+
+    using stuttometer::TriggerInfo;
+    using stuttometer::TriggerSource;
+    using stuttometer::TriggerReason;
+    using stuttometer::MetricSeverity;
+    using stuttometer::ReportSeverity;
+    using stuttometer::meets_min_severity;
+
+    // Invariant 1: Audio glitches always classify as DANGER, under any baseline / duration condition
+    {
+        TriggerInfo audio_trig{};
+        audio_trig.source = TriggerSource::AUDIO_GLITCH;
+        audio_trig.duration_ms = 0.5;
+        audio_trig.baseline_avg_ms = 0.0;
+        audio_trig.spike_ratio = 0.0;
+        audio_trig.glitch_count = 1;
+
+        MetricSeverity sev = stuttometer::classify_severity(audio_trig);
+        STUTTO_ASSERT(sev == MetricSeverity::DANGER);
+
+        // Never filtered by any severity gate:
+        STUTTO_ASSERT(meets_min_severity(sev, ReportSeverity::ALL) == true);
+        STUTTO_ASSERT(meets_min_severity(sev, ReportSeverity::WARNING) == true);
+        STUTTO_ASSERT(meets_min_severity(sev, ReportSeverity::DANGER) == true);
+
+        // Even with positive baseline / tiny duration
+        audio_trig.baseline_avg_ms = 16.67;
+        audio_trig.spike_ratio = 0.1;
+        STUTTO_ASSERT(stuttometer::classify_severity(audio_trig) == MetricSeverity::DANGER);
+    }
+
+    // Invariant 2: spike_ratio >= 3.0 with baseline always yields DANGER
+    {
+        TriggerInfo spike_trig{};
+        spike_trig.source = TriggerSource::DXGI_PRESENT_STUTTER;
+        spike_trig.baseline_avg_ms = 16.67;
+        spike_trig.spike_ratio = 3.0; // Exact threshold
+        STUTTO_ASSERT(stuttometer::classify_severity(spike_trig) == MetricSeverity::DANGER);
+
+        spike_trig.spike_ratio = 5.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(spike_trig) == MetricSeverity::DANGER);
+    }
+
+    // Invariant 3: duration >= 3.0 * ref in fallback yields DANGER
+    {
+        TriggerInfo fallback_trig{};
+        fallback_trig.source = TriggerSource::DXGI_PRESENT_STUTTER;
+        fallback_trig.baseline_avg_ms = 0.0;
+        fallback_trig.spike_ratio = 0.0;
+        const double ref = 16.67;
+
+        fallback_trig.duration_ms = 3.0 * ref; // Exact threshold (50.01 ms)
+        STUTTO_ASSERT(stuttometer::classify_severity(fallback_trig, ref) == MetricSeverity::DANGER);
+
+        fallback_trig.duration_ms = 100.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(fallback_trig, ref) == MetricSeverity::DANGER);
+    }
+
+    std::cout << "  -> DANGER Invariants & Gate Bypass PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
+        test_meets_min_severity_matrix();
+        test_classify_severity_allocation_free();
+        test_danger_invariants();
         test_dpc_spike_correlation();
         test_disk_stall_correlation();
         test_auto_detect_disk_stall_correlation();
@@ -1668,3 +1874,4 @@ int main() {
         return 1;
     }
 }
+
