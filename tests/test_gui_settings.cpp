@@ -1,5 +1,6 @@
 #include "test_common.hpp"
 #include <stuttometer/gui_config.hpp>
+#include <stuttometer/trigger_engine.hpp>
 #include <stuttometer/constants.hpp>
 #include <nlohmann/json.hpp>
 #include <iostream>
@@ -546,6 +547,17 @@ static void test_detection_presets_roundtrip() {
             STUTTO_ASSERT(std::abs(out_cfg.judder_swing_ratio - 0.50) < 1e-6);
         }
     }
+
+    // Explicitly verify CONSERVATIVE preset missed vblank floor settings on TriggerConfig.
+    // Hard-coded literals (3) lock the preset contract against silent regression.
+    {
+        TriggerConfig trig{};
+        GuiConfig gui{};
+        apply_detection_preset(DetectionPreset::CONSERVATIVE, trig, gui);
+        STUTTO_ASSERT(trig.dwm_min_missed_vblanks == 3);
+        STUTTO_ASSERT(trig.kernel_frame_stall_min_missed_vblanks == 3);
+    }
+
     std::cout << "  -> PASSED\n";
 }
 

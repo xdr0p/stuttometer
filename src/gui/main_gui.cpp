@@ -42,6 +42,41 @@ static RECT get_telemetry_badge_rect(int client_width) {
     return { badge_x, act_y, badge_x + badge_w, act_y + act_h };
 }
 
+static std::wstring get_trigger_mode_text() {
+    if (g_settings_config.frame_trigger_mode == FrameTriggerMode::HYBRID) {
+        return L"Trigger Mode: Hybrid (Auto Pacing & Judder)";
+    } else if (g_settings_config.frame_trigger_mode == FrameTriggerMode::DYNAMIC_ONLY) {
+        return L"Trigger Mode: Dynamic Only (Relative & Judder)";
+    } else {
+        int fps_val = static_cast<int>(std::round((g_settings_config.present_threshold_ms > 0.0) ? (1000.0 / g_settings_config.present_threshold_ms) : 60.0));
+        return L"Trigger Mode: Static (" + std::to_wstring(fps_val) + L" FPS Floor)";
+    }
+}
+
+static RECT get_trigger_mode_badge_rect(int client_width) {
+    const int card_y = scale_dpi(54);
+    const int card_h = scale_dpi(52);
+    const int badge_mode_h = scale_dpi(28);
+    const int badge_mode_y = card_y + (card_h - badge_mode_h) / 2;
+
+    std::wstring text = get_trigger_mode_text();
+    HDC hdc = g_hwnd_main ? GetDC(g_hwnd_main) : nullptr;
+    HFONT old_font = hdc ? static_cast<HFONT>(SelectObject(hdc, g_font_ui_bold)) : nullptr;
+    RECT calc_rc = { 0, 0, 0, 0 };
+    if (hdc) {
+        DrawTextW(hdc, text.c_str(), -1, &calc_rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(hdc, old_font);
+        ReleaseDC(g_hwnd_main, hdc);
+    } else {
+        calc_rc.right = scale_dpi(280);
+    }
+
+    int text_w = calc_rc.right - calc_rc.left;
+    int badge_w = text_w + scale_dpi(24);
+    int badge_x = client_width - scale_dpi(16) - scale_dpi(12) - badge_w;
+    return { badge_x, badge_mode_y, badge_x + badge_w, badge_mode_y + badge_mode_h };
+}
+
 // Forward declarations
 static void update_inspector(int selected_index);
 static void update_clear_button_state();
@@ -567,7 +602,7 @@ static void auto_fit_listview_columns(HWND hList, int list_width) {
     const int col_time_w   = scale_dpi(140);
     const int col_proc_w   = scale_dpi(145);
     const int col_trig_w   = scale_dpi(140);
-    const int col_dur_w    = scale_dpi(120);
+    const int col_dur_w    = scale_dpi(105);
     const int col_conf_w   = scale_dpi(90);
 
     int total_fixed = col_id_w + col_time_w + col_proc_w + col_trig_w + col_dur_w + col_conf_w;
@@ -620,6 +655,14 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     MoveWindow(g_h_lbl_target, col1_x, lbl_y, lbl_target_w, lbl_h, TRUE);
     MoveWindow(g_h_combo_process, col1_x + lbl_target_w + gap_lbl_box, ctrl_y + scale_dpi(2), combo_proc_w, scale_dpi(250), TRUE);
 
+    // Trigger Mode badge anchors the far right of the card
+    RECT rc_mode = get_trigger_mode_badge_rect(width);
+
+    // Severity Filter combobox (Positioned immediately to the left of the Trigger Mode badge)
+    const int combo_filter_w = scale_dpi(165);
+    const int combo_filter_x = rc_mode.left - scale_dpi(10) - combo_filter_w;
+    MoveWindow(g_h_combo_sev_filter, combo_filter_x, ctrl_y + scale_dpi(2), combo_filter_w, scale_dpi(150), TRUE);
+
     // 2. Action Toolbar (Y: 116, Height: 32)
     int act_y = scale_dpi(116);
     int act_h = scale_dpi(32);
@@ -632,11 +675,6 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     MoveWindow(g_h_btn_stop, bx, act_y, btn_w, act_h, TRUE);
     bx += btn_w + btn_gap;
     MoveWindow(g_h_btn_clear, bx, act_y, scale_dpi(75), act_h, TRUE);
-    bx += scale_dpi(75) + scale_dpi(20);
-
-    MoveWindow(g_h_lbl_sev_filter, bx, act_y, scale_dpi(48), act_h, TRUE);
-    bx += scale_dpi(48) + scale_dpi(4);
-    MoveWindow(g_h_combo_sev_filter, bx, act_y + scale_dpi(3), scale_dpi(175), scale_dpi(150), TRUE);
 
     // 3. Stutter Events Table (ListView) and Diagnostic Inspector Card
     int content_top = act_y + act_h + scale_dpi(10);
@@ -775,18 +813,14 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SetPropW(g_h_btn_clear, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
             EnableWindow(g_h_btn_clear, FALSE);
 
-            // Severity Filter Controls
-            g_h_lbl_sev_filter = CreateWindowExW(0, L"STATIC", L"Filter:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
-            SendMessageW(g_h_lbl_sev_filter, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(g_h_lbl_sev_filter);
-
-            g_h_combo_sev_filter = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, scale_dpi(175), scale_dpi(150), hwnd, (HMENU)(INT_PTR)IDC_COMBO_SEVERITY_FILTER, NULL, NULL);
+            // Severity Filter Combobox (Positioned on Configuration Card)
+            g_h_combo_sev_filter = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, scale_dpi(165), scale_dpi(150), hwnd, (HMENU)(INT_PTR)IDC_COMBO_SEVERITY_FILTER, NULL, NULL);
             SendMessageW(g_h_combo_sev_filter, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             SendMessageW(g_h_combo_sev_filter, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
             SendMessageW(g_h_combo_sev_filter, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
-            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"All Severities");
-            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"Warning+ (Noticeable)");
-            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"Danger Only (Severe)");
+            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"All Events");
+            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"Noticeable & Severe");
+            SendMessageW(g_h_combo_sev_filter, CB_ADDSTRING, 0, (LPARAM)L"Severe Only");
             int sev_idx = 1;
             if (g_settings_config.list_severity_filter == ReportSeverity::ALL) sev_idx = 0;
             else if (g_settings_config.list_severity_filter == ReportSeverity::DANGER) sev_idx = 2;
@@ -855,9 +889,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 { LVCFMT_LEFT,   scale_dpi(140), L"Time (UTC)" },
                 { LVCFMT_LEFT,   scale_dpi(145), L"Target Process" },
                 { LVCFMT_LEFT,   scale_dpi(140), L"Trigger Reason" },
-                { LVCFMT_RIGHT,  scale_dpi(120), L"Duration" },
+                { LVCFMT_LEFT,   scale_dpi(105), L"Duration" },
                 { LVCFMT_LEFT,   scale_dpi(280), L"Primary Culprit / Hypothesis" },
-                { LVCFMT_RIGHT,  scale_dpi(90),  L"Confidence" }
+                { LVCFMT_LEFT,   scale_dpi(90),  L"Confidence" }
             };
 
             for (size_t i = 0; i < std::size(cols); ++i) {
@@ -1008,16 +1042,13 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 SelectObject(mem_dc, g_theme.pen_card_border);
                 RoundRect(mem_dc, cfg_card_rc.left, cfg_card_rc.top, cfg_card_rc.right, cfg_card_rc.bottom, scale_dpi(12), scale_dpi(12));
 
-                // Right-aligned Trigger Mode badge pill inside Configuration Card
-                std::wstring mode_status_text;
-                if (g_settings_config.frame_trigger_mode == FrameTriggerMode::HYBRID) {
-                    mode_status_text = L"Trigger Mode: Hybrid (Auto Pacing & Judder)";
-                } else if (g_settings_config.frame_trigger_mode == FrameTriggerMode::DYNAMIC_ONLY) {
-                    mode_status_text = L"Trigger Mode: Dynamic Only (Relative & Judder)";
-                } else {
-                    int fps_val = static_cast<int>(std::round((g_settings_config.present_threshold_ms > 0.0) ? (1000.0 / g_settings_config.present_threshold_ms) : 60.0));
-                    mode_status_text = L"Trigger Mode: Static (" + std::to_wstring(fps_val) + L" FPS Floor)";
-                }
+                // Right-aligned Trigger Mode badge pill inside Configuration Card (Anchored on the right edge)
+                RECT badge_mode_rc = get_trigger_mode_badge_rect(width);
+                std::wstring mode_status_text = get_trigger_mode_text();
+
+                SelectObject(mem_dc, g_theme.br_badge);
+                SelectObject(mem_dc, g_theme.pen_badge_border);
+                RoundRect(mem_dc, badge_mode_rc.left, badge_mode_rc.top, badge_mode_rc.right, badge_mode_rc.bottom, scale_dpi(8), scale_dpi(8));
 
                 SetBkMode(mem_dc, TRANSPARENT);
                 SelectObject(mem_dc, g_font_ui_bold);
@@ -1026,17 +1057,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 RECT calc_mode_rc = { 0, 0, 0, 0 };
                 DrawTextW(mem_dc, mode_status_text.c_str(), -1, &calc_mode_rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
                 int mode_text_w = calc_mode_rc.right - calc_mode_rc.left;
-                int badge_mode_w = mode_text_w + scale_dpi(24);
-                int badge_mode_h = scale_dpi(28);
-                int badge_mode_y = card_y + (card_h - badge_mode_h) / 2;
-                int badge_mode_x = cfg_card_rc.right - scale_dpi(12) - badge_mode_w;
-                RECT badge_mode_rc = { badge_mode_x, badge_mode_y, badge_mode_x + badge_mode_w, badge_mode_y + badge_mode_h };
-
-                SelectObject(mem_dc, g_theme.br_badge);
-                SelectObject(mem_dc, g_theme.pen_badge_border);
-                RoundRect(mem_dc, badge_mode_rc.left, badge_mode_rc.top, badge_mode_rc.right, badge_mode_rc.bottom, scale_dpi(8), scale_dpi(8));
-
-                int mode_start_x = badge_mode_rc.left + (badge_mode_w - mode_text_w) / 2;
+                int mode_start_x = badge_mode_rc.left + ((badge_mode_rc.right - badge_mode_rc.left) - mode_text_w) / 2;
                 RECT text_mode_rc = { mode_start_x, badge_mode_rc.top, mode_start_x + mode_text_w, badge_mode_rc.bottom };
                 DrawTextW(mem_dc, mode_status_text.c_str(), -1, &text_mode_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
@@ -1469,13 +1490,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             }
             if (hCtl == g_h_lbl_target) {
                 SetBkColor(hdcStatic, COLOR_CARD_BG);
-                SetTextColor(hdcStatic, COLOR_TEXT_PRI);
+                SetTextColor(hdcStatic, COLOR_TEXT_LABEL);
                 return (LRESULT)g_theme.br_card;
-            }
-            if (hCtl == g_h_lbl_sev_filter) {
-                SetBkColor(hdcStatic, COLOR_BG);
-                SetTextColor(hdcStatic, COLOR_TEXT_PRI);
-                return (LRESULT)g_theme.br_bg;
             }
             SetBkColor(hdcStatic, COLOR_BG);
             SetTextColor(hdcStatic, COLOR_TEXT_PRI);
@@ -1561,6 +1577,14 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         }
     }
     return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+}
+
+void relayout_main_window() {
+    if (g_hwnd_main && IsWindow(g_hwnd_main)) {
+        RECT rc;
+        GetClientRect(g_hwnd_main, &rc);
+        layout_controls(g_hwnd_main, rc.right - rc.left, rc.bottom - rc.top);
+    }
 }
 
 } // namespace stuttometer::gui

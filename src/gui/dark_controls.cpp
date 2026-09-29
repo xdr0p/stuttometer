@@ -22,18 +22,25 @@ void apply_edit_centered_padding(HWND hwnd, HFONT hFont) {
     int font_h = scale_dpi(14);
     if (hFont) {
         HDC hdc = GetDC(hwnd);
-        HFONT old = reinterpret_cast<HFONT>(SelectObject(hdc, hFont));
-        TEXTMETRICW tm{};
-        if (GetTextMetricsW(hdc, &tm)) {
-            font_h = tm.tmHeight + tm.tmExternalLeading;
+        if (hdc) {
+            HFONT old = reinterpret_cast<HFONT>(SelectObject(hdc, hFont));
+            TEXTMETRICW tm{};
+            if (GetTextMetricsW(hdc, &tm)) {
+                font_h = tm.tmHeight + tm.tmExternalLeading;
+            }
+            SelectObject(hdc, old);
+            ReleaseDC(hwnd, hdc);
         }
-        SelectObject(hdc, old);
-        ReleaseDC(hwnd, hdc);
     }
 
-    const int top_pad = (box_h > font_h) ? ((box_h - font_h) / 2) : scale_dpi(2);
-    RECT rc = { scale_dpi(2), top_pad, rc_client.right - scale_dpi(2), rc_client.bottom };
-    SendMessageW(hwnd, EM_SETRECTNP, 0, reinterpret_cast<LPARAM>(&rc));
+    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    if (style & ES_MULTILINE) {
+        const int top_pad = (box_h > font_h) ? ((box_h - font_h) / 2) : scale_dpi(2);
+        RECT rc = { scale_dpi(2), top_pad, rc_client.right - scale_dpi(2), rc_client.bottom };
+        SendMessageW(hwnd, EM_SETRECTNP, 0, reinterpret_cast<LPARAM>(&rc));
+    } else {
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
 }
 
 LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
@@ -41,6 +48,81 @@ LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, EditCenteredSubclassProc, uIdSubclass);
             break;
+
+        case WM_NCCALCSIZE: {
+            LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+            if (!(style & ES_MULTILINE) && wParam) {
+                auto* p = reinterpret_cast<LPNCCALCSIZE_PARAMS>(lParam);
+                int h = p->rgrc[0].bottom - p->rgrc[0].top;
+                if (h > 0) {
+                    HFONT hFont = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+                    int font_h = scale_dpi(14);
+                    if (hFont) {
+                        HDC hdc = GetDC(hwnd);
+                        if (hdc) {
+                            HFONT old = reinterpret_cast<HFONT>(SelectObject(hdc, hFont));
+                            TEXTMETRICW tm{};
+                            if (GetTextMetricsW(hdc, &tm)) {
+                                font_h = tm.tmHeight + tm.tmExternalLeading;
+                            }
+                            SelectObject(hdc, old);
+                            ReleaseDC(hwnd, hdc);
+                        }
+                    }
+                    int top_pad = (h > font_h) ? ((h - font_h) / 2) : 0;
+                    const int horz_pad = scale_dpi(4);
+                    p->rgrc[0].left += horz_pad;
+                    p->rgrc[0].right -= horz_pad;
+                    p->rgrc[0].top += top_pad;
+                    p->rgrc[0].bottom = (std::max<LONG>)(p->rgrc[0].top + font_h, p->rgrc[0].bottom - (h - font_h - top_pad));
+                }
+                return 0;
+            }
+            break;
+        }
+
+        case WM_NCPAINT: {
+            LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+            if (!(style & ES_MULTILINE)) {
+                HDC hdc = GetWindowDC(hwnd);
+                if (hdc) {
+                    RECT rc_win;
+                    GetWindowRect(hwnd, &rc_win);
+                    RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
+
+                    POINT pt_client = { 0, 0 };
+                    ClientToScreen(hwnd, &pt_client);
+                    RECT rc_client;
+                    GetClientRect(hwnd, &rc_client);
+                    int cl_left = pt_client.x - rc_win.left;
+                    int cl_top = pt_client.y - rc_win.top;
+                    int cl_right = cl_left + (rc_client.right - rc_client.left);
+                    int cl_bottom = cl_top + (rc_client.bottom - rc_client.top);
+
+                    ExcludeClipRect(hdc, cl_left, cl_top, cl_right, cl_bottom);
+                    FillRect(hdc, &rc, g_theme.br_input);
+                    SelectClipRgn(hdc, NULL);
+
+                    HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
+                    HGDIOBJ old_pen = SelectObject(hdc, pen);
+                    HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
+                    SelectObject(hdc, old_br);
+                    SelectObject(hdc, old_pen);
+                    ReleaseDC(hwnd, hdc);
+                }
+                return 0;
+            }
+            break;
+        }
+
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, g_theme.br_input);
+            return 1;
+        }
 
         case WM_SETFONT:
         case WM_SIZE: {
@@ -65,10 +147,11 @@ LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 
         case WM_PAINT: {
             LRESULT res = DefSubclassProc(hwnd, uMsg, wParam, lParam);
-            HDC hdc = GetDC(hwnd);
+            HDC hdc = GetWindowDC(hwnd);
             if (hdc) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
+                RECT rc_win;
+                GetWindowRect(hwnd, &rc_win);
+                RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
                 HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
                 HGDIOBJ old_pen = SelectObject(hdc, pen);
                 HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));

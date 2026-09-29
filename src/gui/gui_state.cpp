@@ -22,7 +22,6 @@ int g_selected_stutter_index = -1;
 
 HWND g_h_lbl_target = nullptr;
 HWND g_h_combo_process = nullptr;
-HWND g_h_lbl_sev_filter = nullptr;
 HWND g_h_combo_sev_filter = nullptr;
 
 HWND g_h_btn_start = nullptr;
@@ -234,7 +233,6 @@ void apply_fonts_to_main_controls() {
         SendMessageW(g_h_combo_process, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
         SendMessageW(g_h_combo_process, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
     }
-    if (g_h_lbl_sev_filter) SendMessageW(g_h_lbl_sev_filter, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_combo_sev_filter) {
         SendMessageW(g_h_combo_sev_filter, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
         SendMessageW(g_h_combo_sev_filter, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));

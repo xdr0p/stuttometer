@@ -711,7 +711,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                     case PacingProfile::AUTO_ADAPTIVE: profile_name = L"Auto-Adaptive"; break;
                     case PacingProfile::HIGH_REFRESH:  profile_name = L"High-Refresh / Low-Latency"; break;
                     case PacingProfile::CONSERVATIVE:  profile_name = L"Standard Presentation (Console Parity)"; break;
-                    case PacingProfile::CUSTOM:        profile_name = L"Custom Calibration"; break;
+                    case PacingProfile::CUSTOM:        profile_name = L"Custom"; break;
                     default:                           profile_name = L"Auto-Adaptive"; break;
                 }
 

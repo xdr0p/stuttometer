@@ -70,7 +70,7 @@ HWND create_numeric_edit(HWND parent, const NumericEditDef& def,
     }
     return create_control(parent, {
         def.id, L"EDIT", buf,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL,
         font, EditCenteredSubclassProc, nullptr, nullptr, 0
     });
 }

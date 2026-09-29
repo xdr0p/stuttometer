@@ -47,7 +47,6 @@ public:
         // Fast-path drop if we've been lapped before we even started.
         const uint64_t cur_w = write_pos_.load(std::memory_order_acquire);
         if (cur_w > w && (cur_w - w) >= CAPACITY) {
-            dropped_filtered_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
 
@@ -62,13 +61,11 @@ public:
             if (seq_val >= writing_seq) {
                 // A later-generation writer already owns this cell.
                 // Our event is stale; drop it rather than clobber the newer one.
-                dropped_filtered_.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
             if ((seq_val % 2) != 0) {
                 // Previous writer still in-flight on this cell.
                 if (++spins > MAX_SPINS) {
-                    dropped_filtered_.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
                 cpu_pause();

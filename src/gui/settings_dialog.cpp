@@ -184,13 +184,84 @@ static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM 
             return 0;
         }
 
+        case WM_NCCALCSIZE: {
+            if (wParam) {
+                auto* p = reinterpret_cast<LPNCCALCSIZE_PARAMS>(lParam);
+                int h = p->rgrc[0].bottom - p->rgrc[0].top;
+                if (h > 0) {
+                    HFONT hFont = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+                    int font_h = scale_dpi(14);
+                    if (hFont) {
+                        HDC hdc = GetDC(hwnd);
+                        if (hdc) {
+                            HFONT old = reinterpret_cast<HFONT>(SelectObject(hdc, hFont));
+                            TEXTMETRICW tm{};
+                            if (GetTextMetricsW(hdc, &tm)) {
+                                font_h = tm.tmHeight + tm.tmExternalLeading;
+                            }
+                            SelectObject(hdc, old);
+                            ReleaseDC(hwnd, hdc);
+                        }
+                    }
+                    int top_pad = (h > font_h) ? ((h - font_h) / 2) : 0;
+                    const int horz_pad = scale_dpi(4);
+                    p->rgrc[0].left += horz_pad;
+                    p->rgrc[0].right -= horz_pad;
+                    p->rgrc[0].top += top_pad;
+                    p->rgrc[0].bottom = (std::max<LONG>)(p->rgrc[0].top + font_h, p->rgrc[0].bottom - (h - font_h - top_pad));
+                }
+                return 0;
+            }
+            break;
+        }
+
+        case WM_NCPAINT: {
+            HDC hdc = GetWindowDC(hwnd);
+            if (hdc) {
+                RECT rc_win;
+                GetWindowRect(hwnd, &rc_win);
+                RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
+
+                POINT pt_client = { 0, 0 };
+                ClientToScreen(hwnd, &pt_client);
+                RECT rc_client;
+                GetClientRect(hwnd, &rc_client);
+                int cl_left = pt_client.x - rc_win.left;
+                int cl_top = pt_client.y - rc_win.top;
+                int cl_right = cl_left + (rc_client.right - rc_client.left);
+                int cl_bottom = cl_top + (rc_client.bottom - rc_client.top);
+
+                ExcludeClipRect(hdc, cl_left, cl_top, cl_right, cl_bottom);
+                FillRect(hdc, &rc, g_theme.br_input);
+                SelectClipRgn(hdc, NULL);
+
+                HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
+                HGDIOBJ old_pen = SelectObject(hdc, pen);
+                HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
+                SelectObject(hdc, old_br);
+                SelectObject(hdc, old_pen);
+                ReleaseDC(hwnd, hdc);
+            }
+            return 0;
+        }
+
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, g_theme.br_input);
+            return 1;
+        }
+
         case WM_PAINT: {
             LRESULT res = DefSubclassProc(hwnd, uMsg, wParam, lParam);
             HideCaret(hwnd);
-            HDC hdc = GetDC(hwnd);
+            HDC hdc = GetWindowDC(hwnd);
             if (hdc) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
+                RECT rc_win;
+                GetWindowRect(hwnd, &rc_win);
+                RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
                 HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
                 HGDIOBJ old_pen = SelectObject(hdc, pen);
                 HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
@@ -340,7 +411,7 @@ static void update_settings_dependencies(SettingsDialogState* state) {
         }
     } else {
         if (state->advanced_unlocked) {
-            SetWindowTextW(state->h_lbl_profile_hint, L"Preset locked \u2014 select Custom Calibration to edit");
+            SetWindowTextW(state->h_lbl_profile_hint, L"Preset locked \u2014 select Custom to edit");
         } else {
             SetWindowTextW(state->h_lbl_profile_hint, L"");
         }
@@ -506,7 +577,7 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
 
     int p4_y = c2_y + scale_y(132);
     int sm_edit_x = c2_x + scale_dpi(134);
-    int th_pacing_w = scale_dpi(44);
+    int th_pacing_w = scale_dpi(48);
     MoveWindow(state->h_edit_spike_mult, sm_edit_x, p4_y + scale_dpi(1), th_pacing_w, ctrl_h, TRUE);
 
     int md_edit_x = c2_x + scale_dpi(354);
@@ -604,7 +675,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             // Preferences Controls
             std::wstring hk_str = format_hotkey_display(state->hotkey_mods, state->hotkey_vk);
-            state->h_hotkey_edit = CreateWindowExW(0, L"EDIT", hk_str.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER | ES_READONLY, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_HOTKEY_EDIT, NULL, NULL);
+            state->h_hotkey_edit = CreateWindowExW(0, L"EDIT", hk_str.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_READONLY, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_HOTKEY_EDIT, NULL, NULL);
             SendMessageW(state->h_hotkey_edit, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(state->h_hotkey_edit);
             SetWindowSubclass(state->h_hotkey_edit, SettingsHotkeySubclassProc, IDC_SET_HOTKEY_EDIT, reinterpret_cast<DWORD_PTR>(state));
@@ -711,7 +782,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Competitive (High Refresh / Esports)");
             SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Conservative (High Floor / Minimal Alerts)");
             SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Forensic (Full Micro-Stutter Analysis)");
-            SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Custom Calibration");
+            SendMessageW(state->h_combo_preset, CB_ADDSTRING, 0, (LPARAM)L"Custom");
 
             state->current_preset = g_settings_config.detection_preset;
             int preset_idx = static_cast<int>(state->current_preset);
@@ -739,7 +810,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"Auto-Adaptive (Dynamic Baseline)");
             SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"High-Refresh / Low-Latency (1.4x / 1.5ms)");
             SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"Standard Presentation (Console Parity: 2.0x / 4.0ms)");
-            SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"Custom Calibration");
+            SendMessageW(state->h_combo_pacing_profile, CB_ADDSTRING, 0, (LPARAM)L"Custom");
 
             state->current_profile = g_settings_config.pacing_profile;
             state->previous_preset = (g_settings_config.pacing_profile == PacingProfile::CUSTOM)
@@ -772,7 +843,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     swprintf_s(num_buf, L"%.2f", fps);
                 }
             }
-            state->h_edit_target_fps = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_TARGET_FPS, NULL, NULL);
+            state->h_edit_target_fps = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_TARGET_FPS, NULL, NULL);
             SetWindowSubclass(state->h_edit_target_fps, EditCenteredSubclassProc, IDC_SET_EDIT_TARGET_FPS, 0);
             SendMessageW(state->h_edit_target_fps, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(state->h_edit_target_fps);
@@ -786,7 +857,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             } else {
                 swprintf_s(num_buf, L"%.1f", state->custom_spike_mult);
             }
-            state->h_edit_spike_mult = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_SPIKE_MULT, NULL, NULL);
+            state->h_edit_spike_mult = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_SPIKE_MULT, NULL, NULL);
             SetWindowSubclass(state->h_edit_spike_mult, EditCenteredSubclassProc, IDC_SET_EDIT_SPIKE_MULT, 0);
             SendMessageW(state->h_edit_spike_mult, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(state->h_edit_spike_mult);
@@ -800,7 +871,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             } else {
                 swprintf_s(num_buf, L"%.1f", state->custom_min_delta);
             }
-            state->h_edit_min_delta = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_CENTER, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_MIN_DELTA, NULL, NULL);
+            state->h_edit_min_delta = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_MIN_DELTA, NULL, NULL);
             SetWindowSubclass(state->h_edit_min_delta, EditCenteredSubclassProc, IDC_SET_EDIT_MIN_DELTA, 0);
             SendMessageW(state->h_edit_min_delta, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(state->h_edit_min_delta);
@@ -1050,7 +1121,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             DrawTextW(mem_dc, L"Target FPS Floor:", -1, &rc_lbl_fps, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SelectObject(mem_dc, g_font_ui);
-            SetTextColor(mem_dc, COLOR_TEXT_MUTED);
             RECT rc_lbl_fps_unit = { c2_x + scale_dpi(190), p3_y, c2_x + c2_w - scale_dpi(14), p3_y + ctrl_h };
 
             wchar_t fps_cur_buf[64]{};
@@ -1066,25 +1136,18 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             bool is_auto = (w_fps_cur.empty() || _wcsicmp(w_fps_cur.c_str(), L"Auto") == 0);
             if (is_auto) {
+                SetTextColor(mem_dc, COLOR_TEXT_MUTED);
                 wchar_t hint_str[128]{};
                 int hz = (state->detected_display.refresh_rate_hz > 0.0 && !std::isnan(state->detected_display.refresh_rate_hz))
                     ? static_cast<int>(std::round(state->detected_display.refresh_rate_hz))
                     : 60;
-                double vblank = (state->detected_display.vblank_interval_ms > 0.0 && !std::isnan(state->detected_display.vblank_interval_ms))
-                    ? state->detected_display.vblank_interval_ms
-                    : (1000.0 / hz);
                 if (state->target_pid != 0) {
-                    swprintf_s(hint_str, L"Auto (Target game display: %d Hz / %.2f ms)", hz, vblank);
+                    swprintf_s(hint_str, L"Auto (Target display: %d Hz)", hz);
                 } else {
-                    swprintf_s(hint_str, L"Auto (Primary display: %d Hz; adapts to game monitor on capture)", hz);
+                    swprintf_s(hint_str, L"Auto (Primary display: %d Hz)", hz);
                 }
                 DrawTextW(mem_dc, hint_str, -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
             } else {
-                DrawTextW(mem_dc, L"10 \u2013 500 FPS (Manual floor)", -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-            }
-
-            // Amber warning notice under h_edit_target_fps if target FPS > 83
-            if (!is_auto) {
                 std::wstring w_fps_chk = w_fps_cur;
                 std::replace(w_fps_chk.begin(), w_fps_chk.end(), L',', L'.');
                 wchar_t* end_chk = nullptr;
@@ -1092,18 +1155,19 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 double target_fps_val = _wcstod_l(w_fps_chk.c_str(), &end_chk, c_locale);
                 _free_locale(c_locale);
                 if (target_fps_val > 83.0) {
-                    SelectObject(mem_dc, g_font_ui);
                     SetTextColor(mem_dc, COLOR_ACCENT_AMB);
-                    RECT rc_amber = { c2_x + scale_dpi(14), c2_y + scale_y(112), c2_x + c2_w - scale_dpi(14), c2_y + scale_y(128) };
-                    DrawTextW(mem_dc, L"High target FPS \u2014 ordinary frame variance above 83 FPS may trigger stutter events.", -1, &rc_amber, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                    DrawTextW(mem_dc, L"10 \u2013 500 FPS (High floor: high sensitivity)", -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                } else {
+                    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+                    DrawTextW(mem_dc, L"10 \u2013 500 FPS (Manual floor)", -1, &rc_lbl_fps_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
                 }
             }
 
             int p4_y = c2_y + scale_y(132);
             int sm_edit_x = c2_x + scale_dpi(134);
-            int sm_edit_w = scale_dpi(44);
+            int sm_edit_w = scale_dpi(48);
             int md_edit_x = c2_x + scale_dpi(354);
-            int md_edit_w = scale_dpi(44);
+            int md_edit_w = scale_dpi(48);
 
             COLORREF spike_lbl_col = (state->advanced_unlocked && state->current_profile == PacingProfile::CUSTOM && mode_paint != FrameTriggerMode::STATIC_ONLY) ? COLOR_TEXT_LABEL : COLOR_TEXT_MUTED;
             SelectObject(mem_dc, g_font_ui_bold);
@@ -1251,6 +1315,15 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 SetTextColor(hdcStatic, COLOR_ACCENT_AMB);
                 return (LRESULT)g_theme.br_card;
             }
+
+            wchar_t cls_name[32]{};
+            GetClassNameW(hCtl, cls_name, 32);
+            if (_wcsicmp(cls_name, L"EDIT") == 0) {
+                SetBkColor(hdcStatic, COLOR_INPUT_BG);
+                SetTextColor(hdcStatic, COLOR_TEXT_MUTED);
+                return (LRESULT)g_theme.br_input;
+            }
+
             SetBkColor(hdcStatic, COLOR_CARD_BG);
             SetTextColor(hdcStatic, COLOR_TEXT_PRI);
             return (LRESULT)g_theme.br_card;
@@ -1343,6 +1416,14 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                         SetWindowTextW(state->h_edit_spike_mult, L"3.0");
                         SetWindowTextW(state->h_edit_min_delta, L"8.0");
                     }
+                } else {
+                    state->current_profile = PacingProfile::CUSTOM;
+                    SendMessageW(state->h_combo_pacing_profile, CB_SETCURSEL, 3, 0);
+                    wchar_t sm_buf[32], md_buf[32];
+                    swprintf_s(sm_buf, L"%.1f", state->custom_spike_mult);
+                    swprintf_s(md_buf, L"%.1f", state->custom_min_delta);
+                    SetWindowTextW(state->h_edit_spike_mult, sm_buf);
+                    SetWindowTextW(state->h_edit_min_delta, md_buf);
                 }
                 update_settings_dependencies(state);
                 InvalidateRect(hwnd, NULL, TRUE);
@@ -1367,7 +1448,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     SendMessageW(state->h_combo_preset, CB_SETCURSEL, 4, 0);
                     if (!state->advanced_unlocked) {
                         int res = MessageBoxW(hwnd,
-                            L"Custom Calibration allows modifying frame pacing multipliers and minimum spike deltas, which directly affect stutter detection sensitivity.\n\nAre you sure you want to unlock advanced settings?",
+                            L"Custom profile allows modifying frame pacing multipliers and minimum spike deltas, which directly affect stutter detection sensitivity.\n\nAre you sure you want to unlock advanced settings?",
                             L"Advanced Settings Safeguard",
                             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
                         if (res == IDYES) {
@@ -1400,7 +1481,15 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                         SetWindowTextW(state->h_edit_min_delta, md_buf);
                     }
                 } else {
-                    // Preset selected
+                    // Non-custom profile selected: check if it diverges from current preset
+                    TriggerConfig exp_tc;
+                    GuiConfig exp_gc;
+                    apply_detection_preset(state->current_preset, exp_tc, exp_gc);
+                    if (state->current_preset != DetectionPreset::CUSTOM && exp_gc.pacing_profile != new_profile) {
+                        state->current_preset = DetectionPreset::CUSTOM;
+                        SendMessageW(state->h_combo_preset, CB_SETCURSEL, 4, 0);
+                    }
+
                     if (state->current_profile == PacingProfile::CUSTOM) {
                         wchar_t cbuf[64]{};
                         GetWindowTextW(state->h_edit_spike_mult, cbuf, 64);
@@ -1686,6 +1775,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                         MessageBoxW(hwnd, (L"Warning: The shortcut " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is currently in use by another application. Shortcut toggle capture will not be active until a different key is selected.").c_str(), L"Hotkey Conflict", MB_OK | MB_ICONWARNING);
                     }
                     update_metrics_text();
+                    relayout_main_window();
                     if (g_h_list_stutters) InvalidateRect(g_h_list_stutters, NULL, TRUE);
                     InvalidateRect(g_hwnd_main, NULL, TRUE);
                 }

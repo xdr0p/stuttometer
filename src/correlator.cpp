@@ -1,5 +1,6 @@
 #include "stuttometer/correlator.hpp"
 #include "stuttometer/internal/severity_scales.hpp"
+#include "stuttometer/internal/judder_thresholds.hpp"
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -154,15 +155,16 @@ MetricSeverity classify_severity(const TriggerInfo& trigger, double present_thre
     }
 
     if (trigger.reason == TriggerReason::CADENCE_JUDDER || trigger.source == TriggerSource::FRAME_PACING_JUDDER) {
+        using namespace judder_thresholds;
         const uint16_t clamped_swing = std::min<uint16_t>(trigger.judder_max_swing_q100, 1000);
-        const bool high_alt   = trigger.judder_alternations >= 30;
-        const bool long_dur   = trigger.duration_ms >= 500.0;
-        const bool high_swing = (clamped_swing >= 60) && (trigger.judder_alternations >= 5);
+        const bool high_alt   = trigger.judder_alternations >= JUDDER_DANGER_MIN_ALT;
+        const bool long_dur   = trigger.duration_ms >= JUDDER_DANGER_MIN_DUR_MS;
+        const bool high_swing = (clamped_swing >= JUDDER_DANGER_MIN_SWING) && (trigger.judder_alternations >= JUDDER_DANGER_SWING_MIN_ALT);
         if (high_alt || long_dur || high_swing) return MetricSeverity::DANGER;
 
-        const bool mid_alt   = trigger.judder_alternations >= 10;
-        const bool mid_dur   = trigger.duration_ms >= 150.0;
-        const bool mid_swing = (clamped_swing >= 40) && (trigger.judder_alternations >= 3);
+        const bool mid_alt   = trigger.judder_alternations >= JUDDER_WARNING_MIN_ALT;
+        const bool mid_dur   = trigger.duration_ms >= JUDDER_WARNING_MIN_DUR_MS;
+        const bool mid_swing = (clamped_swing >= JUDDER_WARNING_MIN_SWING) && (trigger.judder_alternations >= JUDDER_WARNING_SWING_MIN_ALT);
         if (mid_alt || mid_dur || mid_swing) return MetricSeverity::WARNING;
         return MetricSeverity::NORMAL;
     }

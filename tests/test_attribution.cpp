@@ -462,43 +462,162 @@ static void test_classify_severity() {
     }
 
     // 6. Judder magnitude classification:
-    // Cadence judder with high magnitude (high_alt >= 30, long_dur >= 500, or high_swing >= 60 & alt >= 5) -> DANGER
+    // Test values use hard-coded numeric literals (not named constants) to strictly lock the threshold
+    // contract so future tuning changes force a deliberate, conscious test update.
+
+    // --- DANGER tier single-condition and boundary tests ---
+    // 6a. DANGER: only high_alt true (hard-coded literal: 30)
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.duration_ms = 550.0;
-        trig.baseline_avg_ms = 16.67;
-        trig.baseline_fps = 60.0;
-        trig.spike_ratio = 1.0;
-        trig.judder_alternations = 32;
-        trig.judder_max_swing_q100 = 65;
+        trig.judder_alternations = 30;
+        trig.duration_ms = 0.0;
+        trig.judder_max_swing_q100 = 0;
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
     }
-    // Cadence judder with mid magnitude (mid_alt >= 10, mid_dur >= 150, or mid_swing >= 40 & alt >= 3) -> WARNING
+    // 6b. Boundary just below DANGER high_alt: alternations = 29 -> drops to WARNING (hard-coded literal: 29)
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.duration_ms = 200.0;
-        trig.baseline_avg_ms = 16.67;
-        trig.baseline_fps = 60.0;
-        trig.spike_ratio = 1.0;
-        trig.judder_alternations = 12;
-        trig.judder_max_swing_q100 = 45;
+        trig.judder_alternations = 29;
+        trig.duration_ms = 0.0;
+        trig.judder_max_swing_q100 = 0;
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
     }
-    // Cadence judder with low magnitude (< mid thresholds) -> NORMAL
+    // 6c. DANGER: only long_dur true (hard-coded literal: 500.0)
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.duration_ms = 50.0;
-        trig.baseline_avg_ms = 16.67;
-        trig.baseline_fps = 60.0;
-        trig.spike_ratio = 1.0;
+        trig.judder_alternations = 0;
+        trig.duration_ms = 500.0;
+        trig.judder_max_swing_q100 = 0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
+    }
+    // 6d. Boundary just below DANGER long_dur: duration_ms = 499.9 -> drops to WARNING (hard-coded literal: 499.9)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_alternations = 0;
+        trig.duration_ms = 499.9;
+        trig.judder_max_swing_q100 = 0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+    }
+    // 6e. DANGER: only high_swing true (hard-coded literals: swing 60, alternations 5)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_max_swing_q100 = 60;
+        trig.judder_alternations = 5;
+        trig.duration_ms = 0.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
+    }
+    // 6f. Boundary just below DANGER high_swing: swing = 59, alternations = 5 -> drops to WARNING (hard-coded literal: 59)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_max_swing_q100 = 59;
+        trig.judder_alternations = 5;
+        trig.duration_ms = 0.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+    }
+    // 6g. Conjunction isolation for DANGER swing: swing >= 60 but alternations < 5 (alt = 4) -> drops to WARNING (hard-coded literals: 60, 4)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_max_swing_q100 = 60;
+        trig.judder_alternations = 4;
+        trig.duration_ms = 0.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+    }
+
+    // --- WARNING tier single-condition and boundary tests ---
+    // 6h. WARNING: only mid_alt true (hard-coded literal: 10)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_alternations = 10;
+        trig.duration_ms = 0.0;
+        trig.judder_max_swing_q100 = 0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+    }
+    // 6i. Boundary just below WARNING mid_alt: alternations = 9 -> drops to NORMAL (hard-coded literal: 9)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_alternations = 9;
+        trig.duration_ms = 0.0;
+        trig.judder_max_swing_q100 = 0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
+    }
+    // 6j. WARNING: only mid_dur true (hard-coded literal: 150.0)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_alternations = 0;
+        trig.duration_ms = 150.0;
+        trig.judder_max_swing_q100 = 0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+    }
+    // 6k. Boundary just below WARNING mid_dur: duration_ms = 149.9 -> drops to NORMAL (hard-coded literal: 149.9)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_alternations = 0;
+        trig.duration_ms = 149.9;
+        trig.judder_max_swing_q100 = 0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
+    }
+    // 6l. WARNING: only mid_swing true (hard-coded literals: swing 40, alternations 3)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_max_swing_q100 = 40;
+        trig.judder_alternations = 3;
+        trig.duration_ms = 0.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+    }
+    // 6m. Boundary just below WARNING mid_swing: swing = 39, alternations = 3 -> drops to NORMAL (hard-coded literal: 39)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_max_swing_q100 = 39;
+        trig.judder_alternations = 3;
+        trig.duration_ms = 0.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
+    }
+    // 6n. Conjunction isolation for WARNING swing: swing >= 40 but alternations < 3 (alt = 2) -> drops to NORMAL (hard-coded literals: 40, 2)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.judder_max_swing_q100 = 40;
         trig.judder_alternations = 2;
-        trig.judder_max_swing_q100 = 20;
+        trig.duration_ms = 0.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
+    }
+
+    // --- NORMAL tier tests ---
+    // 6o. NORMAL: all dimensions well below (hard-coded literals: 0, 0.0, 0)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.duration_ms = 0.0;
+        trig.judder_alternations = 0;
+        trig.judder_max_swing_q100 = 0;
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
     }
 

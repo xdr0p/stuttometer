@@ -8,6 +8,7 @@
 #include <optional>
 #include "privilege_utils.hpp"
 #include "constants.hpp"
+#include "stuttometer/internal/judder_thresholds.hpp"
 
 namespace stuttometer {
 
@@ -714,7 +715,7 @@ inline FramePacingResult evaluate_frame_pacing(
                         ? (stats.judder_episode_last_alt_qpc - stats.judder_episode_start_qpc) : 0;
                 const double ep_dur_ms = qpc_delta_to_ms(ep_dur_qpc, qpc_freq);
 
-                if (ep_dur_ms >= 5000.0) {
+                if (ep_dur_ms >= judder_thresholds::JUDDER_EPISODE_DURATION_CAP_MS) {
                     if (stats.judder_episode_alternations >= judder_min_alternations) {
                         res.is_stutter = true;
                         res.reason = TriggerReason::CADENCE_JUDDER;
@@ -751,8 +752,8 @@ inline FramePacingResult evaluate_frame_pacing(
                             ? (stats.judder_episode_last_alt_qpc - stats.judder_episode_start_qpc) : 0;
                     const double ep_dur_ms = qpc_delta_to_ms(ep_dur_qpc, qpc_freq);
 
-                    const bool close_by_gap = (gap_ms >= 500.0);
-                    const bool close_by_cap = (ep_dur_ms >= 5000.0);
+                    const bool close_by_gap = (gap_ms >= judder_thresholds::JUDDER_EPISODE_GAP_CLOSE_MS);
+                    const bool close_by_cap = (ep_dur_ms >= judder_thresholds::JUDDER_EPISODE_DURATION_CAP_MS);
 
                     if (close_by_gap || close_by_cap) {
                         if (stats.judder_episode_alternations >= judder_min_alternations) {
