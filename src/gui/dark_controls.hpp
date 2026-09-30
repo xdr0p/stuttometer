@@ -16,6 +16,9 @@ enum class BtnStyle : INT_PTR {
 // Common helper: Dynamically vertically centers text in multiline edit controls based on font metrics
 void apply_edit_centered_padding(HWND hwnd, HFONT hFont = nullptr);
 
+// Applies custom border color to a combo box's popup listbox window (DWM on Win11)
+void apply_combo_popup_border(HWND h_combo, COLORREF color);
+
 // Custom Draw Owner-Drawn Buttons with Complete State Matrix (Zero per-frame allocations)
 // Resolves parent container background solely via L"OnCard" window property.
 void draw_custom_button(LPDRAWITEMSTRUCT pdis);

@@ -604,12 +604,12 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             std::wstring avg_fps_str = (summary.frametimes.avg_fps > 0.0)
                 ? std::to_wstring(static_cast<int>(std::round(summary.frametimes.avg_fps))) + L" FPS"
                 : L"\u2014";
-            COLORREF avg_color = (summary.frametimes.avg_fps > 0.0) ? RGB(56, 189, 248) : RGB(148, 163, 184);
+            COLORREF avg_color = (summary.frametimes.avg_fps > 0.0) ? RGB(203, 213, 225) : RGB(148, 163, 184);
 
             std::wstring low_1_str = (summary.frametimes.low_1pct_fps > 0.0)
                 ? std::to_wstring(static_cast<int>(std::round(summary.frametimes.low_1pct_fps))) + L" FPS"
                 : L"\u2014";
-            COLORREF low_1_color = (summary.frametimes.low_1pct_fps > 0.0) ? RGB(16, 185, 129) : RGB(148, 163, 184);
+            COLORREF low_1_color = (summary.frametimes.low_1pct_fps > 0.0) ? RGB(203, 213, 225) : RGB(148, 163, 184);
 
             std::wstring low_01_str;
             COLORREF low_01_color;
@@ -623,7 +623,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 } else if (summary.frametimes.low_01pct_fps < 60.0) {
                     low_01_color = RGB(245, 158, 11);
                 } else {
-                    low_01_color = RGB(16, 185, 129);
+                    low_01_color = RGB(203, 213, 225);
                 }
             }
 
@@ -819,11 +819,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
             HBRUSH br_alt = CreateSolidBrush(COLOR_TABLE_ROW_ALT);
             HPEN   pen_dv = CreatePen(PS_SOLID, 1, RGB(40, 48, 66));
-            auto attr_stripe = [&](size_t r) -> HBRUSH {
-                return (r < summary.culprits.size())
-                    ? get_attribution_brush(attribution_tag_for_hypothesis(summary.culprits[r].hypothesis))
-                    : get_attribution_brush(AttributionTag::UNKNOWN);
-            };
+            std::function<HBRUSH(size_t)> attr_stripe; // empty = no stripes drawn
 
             draw_table(mem_dc, table_rc, dpi, columns, 5, rows,
                        state->font_small, state->font_regular,

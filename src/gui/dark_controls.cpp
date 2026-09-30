@@ -8,6 +8,22 @@
 
 namespace stuttometer::gui {
 
+void apply_combo_popup_border(HWND h_combo, COLORREF color) {
+    if (!h_combo) return;
+    COMBOBOXINFO cbi = { sizeof(COMBOBOXINFO) };
+    if (!GetComboBoxInfo(h_combo, &cbi)) return;
+    if (!cbi.hwndList || !IsWindow(cbi.hwndList)) return;
+
+    // Win11: DWMWA_BORDER_COLOR overrides the accent-colored popup border.
+    // On Win10 this returns E_INVALIDARG and is a harmless no-op.
+    DwmSetWindowAttribute(
+        cbi.hwndList,
+        DWMWA_BORDER_COLOR,
+        &color,
+        sizeof(color)
+    );
+}
+
 void apply_edit_centered_padding(HWND hwnd, HFONT hFont) {
     RECT rc_client;
     GetClientRect(hwnd, &rc_client);

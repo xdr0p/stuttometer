@@ -5,8 +5,8 @@
 .DESCRIPTION
     Generates high-resolution PNG assets with the unified 4-attribution palette:
     - GAME ENGINE: #daa142
-    - DWM COMPOSITION: #c55656
-    - EXTERNAL CONTENTION: #9a64cd
+    - DWM COMPOSITION: #9a64cd
+    - EXTERNAL CONTENTION: #c55656
     - UNKNOWN: #697382
     Along with refresh-rate-aware severity colors (#f1f5f9, #f59e0b, #ef4444).
 
@@ -40,7 +40,7 @@ function Render-OsdToast {
         [string]$CalloutHex = "#ef4444",
         [string]$DiagSummary = "nvlddmkm.sys: DPC routine execution spike (94% Conf)",
         [string]$AttrTag = "EXTERNAL CONTENTION",
-        [string]$AccentHex = "#9a64cd",
+        [string]$AccentHex = "#c55656",
         [string]$ConfText = "",
         [int]$Alpha = 235,
         [bool]$AddShadow = $true
@@ -95,9 +95,9 @@ function Render-OsdToast {
     $pen.Alignment = [System.Drawing.Drawing2D.PenAlignment]::Inset
     $g.DrawRectangle($pen, $toastX, $toastY, ($w - 1), ($h - 1))
 
-    # Left accent stripe (5px wide)
-    $accentColor = [System.Drawing.ColorTranslator]::FromHtml($AccentHex)
-    $stripeBrush = New-Object System.Drawing.SolidBrush($accentColor)
+    # Left accent stripe (5px wide - severity color matching callout)
+    $calloutColor = [System.Drawing.ColorTranslator]::FromHtml($CalloutHex)
+    $stripeBrush = New-Object System.Drawing.SolidBrush($calloutColor)
     $stripeW = [int](5 * $Scale)
     $g.FillRectangle($stripeBrush, $toastX, $toastY, $stripeW, $h)
 
@@ -106,11 +106,10 @@ function Render-OsdToast {
     $fontMain  = New-Object System.Drawing.Font("Segoe UI", (11 * $Scale), [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
     $fontSub   = New-Object System.Drawing.Font("Segoe UI", (10 * $Scale), [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
 
-    $textPriBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(241, 245, 249))
-    $textSecBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(148, 163, 184))
-    $calloutColor = [System.Drawing.ColorTranslator]::FromHtml($CalloutHex)
-    $calloutBrush = New-Object System.Drawing.SolidBrush($calloutColor)
-    $attrBrush    = New-Object System.Drawing.SolidBrush($accentColor)
+    $textPriBrush   = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(241, 245, 249))
+    $textLabelBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(203, 213, 225))
+    $textSecBrush   = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(148, 163, 184))
+    $calloutBrush   = New-Object System.Drawing.SolidBrush($calloutColor)
 
     $padLeft  = [int](16 * $Scale)
     $padRight = [int](14 * $Scale)
@@ -144,12 +143,12 @@ function Render-OsdToast {
     $rcDiag = New-Object System.Drawing.RectangleF(($toastX + $padLeft), $r2Y, ($w - $padLeft - $padRight), $r2H)
     $g.DrawString($DiagSummary, $fontMain, $textSecBrush, $rcDiag, $formatLeft)
 
-    # Row 3: Attribution Tag (Left) + Confidence (Right)
+    # Row 3: Attribution Tag (Left - neutral slate) + Confidence (Right)
     $r3Y = $toastY + [int](54 * $Scale)
     $r3H = [int](20 * $Scale)
     $confW = [int](80 * $Scale)
     $rcTag = New-Object System.Drawing.RectangleF(($toastX + $padLeft), $r3Y, ($w - $padLeft - $padRight - $confW), $r3H)
-    $g.DrawString($AttrTag, $fontSub, $attrBrush, $rcTag, $formatLeft)
+    $g.DrawString($AttrTag, $fontSub, $textLabelBrush, $rcTag, $formatLeft)
 
     if ($ConfText) {
         $rcConf = New-Object System.Drawing.RectangleF(($toastX + $w - $padRight - $confW), $r3Y, $confW, $r3H)
@@ -161,9 +160,9 @@ function Render-OsdToast {
     $fontMain.Dispose()
     $fontSub.Dispose()
     $textPriBrush.Dispose()
+    $textLabelBrush.Dispose()
     $textSecBrush.Dispose()
     $calloutBrush.Dispose()
-    $attrBrush.Dispose()
     $stripeBrush.Dispose()
     $bgBrush.Dispose()
     $pen.Dispose()
@@ -254,12 +253,12 @@ function Render-InGameContext {
 
 Write-Host "Rendering OSD Toast assets into $assetsPath..." -ForegroundColor Cyan
 
-# 1. Primary OSD Toast with Elevation Shadow (External Contention - Soft Purple #9a64cd, Danger #ef4444)
+# 1. Primary OSD Toast with Elevation Shadow (External Contention - Crimson Red #c55656, Danger #ef4444)
 Render-OsdToast -OutputPath "$assetsPath\osd_toast.png" -Scale 2.0 `
     -ProcessName "Cyberpunk2077.exe" `
     -Callout "68.4 ms STUTTER" -CalloutHex "#ef4444" `
     -DiagSummary "nvlddmkm.sys: DPC routine execution spike" `
-    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#9a64cd" `
+    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#c55656" `
     -ConfText "94% CONF" -AddShadow $true
 
 # 2. Frame-Bounded Clean PNG (No outer margin/shadow)
@@ -267,7 +266,7 @@ Render-OsdToast -OutputPath "$assetsPath\osd_toast_clean.png" -Scale 2.0 `
     -ProcessName "Cyberpunk2077.exe" `
     -Callout "68.4 ms STUTTER" -CalloutHex "#ef4444" `
     -DiagSummary "nvlddmkm.sys: DPC routine execution spike" `
-    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#9a64cd" `
+    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#c55656" `
     -ConfText "94% CONF" -AddShadow $false
 
 # 3. Game Engine Stall Snapshot (Game Engine - Warm Gold #daa142, Warning #f59e0b)
@@ -278,12 +277,12 @@ Render-OsdToast -OutputPath "$assetsPath\osd_toast_game_engine.png" -Scale 2.0 `
     -AttrTag "GAME ENGINE" -AccentHex "#daa142" `
     -ConfText "88% CONF" -AddShadow $true
 
-# 4. Audio Glitch Snapshot (External Contention - Soft Purple #9a64cd, Danger #ef4444)
+# 4. Audio Glitch Snapshot (External Contention - Crimson Red #c55656, Danger #ef4444)
 Render-OsdToast -OutputPath "$assetsPath\osd_toast_audio_glitch.png" -Scale 2.0 `
     -ProcessName "audiodg.exe" `
     -Callout "AUDIO GLITCH (x2)" -CalloutHex "#ef4444" `
     -DiagSummary "RealtekAudio.sys: Endpoint buffer underrun detected" `
-    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#9a64cd" `
+    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#c55656" `
     -ConfText "96% CONF" -AddShadow $true
 
 # 5. In-Game Context View
@@ -295,6 +294,10 @@ if (Test-Path $cardTestExe) {
     Write-Host "Rendering Visual Card via CardRenderer engine..." -ForegroundColor Cyan
     $env:STUTTO_DUMP_CARD_DIR = $assetsPath
     & $cardTestExe | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item Env:\STUTTO_DUMP_CARD_DIR -ErrorAction SilentlyContinue
+        throw "test_card_renderer failed during snapshot generation with exit code $LASTEXITCODE"
+    }
     Remove-Item Env:\STUTTO_DUMP_CARD_DIR
     # Clean up unreferenced auxiliary cards to keep repo clean
     Remove-Item -Path "$assetsPath\dummy_card_audio_glitch.png", "$assetsPath\dummy_card_contention.png", "$assetsPath\dummy_card_dwm.png" -ErrorAction SilentlyContinue

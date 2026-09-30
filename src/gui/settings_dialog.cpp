@@ -677,7 +677,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             std::wstring hk_str = format_hotkey_display(state->hotkey_mods, state->hotkey_vk);
             state->h_hotkey_edit = CreateWindowExW(0, L"EDIT", hk_str.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_READONLY, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_HOTKEY_EDIT, NULL, NULL);
             SendMessageW(state->h_hotkey_edit, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_hotkey_edit);
             SetWindowSubclass(state->h_hotkey_edit, SettingsHotkeySubclassProc, IDC_SET_HOTKEY_EDIT, reinterpret_cast<DWORD_PTR>(state));
 
             state->h_chk_sound     = create_checkbox(hwnd, IDC_SET_CHK_SOUND,     g_sound_cues_enabled);
@@ -689,7 +688,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
                 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_AUTO_SAVE, NULL, NULL);
             SendMessageW(state->h_edit_auto_save, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
-            apply_control_dark_theme(state->h_edit_auto_save);
             SetWindowSubclass(state->h_edit_auto_save, EditCenteredSubclassProc, IDC_SET_EDIT_AUTO_SAVE, 0);
             SendMessageW(state->h_edit_auto_save, EM_SETCUEBANNER, (WPARAM)FALSE, (LPARAM)L"Default: %LOCALAPPDATA%\\Stuttometer\\Reports");
 
@@ -846,7 +844,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             state->h_edit_target_fps = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_TARGET_FPS, NULL, NULL);
             SetWindowSubclass(state->h_edit_target_fps, EditCenteredSubclassProc, IDC_SET_EDIT_TARGET_FPS, 0);
             SendMessageW(state->h_edit_target_fps, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_target_fps);
 
             if (state->current_profile == PacingProfile::AUTO_ADAPTIVE) {
                 wcscpy_s(num_buf, L"Auto");
@@ -860,7 +857,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             state->h_edit_spike_mult = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_SPIKE_MULT, NULL, NULL);
             SetWindowSubclass(state->h_edit_spike_mult, EditCenteredSubclassProc, IDC_SET_EDIT_SPIKE_MULT, 0);
             SendMessageW(state->h_edit_spike_mult, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_spike_mult);
 
             if (state->current_profile == PacingProfile::AUTO_ADAPTIVE) {
                 wcscpy_s(num_buf, L"Auto");
@@ -874,7 +870,6 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             state->h_edit_min_delta = CreateWindowExW(0, L"EDIT", num_buf, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_EDIT_MIN_DELTA, NULL, NULL);
             SetWindowSubclass(state->h_edit_min_delta, EditCenteredSubclassProc, IDC_SET_EDIT_MIN_DELTA, 0);
             SendMessageW(state->h_edit_min_delta, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-            apply_control_dark_theme(state->h_edit_min_delta);
 
             state->h_lbl_profile_hint = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_SET_LBL_PROFILE_HINT, NULL, NULL);
             SendMessageW(state->h_lbl_profile_hint, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
@@ -1374,6 +1369,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
         }
 
         case WM_COMMAND: {
+            if (HIWORD(wParam) == CBN_DROPDOWN) {
+                HWND h_combo = (HWND)lParam;
+                apply_combo_popup_border(h_combo, COLOR_TEXT_LABEL);
+                return 0;
+            }
+
             int wmId = LOWORD(wParam);
 
             if (wmId == IDC_SET_CHK_ADVANCED) {

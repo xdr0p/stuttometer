@@ -1387,7 +1387,14 @@ static void test_palette_and_theme() {
     using stuttometer::AttributionTag;
     using stuttometer::MetricSeverity;
 
+    g_theme.init();
+
     // Attribution colors match centralized palette constants
+    STUTTO_ASSERT(COLOR_ATTR_GAME_ENGINE         == RGB(0xda, 0xa1, 0x42));
+    STUTTO_ASSERT(COLOR_ATTR_EXTERNAL_CONTENTION == RGB(0xc5, 0x56, 0x56));
+    STUTTO_ASSERT(COLOR_ATTR_DWM_COMPOSITION     == RGB(0x9a, 0x64, 0xcd));
+    STUTTO_ASSERT(COLOR_ATTR_UNKNOWN             == RGB(0x69, 0x73, 0x82));
+
     STUTTO_ASSERT(get_attribution_color(AttributionTag::GAME_ENGINE) == COLOR_ATTR_GAME_ENGINE);
     STUTTO_ASSERT(get_attribution_color(AttributionTag::DWM_COMPOSITION) == COLOR_ATTR_DWM_COMPOSITION);
     STUTTO_ASSERT(get_attribution_color(AttributionTag::EXTERNAL_CONTENTION) == COLOR_ATTR_EXTERNAL_CONTENTION);
@@ -1395,14 +1402,29 @@ static void test_palette_and_theme() {
     STUTTO_ASSERT(get_attribution_color(static_cast<AttributionTag>(99)) == COLOR_ATTR_UNKNOWN);
 
     // Severity colors match centralized palette constants
+    STUTTO_ASSERT(COLOR_SEV_NORMAL               == RGB(0xf1, 0xf5, 0xf9));
+    STUTTO_ASSERT(COLOR_SEV_WARNING              == RGB(0xf5, 0x9e, 0x0b));
+    STUTTO_ASSERT(COLOR_SEV_DANGER               == RGB(0xef, 0x44, 0x44));
+
     STUTTO_ASSERT(get_severity_color(MetricSeverity::NORMAL) == COLOR_SEV_NORMAL);
     STUTTO_ASSERT(get_severity_color(MetricSeverity::WARNING) == COLOR_SEV_WARNING);
     STUTTO_ASSERT(get_severity_color(MetricSeverity::DANGER) == COLOR_SEV_DANGER);
     STUTTO_ASSERT(get_severity_color(static_cast<MetricSeverity>(99)) == COLOR_SEV_NORMAL);
 
+    // Badge constants
+    STUTTO_ASSERT(COLOR_BADGE_BG                 == RGB(0x18, 0x1c, 0x26));
+    STUTTO_ASSERT(COLOR_BADGE_BORDER             == RGB(0x2c, 0x34, 0x46));
+
+    // Severity brush cache validation (exercises active cache)
+    STUTTO_ASSERT(get_severity_brush(MetricSeverity::NORMAL)  == g_theme.br_sev_normal);
+    STUTTO_ASSERT(get_severity_brush(MetricSeverity::WARNING) == g_theme.br_sev_warning);
+    STUTTO_ASSERT(get_severity_brush(MetricSeverity::DANGER)  == g_theme.br_sev_danger);
+
     // Monotonic ordering
     STUTTO_ASSERT(static_cast<uint8_t>(MetricSeverity::NORMAL) < static_cast<uint8_t>(MetricSeverity::WARNING));
     STUTTO_ASSERT(static_cast<uint8_t>(MetricSeverity::WARNING) < static_cast<uint8_t>(MetricSeverity::DANGER));
+
+    g_theme.destroy();
 
     std::cout << "  -> Centralized Palette & Theme (v1.0) PASSED.\n";
 }

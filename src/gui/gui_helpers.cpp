@@ -11,7 +11,19 @@ HWND create_control(HWND parent, const ControlSpec& spec) noexcept {
     if (spec.prop_key) SetPropW(h, spec.prop_key, spec.prop_value);
     if (spec.subclass_proc)
         SetWindowSubclass(h, spec.subclass_proc, spec.id, spec.ref_data);
-    apply_control_dark_theme(h);
+
+    // Single-line EDITs are custom-painted by EditCenteredSubclassProc /
+    // SettingsHotkeySubclassProc. DarkMode_Explorer makes the default EDIT
+    // paint draw its own 1px dark border inside the client area, which leaks
+    // through the rounded corners of our custom border. Skip theming for
+    // single-line edits; multiline edits (Report Inspector) still need it
+    // for dark scrollbars.
+    const bool is_single_line_edit =
+        (spec.wnd_class && _wcsicmp(spec.wnd_class, L"EDIT") == 0) &&
+        ((spec.style & ES_MULTILINE) == 0);
+    if (!is_single_line_edit) {
+        apply_control_dark_theme(h);
+    }
     return h;
 }
 

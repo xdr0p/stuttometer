@@ -658,9 +658,14 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     // Trigger Mode badge anchors the far right of the card
     RECT rc_mode = get_trigger_mode_badge_rect(width);
 
-    // Severity Filter combobox (Positioned immediately to the left of the Trigger Mode badge)
+    // Severity Filter label + combobox (Positioned immediately to the left of the Trigger Mode badge)
     const int combo_filter_w = scale_dpi(165);
     const int combo_filter_x = rc_mode.left - scale_dpi(10) - combo_filter_w;
+
+    const int lbl_sev_w = scale_dpi(42);
+    const int lbl_sev_x = combo_filter_x - scale_dpi(6) - lbl_sev_w;
+    MoveWindow(g_h_lbl_sev_filter, lbl_sev_x, ctrl_y, lbl_sev_w, ctrl_h, TRUE);
+
     MoveWindow(g_h_combo_sev_filter, combo_filter_x, ctrl_y + scale_dpi(2), combo_filter_w, scale_dpi(150), TRUE);
 
     // 2. Action Toolbar (Y: 116, Height: 32)
@@ -814,6 +819,10 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             EnableWindow(g_h_btn_clear, FALSE);
 
             // Severity Filter Combobox (Positioned on Configuration Card)
+            g_h_lbl_sev_filter = CreateWindowExW(0, L"STATIC", L"Show:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
+            SendMessageW(g_h_lbl_sev_filter, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+            apply_control_dark_theme(g_h_lbl_sev_filter);
+
             g_h_combo_sev_filter = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, scale_dpi(165), scale_dpi(150), hwnd, (HMENU)(INT_PTR)IDC_COMBO_SEVERITY_FILTER, NULL, NULL);
             SendMessageW(g_h_combo_sev_filter, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             SendMessageW(g_h_combo_sev_filter, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
@@ -1123,7 +1132,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
                     wchar_t conf_text[32];
                     swprintf_s(conf_text, L"%.1f%% Conf", rec.confidence * 100.0);
-                    COLORREF conf_color = (rec.confidence >= 0.80) ? COLOR_ACCENT_EMERALD : ((rec.confidence >= 0.50) ? COLOR_ACCENT_AMB : COLOR_TEXT_MUTED);
+                    COLORREF conf_color = COLOR_TEXT_LABEL;
 
                     std::wstring frames_text = std::to_wstring(rec.report ? rec.report->frame_timeline.size() : 0) + L" Frames";
 
@@ -1266,6 +1275,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                         auto cfg = read_gui_config();
                         g_controller->update_target_filter(cfg.target_pid, cfg.target_process_name);
                     } else if (wmEvent == CBN_DROPDOWN) {
+                        apply_combo_popup_border(g_h_combo_process, COLOR_TEXT_LABEL);
                         if (g_controller && !g_controller->is_capturing()) {
                             g_controller->enumerate_graphical_processes_async();
                         }
@@ -1280,6 +1290,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                         else if (sel == 2) g_settings_config.list_severity_filter = ReportSeverity::DANGER;
                         else g_settings_config.list_severity_filter = ReportSeverity::WARNING;
                         refresh_stutter_listview();
+                    } else if (wmEvent == CBN_DROPDOWN) {
+                        apply_combo_popup_border(g_h_combo_sev_filter, COLOR_TEXT_LABEL);
                     }
                     break;
                 }
@@ -1313,7 +1325,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                             return CDRF_NOTIFYITEMDRAW;
 
                         case CDDS_ITEMPREPAINT:
-                            return CDRF_NOTIFYSUBITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+                            // Attribution stripe removed — no POSTPAINT notification requested.
+                            return CDRF_NOTIFYSUBITEMDRAW;
 
                         case CDDS_SUBITEM | CDDS_ITEMPREPAINT: {
                             int item_idx = static_cast<int>(pCustomDraw->nmcd.dwItemSpec);
@@ -1330,31 +1343,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                                 int stutter_idx = get_stutter_index_from_listview(item_idx);
                                 if (stutter_idx >= 0 && stutter_idx < static_cast<int>(g_stutters.size())) {
                                     const auto& rec = g_stutters[stutter_idx];
-                                    if (sub_idx == 4) { // Duration
+                                    if (sub_idx == 4) { // Duration is the only retained semantic accent
                                         pCustomDraw->clrText = get_severity_color(rec.severity);
-                                    } else if (sub_idx == 6) { // Confidence
-                                        if (rec.confidence >= 0.80) {
-                                            pCustomDraw->clrText = COLOR_ACCENT_EMERALD;
-                                        } else if (rec.confidence >= 0.50) {
-                                            pCustomDraw->clrText = COLOR_ACCENT_AMB;
-                                        } else {
-                                            pCustomDraw->clrText = COLOR_TEXT_MUTED;
-                                        }
                                     }
+                                    // Confidence column (sub_idx == 6) intentionally neutral.
                                 }
-                            }
-                            return CDRF_DODEFAULT;
-                        }
-
-                        case CDDS_ITEMPOSTPAINT: {
-                            int item_idx = static_cast<int>(pCustomDraw->nmcd.dwItemSpec);
-                            int stutter_idx = get_stutter_index_from_listview(item_idx);
-                            if (stutter_idx >= 0 && stutter_idx < static_cast<int>(g_stutters.size())) {
-                                const auto& rec = g_stutters[stutter_idx];
-                                HBRUSH h_stripe_br = get_attribution_brush(rec.report ? rec.report->attribution : AttributionTag::UNKNOWN);
-                                RECT rc_stripe = pCustomDraw->nmcd.rc;
-                                rc_stripe.right = rc_stripe.left + scale_dpi(3);
-                                FillRect(pCustomDraw->nmcd.hdc, &rc_stripe, h_stripe_br);
                             }
                             return CDRF_DODEFAULT;
                         }
@@ -1489,6 +1482,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 return (LRESULT)g_theme.br_input;
             }
             if (hCtl == g_h_lbl_target) {
+                SetBkColor(hdcStatic, COLOR_CARD_BG);
+                SetTextColor(hdcStatic, COLOR_TEXT_LABEL);
+                return (LRESULT)g_theme.br_card;
+            }
+            if (hCtl == g_h_lbl_sev_filter) {
                 SetBkColor(hdcStatic, COLOR_CARD_BG);
                 SetTextColor(hdcStatic, COLOR_TEXT_LABEL);
                 return (LRESULT)g_theme.br_card;

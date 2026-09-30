@@ -349,7 +349,7 @@ static void draw_card(
     Color color_card = to_gdiplus_color(COLOR_CARD_BG);
     Color color_card_border = to_gdiplus_color(COLOR_CARD_BORDER);
     Color color_inset_border = to_gdiplus_color(COLOR_INSET_BORDER);
-    Color color_text_pri = to_gdiplus_color(COLOR_TEXT_PRI);
+    Color color_text_pri = to_gdiplus_color(COLOR_TEXT_BRIGHT);
     Color color_text_bright = to_gdiplus_color(COLOR_TEXT_BRIGHT);
     Color color_text_label = to_gdiplus_color(COLOR_TEXT_LABEL);
     Color color_text_muted = to_gdiplus_color(COLOR_TEXT_MUTED);
@@ -440,8 +440,8 @@ static void draw_card(
         std::wstring ver_badge = L"STUTTOMETER v" + utf8_to_wide(ver);
         RectF rc_ver(side_margin, top_margin, 130.0f * s, 22.0f * s);
 
-        SolidBrush br_ver_bg(Color(255, 30, 41, 59));
-        Pen pen_ver(Color(255, 51, 65, 85), 1.0f);
+        SolidBrush br_ver_bg(to_gdiplus_color(COLOR_BADGE_BG));
+        Pen pen_ver(to_gdiplus_color(COLOR_BADGE_BORDER), 1.0f);
         fill_rounded_rect(g, rc_ver, 6.0f * s, &br_ver_bg, &pen_ver);
 
         SolidBrush br_ver_txt(color_text_bright);
@@ -501,8 +501,8 @@ static void draw_card(
 
     // Attribution status-dot pill
     {
-        SolidBrush br_pill_bg(Color(255, 30, 41, 59));
-        Pen pen_pill(Color(255, 51, 65, 85), 1.0f);
+        SolidBrush br_pill_bg(to_gdiplus_color(COLOR_BADGE_BG));
+        Pen pen_pill(to_gdiplus_color(COLOR_BADGE_BORDER), 1.0f);
         fill_rounded_rect(g, banner_rects.rc_pill, 6.0f * s, &br_pill_bg, &pen_pill);
 
         // Status dot (6px circle filled with desaturated category color)
@@ -532,8 +532,8 @@ static void draw_card(
 
     // Confidence badge (right)
     {
-        SolidBrush br_conf_bg(Color(255, 30, 41, 59));
-        Pen pen_conf(Color(255, 51, 65, 85), 1.0f);
+        SolidBrush br_conf_bg(to_gdiplus_color(COLOR_BADGE_BG));
+        Pen pen_conf(to_gdiplus_color(COLOR_BADGE_BORDER), 1.0f);
         fill_rounded_rect(g, banner_rects.rc_conf, 6.0f * s, &br_conf_bg, &pen_conf);
 
         SolidBrush br_conf_txt(color_text_bright);

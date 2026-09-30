@@ -165,6 +165,11 @@ void GdiThemeCache::init() {
     br_attr_unknown = CreateSolidBrush(COLOR_ATTR_UNKNOWN);
     br_beacon_idle = CreateSolidBrush(RGB(75, 85, 99));
 
+    // Cached Severity Brushes
+    br_sev_normal = CreateSolidBrush(COLOR_SEV_NORMAL);
+    br_sev_warning = CreateSolidBrush(COLOR_SEV_WARNING);
+    br_sev_danger = CreateSolidBrush(COLOR_SEV_DANGER);
+
     // Buttons: Disabled
     br_btn_disabled = CreateSolidBrush(RGB(20, 23, 31));
     pen_btn_disabled = CreatePen(PS_SOLID, 1, RGB(32, 38, 50));
@@ -173,7 +178,7 @@ void GdiThemeCache::init() {
     pen_card_divider = CreatePen(PS_SOLID, 1, COLOR_CARD_DIVIDER);
     pen_input_border = CreatePen(PS_SOLID, 1, COLOR_INPUT_BORDER);
     pen_pill_border = CreatePen(PS_SOLID, 1, RGB(48, 58, 78));
-    pen_badge_border = CreatePen(PS_SOLID, 1, RGB(44, 52, 70));
+    pen_badge_border = CreatePen(PS_SOLID, 1, COLOR_BADGE_BORDER);
     pen_list_hdr_border = CreatePen(PS_SOLID, 1, COLOR_LIST_HDR_BORDER);
     pen_focus_border = CreatePen(PS_SOLID, 1, COLOR_ACCENT_EMERALD);
 
@@ -190,7 +195,8 @@ void GdiThemeCache::init() {
         &br_btn_quick, &br_btn_quick_hover, &br_btn_quick_pressed,
         &br_btn_disabled,
         &br_attr_game_engine, &br_attr_dwm_composition,
-        &br_attr_external_contention, &br_attr_unknown, &br_beacon_idle
+        &br_attr_external_contention, &br_attr_unknown, &br_beacon_idle,
+        &br_sev_normal, &br_sev_warning, &br_sev_danger
     };
     for (auto* b : brushes) {
         if (!*b) *b = default_brush;
@@ -248,6 +254,9 @@ void GdiThemeCache::destroy() {
     safe_delete_brush(br_attr_external_contention);
     safe_delete_brush(br_attr_unknown);
     safe_delete_brush(br_beacon_idle);
+    safe_delete_brush(br_sev_normal);
+    safe_delete_brush(br_sev_warning);
+    safe_delete_brush(br_sev_danger);
 
     safe_delete_pen(pen_header_border);
     safe_delete_pen(pen_card_border);
@@ -285,6 +294,16 @@ HBRUSH get_attribution_brush(AttributionTag tag) noexcept {
         case AttributionTag::UNKNOWN:
         default:
             return fallback;
+    }
+}
+
+HBRUSH get_severity_brush(MetricSeverity sev) noexcept {
+    HBRUSH fallback = g_theme.br_sev_normal ? g_theme.br_sev_normal : static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    switch (sev) {
+        case MetricSeverity::DANGER:  return g_theme.br_sev_danger  ? g_theme.br_sev_danger  : fallback;
+        case MetricSeverity::WARNING: return g_theme.br_sev_warning ? g_theme.br_sev_warning : fallback;
+        case MetricSeverity::NORMAL:
+        default:                      return fallback;
     }
 }
 

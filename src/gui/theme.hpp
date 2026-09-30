@@ -61,6 +61,7 @@ inline constexpr COLORREF COLOR_BORDER_OSD      = RGB(42, 53, 75);   // #2A354B 
 inline constexpr COLORREF COLOR_INSET_BORDER    = RGB(42, 53, 75);   // #2A354B (Card outer 1px inset - DO NOT CHANGE)
 inline constexpr COLORREF COLOR_TEXT_SOFT_WHITE = RGB(226, 232, 240); // #E2E8F0 (Native titlebar text)
 inline constexpr COLORREF COLOR_BADGE_BG        = RGB(24, 28, 38);   // #181C26 (Badge background)
+inline constexpr COLORREF COLOR_BADGE_BORDER    = RGB(44, 52, 70);   // #2C3446 (Badge pill outline)
 inline constexpr COLORREF COLOR_TABLE_ROW_ALT   = RGB(34, 40, 54);   // #222836 (Benchmark table row alt)
 
 inline constexpr COLORREF COLOR_LIST_BG         = RGB(17, 19, 23);   // ListView Canvas (#111317)
@@ -81,7 +82,6 @@ inline constexpr COLORREF COLOR_ACCENT_EMERALD  = RGB(16, 185, 129); // Fluent E
 inline constexpr COLORREF COLOR_ACCENT_DANGER   = RGB(239, 68, 68);  // Refined Crimson (#EF4444)
 inline constexpr COLORREF COLOR_ACCENT_AMB      = RGB(245, 158, 11); // Amber / Warning (#F59E0B)
 inline constexpr COLORREF COLOR_ACCENT_CYAN     = RGB(56, 189, 248); // Sky / Info (#38BDF8)
-inline constexpr COLORREF COLOR_ACCENT_PURPLE   = RGB(168, 85, 247); // Purple / DWM (#A855F7)
 
 // Centralized Attribution Palette (unified 35% desaturated palette)
 inline constexpr COLORREF COLOR_ATTR_GAME_ENGINE         = RGB(218, 161, 66);  // #daa142
@@ -114,6 +114,7 @@ inline constexpr COLORREF COLOR_SEV_DANGER               = RGB(239, 68, 68);   /
 }
 
 [[nodiscard]] HBRUSH get_attribution_brush(AttributionTag tag) noexcept;
+[[nodiscard]] HBRUSH get_severity_brush(MetricSeverity sev) noexcept;
 
 // DPI Tracking & Scaling
 extern UINT g_current_dpi;
@@ -166,6 +167,11 @@ struct GdiThemeCache {
     HBRUSH br_attr_external_contention{nullptr};
     HBRUSH br_attr_unknown{nullptr};
     HBRUSH br_beacon_idle{nullptr};
+
+    // Cached Severity Brushes
+    HBRUSH br_sev_normal{nullptr};
+    HBRUSH br_sev_warning{nullptr};
+    HBRUSH br_sev_danger{nullptr};
 
     HPEN pen_header_border{nullptr};
     HPEN pen_card_border{nullptr};

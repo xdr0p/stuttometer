@@ -274,6 +274,7 @@ set_tests_properties(test_report_serialization_consistency PROPERTIES TIMEOUT 30
 add_executable(test_card_renderer
   tests/test_card_renderer.cpp
   src/gui/card_renderer.cpp
+  src/gui/theme.cpp
 )
 target_include_directories(test_card_renderer
   PRIVATE
@@ -286,6 +287,8 @@ target_link_libraries(test_card_renderer
     ole32
     gdi32
     user32
+    dwmapi
+    uxtheme
 )
 add_test(NAME test_card_renderer COMMAND test_card_renderer)
 set_tests_properties(test_card_renderer PROPERTIES TIMEOUT 30)

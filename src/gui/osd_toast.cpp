@@ -426,8 +426,9 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
 
         COLORREF col_text_pri = COLOR_TEXT_BRIGHT;
         COLORREF col_text_sec = COLOR_TEXT_MUTED;
-        COLORREF col_accent = get_attribution_color(current_data_.attribution);
-        HBRUSH br_accent = get_attribution_brush(current_data_.attribution);
+        MetricSeverity sev = classify_severity(current_data_.trigger, current_data_.present_threshold_ms);
+        COLORREF col_severity = get_severity_color(sev);
+        HBRUSH br_stripe = get_severity_brush(sev);
         std::wstring attr_tag;
 
         switch (current_data_.attribution) {
@@ -469,7 +470,7 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
 
         // Left accent stripe (cached brush)
         RECT rc_stripe = { 0, 0, stripe_w, height };
-        FillRect(mem_dc, &rc_stripe, br_accent);
+        FillRect(mem_dc, &rc_stripe, br_stripe);
 
         SetBkMode(mem_dc, TRANSPARENT);
 
@@ -492,9 +493,6 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
             callout_str = dss.str();
         }
 
-        MetricSeverity sev = classify_severity(current_data_.trigger, current_data_.present_threshold_ms);
-        COLORREF col_severity = get_severity_color(sev);
-
         SetTextColor(mem_dc, col_severity);
         RECT rc_callout = { width - callout_w - pad_right, r1_top, width - pad_right, r1_bot };
         DrawTextW(mem_dc, callout_str.c_str(), -1, &rc_callout, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -514,7 +512,7 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
 
         // Row 3: Attribution Tag pill (Left) + Confidence (Right)
         SelectObject(mem_dc, font_sub_);
-        SetTextColor(mem_dc, col_accent);
+        SetTextColor(mem_dc, COLOR_TEXT_LABEL);
 
         int conf_w = MulDiv(80, dpi, 96);
         RECT rc_tag = { pad_left, r3_top, width - pad_right - conf_w, r3_bot };

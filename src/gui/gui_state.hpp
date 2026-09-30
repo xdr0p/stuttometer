@@ -61,6 +61,7 @@ extern int g_selected_stutter_index;
 
 extern HWND g_h_lbl_target;
 extern HWND g_h_combo_process;
+extern HWND g_h_lbl_sev_filter;
 extern HWND g_h_combo_sev_filter;
 
 extern HWND g_h_btn_start;
