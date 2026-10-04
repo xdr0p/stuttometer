@@ -1301,8 +1301,10 @@ static void test_correlator_attribution_pipeline_wiring() {
     STUTTO_ASSERT(report.frame_timeline.size() == 2);
     STUTTO_ASSERT(!report.frame_timeline[0].is_trigger_frame);
     STUTTO_ASSERT(!report.frame_timeline[0].is_pacing_stall);
+    STUTTO_ASSERT(!report.frame_timeline[0].is_relative_spike);
     STUTTO_ASSERT(report.frame_timeline[1].is_trigger_frame);
-    STUTTO_ASSERT(report.frame_timeline[1].is_pacing_stall);
+    STUTTO_ASSERT(!report.frame_timeline[1].is_pacing_stall); // baseline_avg_ms == 0.0
+    STUTTO_ASSERT(report.frame_timeline[1].is_relative_spike);
 
     std::cout << "  -> Attribution: " << stuttometer::attribution_to_string(report.attribution)
               << " (" << report.attribution_process << " PID " << report.attribution_pid << ") PASSED.\n";
@@ -1589,7 +1591,7 @@ static void test_smi_auto_scaling_and_hardware_vblank() {
     p_active.kernel_cswitch_active = true;
     std::vector<stuttometer::EtwEventRecord> snapshot;
 
-    // 1. auto_scale_smi = true with 240Hz baseline (4.167 ms) -> threshold is 2 * 4.167 = 8.33 ms
+    // 1. auto_scale_smi = true with 240Hz baseline (4.167 ms) -> clamped to 16.67 ms floor
     {
         stuttometer::CorrelatorThresholds thresholds;
         thresholds.auto_scale_smi = true;
@@ -1603,14 +1605,14 @@ static void test_smi_auto_scaling_and_hardware_vblank() {
         trigger.baseline_avg_ms = 4.167; // 240 Hz
         trigger.spike_ratio = 2.4;
 
-        // Sub-threshold 7.0 ms (< 8.33 ms) -> insufficient evidence
-        trigger.duration_ms = 7.0;
+        // Sub-floor 10.0 ms (< 16.67 ms floor) -> insufficient evidence (high-refresh noise protection)
+        trigger.duration_ms = 10.0;
         auto rep_sub = correlator.correlate(snapshot, trigger, qpc_freq, p_active);
         STUTTO_ASSERT(!rep_sub.diagnoses.empty());
         STUTTO_ASSERT(rep_sub.diagnoses[0].hypothesis == "insufficient_evidence");
 
-        // Over-threshold 10.0 ms (>= 8.33 ms) -> unprofiled_hardware_or_smi_stall
-        trigger.duration_ms = 10.0;
+        // Over-floor 20.0 ms (>= 16.67 ms floor) -> unprofiled_hardware_or_smi_stall
+        trigger.duration_ms = 20.0;
         auto rep_over = correlator.correlate(snapshot, trigger, qpc_freq, p_active);
         STUTTO_ASSERT(!rep_over.diagnoses.empty());
         STUTTO_ASSERT(rep_over.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
@@ -1657,19 +1659,19 @@ static void test_smi_auto_scaling_and_hardware_vblank() {
         trigger.baseline_avg_ms = 0.0; // No baseline available
 
         stuttometer::CorrelateOptions opts;
-        opts.hardware_vblank_ms = 6.944; // 144 Hz -> threshold is 2 * 6.944 = 13.888 ms
+        opts.hardware_vblank_ms = 16.67; // 60 Hz fallback -> threshold is max(16.67, 2 * 16.67) = 33.34 ms
 
-        // 12.0 ms (< 13.888 ms) -> insufficient evidence
-        trigger.duration_ms = 12.0;
-        auto rep_12ms = correlator.correlate(snapshot, trigger, qpc_freq, opts, p_active);
-        STUTTO_ASSERT(!rep_12ms.diagnoses.empty());
-        STUTTO_ASSERT(rep_12ms.diagnoses[0].hypothesis == "insufficient_evidence");
+        // Sub-threshold 30.0 ms (< 33.34 ms) -> insufficient evidence
+        trigger.duration_ms = 30.0;
+        auto rep_30ms = correlator.correlate(snapshot, trigger, qpc_freq, opts, p_active);
+        STUTTO_ASSERT(!rep_30ms.diagnoses.empty());
+        STUTTO_ASSERT(rep_30ms.diagnoses[0].hypothesis == "insufficient_evidence");
 
-        // 15.0 ms (>= 13.888 ms) -> unprofiled_hardware_or_smi_stall
-        trigger.duration_ms = 15.0;
-        auto rep_15ms = correlator.correlate(snapshot, trigger, qpc_freq, opts, p_active);
-        STUTTO_ASSERT(!rep_15ms.diagnoses.empty());
-        STUTTO_ASSERT(rep_15ms.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
+        // Over-threshold 35.0 ms (>= 33.34 ms) -> unprofiled_hardware_or_smi_stall
+        trigger.duration_ms = 35.0;
+        auto rep_35ms = correlator.correlate(snapshot, trigger, qpc_freq, opts, p_active);
+        STUTTO_ASSERT(!rep_35ms.diagnoses.empty());
+        STUTTO_ASSERT(rep_35ms.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
     }
 
     std::cout << "  -> SMI auto-scaling with high-refresh cadence and hardware_vblank_ms PASSED.\n";
@@ -1832,6 +1834,95 @@ static void test_danger_invariants() {
     std::cout << "  -> DANGER Invariants & Gate Bypass PASSED.\n";
 }
 
+static void test_software_coverage_etw_loss_gate() {
+    std::cout << "[TEST] Validating software coverage drops to 0.0 and caps confidence when ETW events are lost...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger{};
+    trigger.source = stuttometer::TriggerSource::KERNEL_FRAME_STALL;
+    trigger.duration_ms = 50.0;
+    trigger.target_pid = 1234;
+    trigger.target_tid = 5678;
+    trigger.trigger_timestamp_qpc = stuttometer::get_current_qpc();
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // 1. Loss-free: full tier coverage (5/5 active -> 1.0)
+    stuttometer::ProviderContext p_clean{};
+    p_clean.kernel_dpc_active = true;
+    p_clean.kernel_cswitch_active = true;
+    p_clean.kernel_disk_active = true;
+    p_clean.user_dwm_active = true;
+    p_clean.user_vram_paging_active = true;
+    p_clean.etw_events_lost = 0;
+    p_clean.etw_buffers_lost = 0;
+
+    auto rep_clean = correlator.correlate(snapshot, trigger, qpc_freq, p_clean);
+    STUTTO_ASSERT(!rep_clean.diagnoses.empty());
+    STUTTO_ASSERT(rep_clean.diagnoses[0].hypothesis == "gpu_pipeline_stall");
+    const double raw_conf = 0.60 + std::min(50.0 / 100.0, 0.30); // 0.90
+    // clean coverage = 1.0 -> confidence = raw_conf * (0.5 + 0.5 * 1.0) = 0.90
+    STUTTO_ASSERT(std::abs(rep_clean.diagnoses[0].confidence - raw_conf) < 1e-4);
+
+    // 2. Loss-laden: etw_events_lost > 0 -> software_coverage = 0.0 -> confidence = max(0.50, 0.90 * 0.5) = 0.50
+    stuttometer::ProviderContext p_loss = p_clean;
+    p_loss.etw_events_lost = 9766;
+
+    auto rep_loss = correlator.correlate(snapshot, trigger, qpc_freq, p_loss);
+    STUTTO_ASSERT(!rep_loss.diagnoses.empty());
+    STUTTO_ASSERT(rep_loss.diagnoses[0].hypothesis == "gpu_pipeline_stall");
+    STUTTO_ASSERT(std::abs(rep_loss.diagnoses[0].confidence - 0.50) < 1e-4);
+
+    std::cout << "  -> software coverage ETW loss gate PASSED.\n";
+}
+
+static void test_gpu_pipeline_stall_suppression_by_cumulative_cswitch() {
+    std::cout << "[TEST] Validating gpu_pipeline_stall suppression when cumulative sub-threshold CSwitches are present...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger{};
+    trigger.source = stuttometer::TriggerSource::KERNEL_FRAME_STALL;
+    trigger.duration_ms = 50.0;
+    trigger.target_pid = 1234;
+    trigger.target_tid = 5678;
+    trigger.trigger_timestamp_qpc = stuttometer::get_current_qpc();
+
+    std::vector<stuttometer::EtwEventRecord> snapshot;
+
+    // Twelve 1.5ms involuntary CSwitches on target thread (each < 5ms threshold, but total = 18.0ms >= 5ms)
+    for (int i = 0; i < 12; ++i) {
+        stuttometer::EtwEventRecord cs{};
+        cs.category = static_cast<uint16_t>(stuttometer::EventCategory::CSWITCH);
+        cs.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(20.0 - i, qpc_freq);
+        cs.pid = 1234;
+        cs.tid = 5678;
+        cs.duration_us = 1500;
+        cs.flags = 0; // Involuntary
+        cs.payload.cswitch.prev_pid = 9999;
+        cs.payload.cswitch.prev_tid = 8888;
+        snapshot.push_back(cs);
+    }
+
+    stuttometer::ProviderContext p_ctx{};
+    p_ctx.kernel_dpc_active = true;
+    p_ctx.kernel_cswitch_active = true;
+
+    auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+
+    // gpu_pipeline_stall MUST be suppressed by the 18ms of cumulative preemption
+    for (const auto& diag : report.diagnoses) {
+        STUTTO_ASSERT(diag.hypothesis != "gpu_pipeline_stall");
+    }
+
+    std::cout << "  -> gpu_pipeline_stall suppression by cumulative CSwitch PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -1871,6 +1962,8 @@ int main() {
         test_correlator_attribution_pipeline_wiring();
         test_gpu_pipeline_stall_dxgi_relative_spike();
         test_smi_auto_scaling_and_hardware_vblank();
+        test_software_coverage_etw_loss_gate();
+        test_gpu_pipeline_stall_suppression_by_cumulative_cswitch();
         std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

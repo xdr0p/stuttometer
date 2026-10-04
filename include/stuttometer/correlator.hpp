@@ -113,7 +113,8 @@ struct FrameTimelinePoint {
     double duration_ms{0.0};           // Effective frame duration in ms
     double offset_from_trigger_ms{0.0};// Signed offset from trigger QPC in ms
     bool is_trigger_frame{false};      // True specifically for the frame that tripped the trigger
-    bool is_pacing_stall{false};       // True if duration_ms >= effective present threshold
+    bool is_pacing_stall{false};       // True if duration_ms >= baseline pacing threshold (requires baseline_avg_ms > 0)
+    bool is_relative_spike{false};     // True if duration_ms >= present_threshold_ms (relative/display spike)
 };
 
 enum class AttributionTag {
@@ -171,7 +172,7 @@ struct AttributionResult {
 };
 
 struct DiagnosticReport {
-    std::string schema_version{"1.2"};
+    std::string schema_version{"1.3"};
     std::string tool_version{TOOL_VERSION};
     std::string timestamp_utc;
     TriggerInfo trigger;

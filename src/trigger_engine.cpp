@@ -48,12 +48,14 @@ void TriggerEngine::record_filtered_event(
     FilterKind kind
 ) noexcept {
     filtered_reports_.fetch_add(1, std::memory_order_relaxed);
-    filtered_stall_us_.fetch_add(
-        static_cast<uint64_t>(duration_ms * 1000.0), std::memory_order_relaxed);
+    if (reason != TriggerReason::CADENCE_JUDDER) {
+        filtered_stall_us_.fetch_add(
+            static_cast<uint64_t>(duration_ms * 1000.0), std::memory_order_relaxed);
+    }
 
     SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
     if (sink) {
-        sink->ingest_filtered_event(pid, duration_ms);
+        sink->ingest_filtered_event(pid, duration_ms, reason);
     }
 
     TriggerInfo tmp{};

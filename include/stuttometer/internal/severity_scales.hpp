@@ -20,6 +20,10 @@ namespace stuttometer::detail::severity {
     inline constexpr double SMI_CAP_WITH_CSWITCH      = 0.35;
     inline constexpr double SMI_CAP_WITHOUT_CSWITCH   = 0.30;
 
+    namespace smi {
+        inline constexpr double AUTO_SCALE_FLOOR_MS    = 16.67;
+    }
+
     namespace proximity {
         inline constexpr double DPC_ISR_WINDOW_MS     = 150.0;
         inline constexpr double CSWITCH_WINDOW_MS     = 100.0;

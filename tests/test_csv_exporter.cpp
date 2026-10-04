@@ -64,12 +64,12 @@ static void test_csv_export_and_crlf() {
     STUTTO_ASSERT(content.find("\r\r\n") == std::string::npos);
 
     // Check header
-    const std::string expected_header = "frame_index,relative_index,qpc_timestamp,duration_ms,offset_from_trigger_ms,is_trigger_frame,is_pacing_stall\r\n";
+    const std::string expected_header = "frame_index,relative_index,qpc_timestamp,duration_ms,offset_from_trigger_ms,is_trigger_frame,is_pacing_stall,is_relative_spike\r\n";
     STUTTO_ASSERT(content.rfind(expected_header, 0) == 0);
 
     // Check data row contents
-    STUTTO_ASSERT(content.find("0,-1,1000000,16.6667,-16.6667,false,false\r\n") != std::string::npos);
-    STUTTO_ASSERT(content.find("1,0,1100000,45.1234,0.0000,true,true\r\n") != std::string::npos);
+    STUTTO_ASSERT(content.find("0,-1,1000000,16.6667,-16.6667,false,false,false\r\n") != std::string::npos);
+    STUTTO_ASSERT(content.find("1,0,1100000,45.1234,0.0000,true,true,false\r\n") != std::string::npos);
 
     std::filesystem::remove_all(test_dir);
     std::cout << "  -> CSV CRLF and value formatting PASSED.\n";
@@ -190,9 +190,9 @@ static void test_csv_field_escaping() {
     const std::string csv_out = ss.str();
 
     const std::string baseline = 
-        "frame_index,relative_index,qpc_timestamp,duration_ms,offset_from_trigger_ms,is_trigger_frame,is_pacing_stall\r\n"
-        "0,-1,1000000,16.6667,-16.6667,false,false\r\n"
-        "1,0,1100000,45.1234,0.0000,true,true\r\n";
+        "frame_index,relative_index,qpc_timestamp,duration_ms,offset_from_trigger_ms,is_trigger_frame,is_pacing_stall,is_relative_spike\r\n"
+        "0,-1,1000000,16.6667,-16.6667,false,false,false\r\n"
+        "1,0,1100000,45.1234,0.0000,true,true,false\r\n";
 
     STUTTO_ASSERT(csv_out == baseline);
 

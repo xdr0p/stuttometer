@@ -184,11 +184,11 @@ static void test_attribution_all_hypotheses() {
         STUTTO_ASSERT(res.pid == 7777);
     }
 
-    // 11. virtual_memory_allocation_stall (target vs external)
+    // 11. virtual_memory_allocation_stall (target vs external vs unresolved)
     {
         auto r = make_report("virtual_memory_allocation_stall");
         stuttometer::EvidenceItem ev;
-        ev.pid = 0; // defaults to target
+        ev.pid = 1234;
         r.diagnoses[0].evidence.push_back(ev);
         auto res = stuttometer::compute_attribution(r, fake_dwm_pid);
         STUTTO_ASSERT(res.tag == stuttometer::AttributionTag::GAME_ENGINE);
@@ -202,6 +202,16 @@ static void test_attribution_all_hypotheses() {
         auto res = stuttometer::compute_attribution(r, fake_dwm_pid);
         STUTTO_ASSERT(res.tag == stuttometer::AttributionTag::EXTERNAL_CONTENTION);
         STUTTO_ASSERT(res.pid == 5555);
+    }
+    {
+        auto r = make_report("virtual_memory_allocation_stall");
+        stuttometer::EvidenceItem ev;
+        ev.pid = 0; // unresolved PID
+        r.diagnoses[0].evidence.push_back(ev);
+        auto res = stuttometer::compute_attribution(r, fake_dwm_pid);
+        STUTTO_ASSERT(res.tag == stuttometer::AttributionTag::EXTERNAL_CONTENTION);
+        STUTTO_ASSERT(res.pid == 0);
+        STUTTO_ASSERT(res.process == "System (unresolved PID)");
     }
 
     // 12. low_memory_working_set_trim_stall
@@ -345,7 +355,7 @@ static void test_compute_attribution_pid_override() {
             STUTTO_ASSERT(res.pid == 1234);
             STUTTO_ASSERT(res.process == "Game.exe");
         }
-        // Case C: ev_pid == 0 -> stays GAME_ENGINE
+        // Case C: ev_pid == 0 -> overrides to EXTERNAL_CONTENTION ("System (unresolved PID)")
         {
             stuttometer::DiagnosticReport r;
             r.target_process = "Game.exe";
@@ -356,9 +366,24 @@ static void test_compute_attribution_pid_override() {
             r.diagnoses.push_back(diag);
 
             auto res = stuttometer::compute_attribution(r, 8888);
-            STUTTO_ASSERT(res.tag == AttributionTag::GAME_ENGINE);
-            STUTTO_ASSERT(res.pid == 1234);
-            STUTTO_ASSERT(res.process == "Game.exe");
+            STUTTO_ASSERT(res.tag == AttributionTag::EXTERNAL_CONTENTION);
+            STUTTO_ASSERT(res.pid == 0);
+            STUTTO_ASSERT(res.process == "System (unresolved PID)");
+        }
+        // Case D (Monitor-All): target_pid == 0, ev_pid == 0 -> EXTERNAL_CONTENTION ("System (unresolved PID)")
+        {
+            stuttometer::DiagnosticReport r;
+            r.target_process = "";
+            r.trigger.target_pid = 0;
+            stuttometer::Diagnosis diag;
+            diag.hypothesis = hyp;
+            diag.confidence = 0.85;
+            r.diagnoses.push_back(diag);
+
+            auto res = stuttometer::compute_attribution(r, 8888);
+            STUTTO_ASSERT(res.tag == AttributionTag::EXTERNAL_CONTENTION);
+            STUTTO_ASSERT(res.pid == 0);
+            STUTTO_ASSERT(res.process == "System (unresolved PID)");
         }
     };
 

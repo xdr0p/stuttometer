@@ -17,7 +17,9 @@ namespace stuttometer {
 nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact) const {
     nlohmann::json root;
 
-    root["schema_version"] = report.schema_version.empty() ? "1.2" : report.schema_version;
+    // Note: DiagnosticReport uses Schema 1.3 (with is_relative_spike in timeline),
+    // while BenchmarkSummary independently uses Schema 1.4.
+    root["schema_version"] = report.schema_version.empty() ? "1.3" : report.schema_version;
     root["tool_version"]   = report.tool_version.empty() ? std::string(TOOL_VERSION) : report.tool_version;
     root["timestamp_utc"]  = report.timestamp_utc;
 
@@ -136,7 +138,7 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
     }
     root["diagnoses"] = std::move(diag_array);
 
-    // Frame Timeline (v1.1)
+    // Frame Timeline (v1.3)
     nlohmann::json timeline_arr = nlohmann::json::array();
     for (const auto& pt : report.frame_timeline) {
         timeline_arr.push_back({
@@ -146,7 +148,8 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
             {"duration_ms", pt.duration_ms},
             {"offset_from_trigger_ms", pt.offset_from_trigger_ms},
             {"is_trigger_frame", pt.is_trigger_frame},
-            {"is_pacing_stall", pt.is_pacing_stall}
+            {"is_pacing_stall", pt.is_pacing_stall},
+            {"is_relative_spike", pt.is_relative_spike}
         });
     }
     root["frame_timeline"] = std::move(timeline_arr);

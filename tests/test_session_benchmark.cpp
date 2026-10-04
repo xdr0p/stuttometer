@@ -869,6 +869,27 @@ static void test_schema_1_4_dual_counters_and_filtering() {
     std::cout << "[TEST 22] PASSED\n";
 }
 
+static void test_judder_filtered_event_stall_exclusion() {
+    std::cout << "[TEST 23] Judder Filtered Event Stall Exclusion...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(1234);
+
+    // 1. Ingest normal non-judder filtered event (15.0ms) -> both count and stall time increment
+    benchmark.ingest_filtered_event(1234, 15.0, stuttometer::TriggerReason::RELATIVE_SPIKE);
+    auto s1 = benchmark.get_summary();
+    STUTTO_ASSERT(s1.minor_stutters == 1);
+    STUTTO_ASSERT(std::abs(s1.minor_stall_ms - 15.0) < 0.01);
+
+    // 2. Ingest judder filtered event (2500.0ms span) -> count increments, stall time DOES NOT increment
+    benchmark.ingest_filtered_event(1234, 2500.0, stuttometer::TriggerReason::CADENCE_JUDDER);
+    auto s2 = benchmark.get_summary();
+    STUTTO_ASSERT(s2.minor_stutters == 2);
+    STUTTO_ASSERT(std::abs(s2.minor_stall_ms - 15.0) < 0.01); // stall ms remains 15.0ms
+
+    std::cout << "[TEST 23] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -893,8 +914,9 @@ int main() {
         test_standalone_fallback_denominator_invariant();
         test_top_5_boundary_six_hypotheses();
         test_schema_1_4_dual_counters_and_filtering();
+        test_judder_filtered_event_stall_exclusion();
 
-        std::cout << "\nAll 22 Session Benchmark tests PASSED successfully!\n";
+        std::cout << "\nAll 23 Session Benchmark tests PASSED successfully!\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\nTest suite failed with exception: " << ex.what() << "\n";

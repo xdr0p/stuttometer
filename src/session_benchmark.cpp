@@ -307,10 +307,10 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
 }
 
 void SessionBenchmark::ingest_filtered_event(double duration_ms) noexcept {
-    ingest_filtered_event(0, duration_ms);
+    ingest_filtered_event(0, duration_ms, TriggerReason::NONE);
 }
 
-void SessionBenchmark::ingest_filtered_event(uint32_t pid, double duration_ms) noexcept {
+void SessionBenchmark::ingest_filtered_event(uint32_t pid, double duration_ms, TriggerReason reason) noexcept {
     if (duration_ms <= 0.0) {
         return;
     }
@@ -320,7 +320,9 @@ void SessionBenchmark::ingest_filtered_event(uint32_t pid, double duration_ms) n
         return;
     }
     minor_stutters_.fetch_add(1, std::memory_order_relaxed);
-    minor_stall_us_.fetch_add(static_cast<uint64_t>(duration_ms * 1000.0), std::memory_order_relaxed);
+    if (reason != TriggerReason::CADENCE_JUDDER) {
+        minor_stall_us_.fetch_add(static_cast<uint64_t>(duration_ms * 1000.0), std::memory_order_relaxed);
+    }
 }
 
 BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {

@@ -272,6 +272,36 @@ static void test_diagnostic_toggles() {
     std::cout << "  -> Diagnostic toggles verification PASSED.\n";
 }
 
+static void test_trigger_engine_judder_filtered_stall_exclusion() {
+    std::cout << "[TEST] Running test_trigger_engine_judder_filtered_stall_exclusion...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    TriggerConfig config{};
+    config.present_threshold_ms = 16.67;
+    config.min_report_severity = ReportSeverity::WARNING;
+
+    TriggerEngine engine(config, qpc_freq);
+    STUTTO_ASSERT(engine.filtered_reports() == 0);
+    STUTTO_ASSERT(engine.filtered_stall_ms() == 0);
+
+    // 1. Ingest relative spike filtered event (20.0ms) -> both count and stall time increment
+    engine.record_filtered_event_for_test(
+        TriggerSource::DXGI_PRESENT_STUTTER,
+        TriggerReason::RELATIVE_SPIKE,
+        20.0, 1234, 5678);
+    STUTTO_ASSERT(engine.filtered_reports() == 1);
+    STUTTO_ASSERT(engine.filtered_stall_ms() == 20);
+
+    // 2. Ingest judder filtered event (2500.0ms) -> count increments, stall time DOES NOT increment
+    engine.record_filtered_event_for_test(
+        TriggerSource::FRAME_PACING_JUDDER,
+        TriggerReason::CADENCE_JUDDER,
+        2500.0, 1234, 5678);
+    STUTTO_ASSERT(engine.filtered_reports() == 2);
+    STUTTO_ASSERT(engine.filtered_stall_ms() == 20); // Remains 20ms, not 2520ms!
+
+    std::cout << "  -> Judder filtered stall exclusion PASSED.\n";
+}
+
 int main() {
     try {
         test_filtered_event_layout();
@@ -281,6 +311,7 @@ int main() {
         test_mpsc_concurrency_stress();
         test_trigger_engine_preclaim_gate();
         test_diagnostic_toggles();
+        test_trigger_engine_judder_filtered_stall_exclusion();
         std::cout << "[PASS] All test_report_filtering tests passed successfully!\n";
         return 0;
     } catch (const std::exception& ex) {

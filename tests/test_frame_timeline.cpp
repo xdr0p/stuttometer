@@ -86,7 +86,8 @@ static void test_uncapped_timeline() {
     for (const auto& pt : report.frame_timeline) {
         if (pt.is_trigger_frame) {
             STUTTO_ASSERT(pt.relative_index == 0);
-            STUTTO_ASSERT(pt.is_pacing_stall);
+            STUTTO_ASSERT(!pt.is_pacing_stall); // baseline_avg_ms == 0.0
+            STUTTO_ASSERT(pt.is_relative_spike);
             STUTTO_ASSERT(pt.frame_index == 200);
             found_trigger = true;
             break;
@@ -287,17 +288,23 @@ static void test_high_refresh_timeline_tagging() {
     auto report = correlator.correlate(snapshot, trigger, qpc_freq, opts);
 
     STUTTO_ASSERT(report.frame_timeline.size() == 3);
-    STUTTO_ASSERT(!report.frame_timeline[0].is_pacing_stall); // 6.94 ms < 7.44 ms
-    STUTTO_ASSERT(report.frame_timeline[1].is_pacing_stall);  // 8.5 ms >= 7.44 ms (tagged as stall because baseline is 144Hz!)
-    STUTTO_ASSERT(report.frame_timeline[2].is_pacing_stall);  // 20.0 ms >= 7.44 ms
+    STUTTO_ASSERT(!report.frame_timeline[0].is_pacing_stall);   // 6.94 ms < 7.44 ms
+    STUTTO_ASSERT(!report.frame_timeline[0].is_relative_spike); // 6.94 ms < 17.5 ms
+    STUTTO_ASSERT(report.frame_timeline[1].is_pacing_stall);    // 8.5 ms >= 7.44 ms (tagged as stall because baseline is 144Hz!)
+    STUTTO_ASSERT(!report.frame_timeline[1].is_relative_spike); // 8.5 ms < 17.5 ms (not a display-threshold spike)
+    STUTTO_ASSERT(report.frame_timeline[2].is_pacing_stall);    // 20.0 ms >= 7.44 ms
+    STUTTO_ASSERT(report.frame_timeline[2].is_relative_spike);   // 20.0 ms >= 17.5 ms
 
-    // Fallback when baseline_avg_ms is 0.0 -> uses present_threshold_ms (16.67 ms -> threshold = 17.5035 ms)
+    // Fallback when baseline_avg_ms is 0.0 -> is_pacing_stall is false, but is_relative_spike uses present_threshold_ms (16.67 ms -> threshold = 17.5035 ms)
     trigger.baseline_avg_ms = 0.0;
     auto report_fallback = correlator.correlate(snapshot, trigger, qpc_freq, opts);
     STUTTO_ASSERT(report_fallback.frame_timeline.size() == 3);
-    STUTTO_ASSERT(!report_fallback.frame_timeline[0].is_pacing_stall); // 6.94 ms < 17.5 ms
-    STUTTO_ASSERT(!report_fallback.frame_timeline[1].is_pacing_stall); // 8.5 ms < 17.5 ms (not a stall under 16.67ms threshold!)
-    STUTTO_ASSERT(report_fallback.frame_timeline[2].is_pacing_stall);  // 20.0 ms >= 17.5 ms
+    STUTTO_ASSERT(!report_fallback.frame_timeline[0].is_pacing_stall);   // baseline_avg_ms == 0.0
+    STUTTO_ASSERT(!report_fallback.frame_timeline[0].is_relative_spike); // 6.94 ms < 17.5 ms
+    STUTTO_ASSERT(!report_fallback.frame_timeline[1].is_pacing_stall);   // baseline_avg_ms == 0.0
+    STUTTO_ASSERT(!report_fallback.frame_timeline[1].is_relative_spike); // 8.5 ms < 17.5 ms (not a stall under 16.67ms threshold!)
+    STUTTO_ASSERT(!report_fallback.frame_timeline[2].is_pacing_stall);   // baseline_avg_ms == 0.0
+    STUTTO_ASSERT(report_fallback.frame_timeline[2].is_relative_spike);  // 20.0 ms >= 17.5 ms
 
     std::cout << "  -> High-refresh is_pacing_stall timeline tagging PASSED.\n";
 }

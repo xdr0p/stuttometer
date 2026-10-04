@@ -138,7 +138,7 @@ public:
     void ingest_frame(uint32_t pid, double duration_ms, uint64_t timestamp_qpc) noexcept;
     void ingest_report(const DiagnosticReport& report);
     void ingest_filtered_event(double duration_ms) noexcept;
-    void ingest_filtered_event(uint32_t pid, double duration_ms) noexcept;
+    void ingest_filtered_event(uint32_t pid, double duration_ms, TriggerReason reason = TriggerReason::NONE) noexcept;
 
     void set_pacing_context(
         PacingProfile profile,

@@ -11,7 +11,8 @@ void export_to_stream(const DiagnosticReport& report, std::ostream& out) {
         << escape_csv_field("duration_ms") << ','
         << escape_csv_field("offset_from_trigger_ms") << ','
         << escape_csv_field("is_trigger_frame") << ','
-        << escape_csv_field("is_pacing_stall") << "\r\n";
+        << escape_csv_field("is_pacing_stall") << ','
+        << escape_csv_field("is_relative_spike") << "\r\n";
     for (const auto& pt : report.frame_timeline) {
         out << pt.frame_index << ','
             << pt.relative_index << ','
@@ -19,7 +20,8 @@ void export_to_stream(const DiagnosticReport& report, std::ostream& out) {
             << std::fixed << std::setprecision(4) << pt.duration_ms << ','
             << std::fixed << std::setprecision(4) << pt.offset_from_trigger_ms << ','
             << (pt.is_trigger_frame ? "true" : "false") << ','
-            << (pt.is_pacing_stall ? "true" : "false") << "\r\n";
+            << (pt.is_pacing_stall ? "true" : "false") << ','
+            << (pt.is_relative_spike ? "true" : "false") << "\r\n";
     }
 }
 

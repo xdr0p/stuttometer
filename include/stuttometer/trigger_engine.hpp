@@ -209,6 +209,19 @@ public:
         pause_only_generation_for_test_.store(0, std::memory_order_release);
     }
 
+    // Test-only seam: record_filtered_event wrapper for unit testing filtered event routing.
+    void record_filtered_event_for_test(
+        TriggerSource src,
+        TriggerReason reason,
+        double duration_ms,
+        uint32_t pid = 0,
+        uint32_t tid = 0
+    ) noexcept {
+        record_filtered_event(src, reason, /*timestamp_qpc=*/0, duration_ms,
+                              /*baseline_avg_ms=*/0.0, /*spike_ratio=*/1.0,
+                              pid, tid, /*cpu_index=*/0, FilterKind::SEVERITY_GATE);
+    }
+
     // Test-only: returns the current rolling baseline for the specified stream key (or derived pid/tid).
     // Returns 0.0 if the stream is not present or has <1 sample. Not used in production.
     double current_stream_baseline_ms_for_test(uint64_t stream_key, uint32_t pid, uint32_t tid) const noexcept;

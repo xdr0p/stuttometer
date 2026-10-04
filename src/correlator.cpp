@@ -137,6 +137,9 @@ constexpr std::array<HypothesisTagEntry, 15> kHypothesisTagTable = {{
 }
 
 [[nodiscard]] inline double software_coverage(const ProviderContext& ctx) noexcept {
+    if (ctx.etw_events_lost > 0 || ctx.etw_buffers_lost > 0) {
+        return 0.0;
+    }
     int active = 0;
     int total  = 0;
     auto chk = [&](bool v) { total++; if (v) active++; };
@@ -276,8 +279,11 @@ AttributionResult compute_attribution(const DiagnosticReport& report, uint32_t c
                 pid = ev_pid;
                 process = get_process_name_by_pid(ev_pid);
                 if (process.empty()) process = (h == "page_fault_stall") ? "Unknown Page Fault" : "External Allocator";
+            } else if (ev_pid == 0) {
+                tag = AttributionTag::EXTERNAL_CONTENTION;
+                pid = 0;
+                process = "System (unresolved PID)";
             } else {
-                // Note: target_pid == 0 (monitor-all) with ev_pid == 0 falls into this branch, preserving existing behavior
                 tag = AttributionTag::GAME_ENGINE;
                 pid = report.trigger.target_pid;
                 process = report.target_process.empty() ? "Target Process" : report.target_process;
@@ -550,6 +556,12 @@ DiagnosticReport CorrelationEngine::correlate(
     std::vector<Diagnosis> hypotheses;
     constexpr size_t MAX_EVIDENCE_ITEMS = 10;
 
+    const bool no_cumulative_preemption =
+        !provider_ctx.kernel_cswitch_active
+        || (trigger.target_tid != 0
+            ? (target_thread_preempt_us < (thresholds_.cswitch_preempt_ms * 1000))
+            : (core_cswitch_preempt_us[trigger.cpu_index] < (thresholds_.cswitch_preempt_ms * 1000)));
+
     // 2. Evaluate DPC / ISR Anomaly Hypothesis
     if (!dpc_candidates.empty()) {
         std::sort(dpc_candidates.begin(), dpc_candidates.end(), [](const DpcCandidate& a, const DpcCandidate& b) {
@@ -703,6 +715,7 @@ DiagnosticReport CorrelationEngine::correlate(
 
     if (is_gpu_candidate && 
         provider_ctx.kernel_dpc_active &&
+        no_cumulative_preemption &&
         dpc_candidates.empty() && 
         disk_candidates.empty() && 
         cswitch_candidates.empty() &&
@@ -1149,23 +1162,18 @@ DiagnosticReport CorrelationEngine::correlate(
         ? trigger.baseline_avg_ms
         : ((report.hardware_vblank_ms > 0.0) ? report.hardware_vblank_ms : DEFAULT_60HZ_VBLANK_MS);
     const double effective_smi_threshold = (thresholds_.auto_scale_smi)
-        ? (2.0 * ref_smi_cadence_ms)
+        ? std::max(detail::severity::smi::AUTO_SCALE_FLOOR_MS, 2.0 * ref_smi_cadence_ms)
         : thresholds_.smi_severity_threshold_ms;
 
     const bool is_severe = (trigger.source == TriggerSource::AUDIO_GLITCH) || 
                            (trigger.source == TriggerSource::KERNEL_FRAME_STALL) || 
                            (trigger.duration_ms >= effective_smi_threshold);
-    const bool no_preemption_anomaly =
-        !provider_ctx.kernel_cswitch_active
-        || (trigger.target_tid != 0
-            ? (target_thread_preempt_us < (thresholds_.cswitch_preempt_ms * 1000))
-            : (core_cswitch_preempt_us[trigger.cpu_index] < (thresholds_.cswitch_preempt_ms * 1000)));
 
     if (hypotheses.empty() && 
         dwm_candidates.empty() &&
         provider_ctx.kernel_dpc_active && 
         is_severe && 
-        no_preemption_anomaly) {
+        no_cumulative_preemption) {
         Diagnosis diag;
         diag.hypothesis = "unprofiled_hardware_or_smi_stall";
         const double base_cap = provider_ctx.kernel_cswitch_active
@@ -1284,8 +1292,12 @@ DiagnosticReport CorrelationEngine::correlate(
             }
 
             report.frame_timeline.reserve(end_idx - start_idx);
-            const double base_thresh_ms = (trigger.baseline_avg_ms > 0.0) ? trigger.baseline_avg_ms : report.present_threshold_ms;
-            const double effective_thresh_ms = base_thresh_ms + std::max(0.5, base_thresh_ms * 0.05);
+            const bool has_baseline = (trigger.baseline_avg_ms > 0.0);
+            const double baseline_thresh_ms = has_baseline
+                ? trigger.baseline_avg_ms + std::max(0.5, trigger.baseline_avg_ms * 0.05)
+                : 0.0;
+            const double display_thresh_ms = report.present_threshold_ms
+                + std::max(0.5, report.present_threshold_ms * 0.05);
 
             for (size_t i = start_idx; i < end_idx; ++i) {
                 const auto& rec = present_stops[i];
@@ -1298,7 +1310,8 @@ DiagnosticReport CorrelationEngine::correlate(
                     ? qpc_delta_to_ms(rec.qpc_timestamp - trigger.trigger_timestamp_qpc, qpc_freq)
                     : -qpc_delta_to_ms(trigger.trigger_timestamp_qpc - rec.qpc_timestamp, qpc_freq);
                 pt.is_trigger_frame = (i == anchor_idx);
-                pt.is_pacing_stall = (pt.duration_ms >= effective_thresh_ms);
+                pt.is_pacing_stall = has_baseline && (pt.duration_ms >= baseline_thresh_ms);
+                pt.is_relative_spike = (pt.duration_ms >= display_thresh_ms);
                 report.frame_timeline.push_back(pt);
             }
         }
