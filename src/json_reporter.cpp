@@ -17,7 +17,7 @@ namespace stuttometer {
 nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact) const {
     nlohmann::json root;
 
-    root["schema_version"] = report.schema_version.empty() ? "1.1" : report.schema_version;
+    root["schema_version"] = report.schema_version.empty() ? "1.2" : report.schema_version;
     root["tool_version"]   = report.tool_version.empty() ? std::string(TOOL_VERSION) : report.tool_version;
     root["timestamp_utc"]  = report.timestamp_utc;
 
@@ -79,7 +79,9 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
         {"target_process", redact ? "Process_REDACTED" : report.target_process},
         {"baseline_avg_ms", report.trigger.baseline_avg_ms},
         {"baseline_fps", report.trigger.baseline_fps},
-        {"spike_ratio", report.trigger.spike_ratio}
+        {"spike_ratio", report.trigger.spike_ratio},
+        {"judder_alternations", report.trigger.judder_alternations},
+        {"judder_max_swing_q100", report.trigger.judder_max_swing_q100}
     };
     if (report.trigger.source == TriggerSource::AUDIO_GLITCH) {
         trig_obj["glitch_count"] = report.trigger.glitch_count;

@@ -659,7 +659,7 @@ static void test_audio_glitch_separation() {
     // Verify JSON serialization
     std::string json_str = summary.to_json();
     auto root = nlohmann::json::parse(json_str);
-    STUTTO_ASSERT(root["schema_version"] == "1.3");
+    STUTTO_ASSERT(root["schema_version"] == "1.4");
     STUTTO_ASSERT(root.contains("audio_glitches_detected"));
     STUTTO_ASSERT(root["audio_glitches_detected"] == 1);
     STUTTO_ASSERT(root["stutters_detected"] == 1);
@@ -672,7 +672,7 @@ static void test_audio_glitch_separation() {
     // Verify Markdown serialization
     std::string md_str = summary.to_markdown();
     STUTTO_ASSERT(md_str.find("- **Audio Glitches:** 1") != std::string::npos);
-    STUTTO_ASSERT(md_str.find("- **Stutters Detected:** 1") != std::string::npos);
+    STUTTO_ASSERT(md_str.find("- **Stutters Detected (single-frame + judder):** 1") != std::string::npos);
 
     std::cout << "[TEST 18] PASSED\n";
 }
@@ -768,8 +768,8 @@ static void test_top_5_boundary_six_hypotheses() {
     std::cout << "[TEST 21] PASSED\n";
 }
 
-static void test_schema_1_3_dual_counters_and_filtering() {
-    std::cout << "[TEST 22] Schema 1.3 Dual Counters & Filtering Test...\n";
+static void test_schema_1_4_dual_counters_and_filtering() {
+    std::cout << "[TEST 22] Schema 1.4 Dual Counters & Filtering Test...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
     stuttometer::SessionBenchmark benchmark(qpc_freq);
     benchmark.retarget(1234);
@@ -846,7 +846,7 @@ static void test_schema_1_3_dual_counters_and_filtering() {
     // 5. JSON serialization validation
     std::string json_str = s4.to_json();
     auto root = nlohmann::json::parse(json_str);
-    STUTTO_ASSERT(root["schema_version"] == "1.3");
+    STUTTO_ASSERT(root["schema_version"] == "1.4");
     STUTTO_ASSERT(root["stutters_detected"] == 1);
     STUTTO_ASSERT(root["minor_stutters"] == 3);
     STUTTO_ASSERT(std::abs(root["minor_stall_ms"].get<double>() - 40.5) < 0.01);
@@ -854,7 +854,7 @@ static void test_schema_1_3_dual_counters_and_filtering() {
 
     // 6. Markdown serialization validation
     std::string md_str = s4.to_markdown();
-    STUTTO_ASSERT(md_str.find("- **Stutters Detected:** 1") != std::string::npos);
+    STUTTO_ASSERT(md_str.find("- **Stutters Detected (single-frame + judder):** 1") != std::string::npos);
     STUTTO_ASSERT(md_str.find("- **Minor Stutters (Filtered):** 3 (40.5 ms)") != std::string::npos);
     STUTTO_ASSERT(md_str.find("- **Total Triggers:** 4") != std::string::npos);
 
@@ -892,7 +892,7 @@ int main() {
         test_pause_ceiling_2s_boundary();
         test_standalone_fallback_denominator_invariant();
         test_top_5_boundary_six_hypotheses();
-        test_schema_1_3_dual_counters_and_filtering();
+        test_schema_1_4_dual_counters_and_filtering();
 
         std::cout << "\nAll 22 Session Benchmark tests PASSED successfully!\n";
         return 0;

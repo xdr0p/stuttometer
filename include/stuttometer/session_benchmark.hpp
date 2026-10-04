@@ -89,6 +89,9 @@ struct BenchmarkSummary {
     double net_stall_ms{0.0};
     double worst_stutter_ms{0.0};
     std::string worst_stutter_hypothesis;
+    uint64_t judder_episodes{0};
+    double   judder_total_span_ms{0.0};
+    double   worst_judder_span_ms{0.0};
     bool redacted{false};
 
     // is_monitor_all: true when no target process is configured. In the current GUI,
@@ -211,6 +214,9 @@ private:
     double net_stall_ms_{0.0};
     double worst_stutter_ms_{0.0};
     std::string worst_stutter_hypothesis_;
+    uint64_t judder_episodes_{0};
+    double   judder_total_span_ms_{0.0};
+    double   worst_judder_span_ms_{0.0};
     std::string target_process_;
 };
 

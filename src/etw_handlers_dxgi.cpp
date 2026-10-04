@@ -57,8 +57,14 @@ void EtwSessionManager::handle_dxgi_event(
 
             last_present_table_.insert(swapchain_key, { ctx.timestamp, ctx.pid, ctx.tid });
 
-            rec.duration_us = static_cast<uint32_t>(
-                std::min(delta_res.effective_dur_us, KERNEL_SINGLE_EVENT_CAP_US));
+            // Emit cap: inter-frame semantics are bounded by the pause ceiling. A Stop
+            // whose effective duration exceeds the pause ceiling is either a baseline
+            // reset or a stale pairing; emit the event for raw-stream data fidelity but
+            // bound the reported duration at the pause ceiling. The trigger path handles
+            // baseline-reset exclusion independently below.
+            const uint64_t emit_dur_us =
+                std::min(delta_res.effective_dur_us, PAUSE_CEILING_US);
+            rec.duration_us = static_cast<uint32_t>(emit_dur_us);
             emit_event(rec);
 
             // Guard pacing ingestion: duplicates must not pollute the rolling baseline, SessionBenchmark,

@@ -404,7 +404,8 @@ int main(int argc, char** argv) {
                     .present_threshold_ms = present_threshold_ms,
                     .hardware_vblank_ms = trig_config.vblank_interval_ms,
                     .provider_tier = provider_tier,
-                    .redact = redact
+                    .redact = redact,
+                    .judder_swing_ratio = judder_swing_ratio
                 };
 
                 auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());

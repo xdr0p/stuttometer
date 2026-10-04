@@ -44,8 +44,12 @@ void EtwSessionManager::handle_dwm_event(PEVENT_RECORD p_event, EtwEventRecord& 
         std::memcpy(&missed_vblanks, raw + 4, sizeof(uint32_t));
     }
     rec.auxiliary_data = glitch_type;
-    const double dur_ms = (missed_vblanks >= 1) ? (missed_vblanks * vblank_ms) : vblank_ms;
-    rec.duration_us = static_cast<uint32_t>(std::clamp(dur_ms * 1000.0, DWM_MIN_GLITCH_DURATION_US, static_cast<double>(KERNEL_SINGLE_EVENT_CAP_US)));
+    const double raw_dur_ms = (missed_vblanks >= 1) ? (missed_vblanks * vblank_ms) : vblank_ms;
+    const double dur_ms = std::clamp(
+        raw_dur_ms,
+        DWM_MIN_GLITCH_DURATION_US / 1000.0,
+        static_cast<double>(KERNEL_SINGLE_EVENT_CAP_US) / 1000.0);
+    rec.duration_us = static_cast<uint32_t>(dur_ms * 1000.0);
 
     bool is_dedup = false;
     const uint64_t dedup_window_qpc = ms_to_qpc_delta(DWM_DEDUP_WINDOW_MS, qpc_freq_);

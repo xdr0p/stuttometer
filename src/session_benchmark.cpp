@@ -19,14 +19,21 @@ std::string BenchmarkSummary::to_markdown() const {
     oss << "- **Duration:** " << std::setfill('0') << std::setw(2) << mins << ":"
         << std::setfill('0') << std::setw(2) << secs << "\n";
     oss << "- **Total Frames:** " << total_frames << "\n";
-    oss << "- **Stutters Detected:** " << stutters_detected << "\n";
+    oss << "- **Stutters Detected (single-frame + judder):** " << stutters_detected << "\n";
     if (minor_stutters > 0) {
         oss << "- **Minor Stutters (Filtered):** " << minor_stutters << " ("
             << std::fixed << std::setprecision(1) << minor_stall_ms << " ms)\n";
     }
     oss << "- **Total Triggers:** " << total_triggers << "\n";
     oss << "- **Audio Glitches:** " << audio_glitches_detected << "\n";
-    oss << "- **Net Stall Time:** " << std::fixed << std::setprecision(1) << net_stall_ms << " ms\n\n";
+    oss << "- **Net Stall Time:** " << std::fixed << std::setprecision(1) << net_stall_ms << " ms\n";
+    if (judder_episodes > 0) {
+        oss << "\n## Judder Episodes\n\n";
+        oss << "- **Episodes Detected:** " << judder_episodes << "\n";
+        oss << "- **Total Judder Span:** " << std::fixed << std::setprecision(1) << judder_total_span_ms << " ms\n";
+        oss << "- **Worst Episode Span:** " << std::fixed << std::setprecision(1) << worst_judder_span_ms << " ms\n";
+    }
+    oss << "\n";
 
     oss << "## Frame Pacing\n\n";
     oss << "| Metric | Value |\n";
@@ -93,8 +100,8 @@ std::string BenchmarkSummary::to_markdown() const {
 
 std::string BenchmarkSummary::to_json() const {
     nlohmann::json j;
-    // Schema 1.3: minor_stutters, minor_stall_ms, and total_triggers added
-    j["schema_version"] = "1.3";
+    // Schema 1.4: judder_episodes, judder_total_span_ms, and worst_judder_span_ms added
+    j["schema_version"] = "1.4";
     j["target_process"] = target_process;
     j["target_pid"] = target_pid;
     j["duration_ms"] = duration_ms;
@@ -117,6 +124,9 @@ std::string BenchmarkSummary::to_json() const {
     j["net_stall_ms"] = net_stall_ms;
     j["worst_stutter_ms"] = worst_stutter_ms;
     j["worst_stutter_hypothesis"] = worst_stutter_hypothesis;
+    j["judder_episodes"] = judder_episodes;
+    j["judder_total_span_ms"] = judder_total_span_ms;
+    j["worst_judder_span_ms"] = worst_judder_span_ms;
 
     nlohmann::json cadence;
     cadence["pacing_profile"] = pacing_profile_to_string(pacing_profile);
@@ -229,17 +239,7 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
         return;
     }
 
-    const MetricSeverity sev = classify_severity(report.trigger, report.present_threshold_ms);
-    const double stall_ms = report.trigger.duration_ms;
-
-    if (sev < MetricSeverity::WARNING) {
-        minor_stutters_.fetch_add(1, std::memory_order_relaxed);
-        minor_stall_us_.fetch_add(static_cast<uint64_t>(stall_ms * 1000.0), std::memory_order_relaxed);
-    } else {
-        stutters_detected_++;
-        net_stall_ms_ += stall_ms;
-    }
-
+    // Hypothesis extraction (moved above severity branching)
     std::string hyp = "unattributed";
     double conf = 0.0;
     std::string driver_mod;
@@ -256,24 +256,54 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
         }
     }
 
-    if (stall_ms > worst_stutter_ms_) {
-        worst_stutter_ms_ = stall_ms;
-        worst_stutter_hypothesis_ = hyp;
+    const MetricSeverity sev = classify_severity(report.trigger, report.present_threshold_ms);
+    const double stall_ms = report.trigger.duration_ms;
+    const bool is_judder =
+        (report.trigger.source == TriggerSource::FRAME_PACING_JUDDER ||
+         report.trigger.reason == TriggerReason::CADENCE_JUDDER);
+
+    if (sev < MetricSeverity::WARNING) {
+        minor_stutters_.fetch_add(1, std::memory_order_relaxed);
+        if (!is_judder) {
+            minor_stall_us_.fetch_add(
+                static_cast<uint64_t>(stall_ms * 1000.0),
+                std::memory_order_relaxed);
+        }
+    } else {
+        stutters_detected_++;
+        if (is_judder) {
+            ++judder_episodes_;
+            judder_total_span_ms_ += stall_ms;
+            if (stall_ms > worst_judder_span_ms_) {
+                worst_judder_span_ms_ = stall_ms;
+            }
+        } else {
+            net_stall_ms_ += stall_ms;
+            if (stall_ms > worst_stutter_ms_) {
+                worst_stutter_ms_ = stall_ms;
+                worst_stutter_hypothesis_ = hyp;
+            }
+        }
     }
 
+    // Judder contributes to hypothesis/tag counts for telemetry visibility, but not to stall totals
     auto& h_rec = hypothesis_stats_[hyp];
     h_rec.hypothesis = hyp;
     h_rec.count++;
-    h_rec.total_stall_ms += stall_ms;
     h_rec.total_confidence += conf;
-    if (!driver_mod.empty()) {
-        h_rec.driver_counts[driver_mod]++;
+    if (!is_judder) {
+        h_rec.total_stall_ms += stall_ms;
+        if (!driver_mod.empty()) {
+            h_rec.driver_counts[driver_mod]++;
+        }
     }
 
     auto& t_rec = tag_stats_[report.attribution];
     t_rec.tag = report.attribution;
     t_rec.count++;
-    t_rec.total_stall_ms += stall_ms;
+    if (!is_judder) {
+        t_rec.total_stall_ms += stall_ms;
+    }
 }
 
 void SessionBenchmark::ingest_filtered_event(double duration_ms) noexcept {
@@ -498,6 +528,9 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
         summary.net_stall_ms = net_stall_ms_;
         summary.worst_stutter_ms = worst_stutter_ms_;
         summary.worst_stutter_hypothesis = worst_stutter_hypothesis_;
+        summary.judder_episodes = judder_episodes_;
+        summary.judder_total_span_ms = judder_total_span_ms_;
+        summary.worst_judder_span_ms = worst_judder_span_ms_;
 
         if (redact) {
             summary.target_process = "Process_REDACTED";
@@ -509,6 +542,7 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
         all_hyp.reserve(hypothesis_stats_.size());
 
         for (const auto& [name, rec] : hypothesis_stats_) {
+            if (name == "frame_pacing_judder") continue; // Judder is surfaced separately
             HypothesisAttributionStat stat;
             stat.hypothesis = rec.hypothesis;
             stat.count = rec.count;
@@ -598,6 +632,9 @@ void SessionBenchmark::clear_attribution_locked() {
     net_stall_ms_ = 0.0;
     worst_stutter_ms_ = 0.0;
     worst_stutter_hypothesis_.clear();
+    judder_episodes_ = 0;
+    judder_total_span_ms_ = 0.0;
+    worst_judder_span_ms_ = 0.0;
     target_process_.clear();
 }
 

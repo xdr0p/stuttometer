@@ -50,5 +50,31 @@ This document defines standing invariants and operational constraints for automa
 
 ## 5. Testing & Modification Rules
 
-- **Tests may be modified ONLY when the task explicitly states the behavior is changing.** Otherwise, a failing test indicates the implementation code is incorrect, not the test.
+- **Default assumption: a failing test means the implementation is wrong, not the test.** Only override this assumption after explicit diagnosis (see two-phase protocol below).
 - Every commit must compile cleanly under MSVC x64 and pass 100% of CTest test suites (`ctest --test-dir build -C Release --output-on-failure`).
+- **Two-phase protocol — mandatory for all implementation changes (bug fixes and new features):**
+  - **Phase 1 (implement):** Apply source changes to `src/` and `include/` only. Do NOT touch any file under `tests/` in this phase, regardless of test failures.
+  - **Phase 2 (diagnose failures):** If tests fail after Phase 1, report the exact failure output and classify the cause as one of:
+    - **Regression** — the change introduced a bug that the test correctly caught. Fix the implementation, not the test.
+    - **Intentional behavior change** — existing behavior was deliberately altered. The test needs updated expectations.
+    - **New feature gap** — new functionality changed a signature, struct, or output that the test references but the test has no coverage for the new behavior yet. The test needs mechanical fixes (compilation) or new test cases.
+  - **Test updates require explicit user confirmation** that the behavior change or new feature gap is intentional before any `tests/` file is modified. Never update a test and its corresponding implementation in the same step without this confirmation.
+
+---
+
+## 6. Execution & Plan Management Protocol
+
+### 1. Operational Modes
+- **Plan Review Mode:** When asked to review a plan, perform a read-only audit against existing workspace code and invariants (struct layouts, `static_assert` checks, hot-path rules). Report any gaps, signature mismatches, or risks without modifying files or spawning subagents.
+- **Plan Execution Mode:** When executing an approved plan, follow the specification line-by-line. Do not introduce unsolicited refactoring, extra dependencies, or architectural improvisations.
+
+### 2. Phased Execution Workflow
+- **Phase Decomposition:** Organize execution into discrete, logical phases based on module boundaries (e.g., Header/Types -> Engine Logic -> Integration).
+- **Single Phase per Turn:** Execute exactly one logical phase per turn. Once the phase is implemented, stop immediately, report the changes, and wait for confirmation before proceeding to subsequent phases.
+
+### 3. Verification & Context Hygiene
+- **Deterministic Build & Test:** Run build and test commands strictly in single-pass mode (`cmake --build build --config Release`, `ctest --test-dir build -C Release --output-on-failure`). Never start watch tasks or background daemons.
+- **Local Plan Scratchpads:** Read large plans from local workspace files (e.g., `PLAN.md` or `scratch/PLAN.md`) using line-ranged reads to keep context minimal.
+- **Tool Restraints:** Avoid spawning exploratory subagents or background loops during mechanical execution turns.
+- **Fresh Context Transitions:** Suggest a fresh conversation after completing major multi-phase milestones to maintain crisp reasoning.
+

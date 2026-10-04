@@ -20,6 +20,7 @@ struct CorrelateOptions {
     double hardware_vblank_ms{0.0};
     std::string provider_tier{"standard"};
     bool redact{false};
+    double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
 };
 
 struct CorrelatorThresholds {
@@ -170,7 +171,7 @@ struct AttributionResult {
 };
 
 struct DiagnosticReport {
-    std::string schema_version{"1.1"};
+    std::string schema_version{"1.2"};
     std::string tool_version{TOOL_VERSION};
     std::string timestamp_utc;
     TriggerInfo trigger;

@@ -642,7 +642,11 @@ static void test_smi_gap_standard_tier_without_cswitch() {
     auto report = correlator.correlate(snapshot, trigger, qpc_freq, p_standard);
     STUTTO_ASSERT(!report.diagnoses.empty());
     STUTTO_ASSERT(report.diagnoses[0].hypothesis == "unprofiled_hardware_or_smi_stall");
-    STUTTO_ASSERT(report.diagnoses[0].confidence == 0.30);
+    // Coverage scaling (Issue 2): base_cap (SMI_CAP_WITHOUT_CSWITCH = 0.30)
+    // × (0.5 + 0.5 × coverage) where coverage = 4/5 (DPC, Disk, DWM, VRAM active;
+    // CSwitch inactive) → 0.30 × 0.9 = 0.27.
+    STUTTO_ASSERT(std::abs(report.diagnoses[0].confidence - 0.27) < 1e-4);
+    STUTTO_ASSERT(report.diagnoses[0].summary.find("CSwitch: INACTIVE") != std::string::npos);
     std::cout << "  -> Standard tier SMI gap detection PASSED.\n";
 }
 

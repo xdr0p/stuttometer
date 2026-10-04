@@ -151,8 +151,28 @@ static void update_inspector(int selected_index) {
         oss << L"  BASELINE DELIVERY:   " << std::fixed << std::setprecision(1) << r.trigger.baseline_fps << L" FPS (" 
             << r.trigger.baseline_avg_ms << L" ms/frame, " << r.trigger.spike_ratio << L"x spike)\r\n";
     }
-    const double eff_thresh = r.present_threshold_ms + std::max(0.5, r.present_threshold_ms * 0.05);
-    oss << L"  STUTTER DURATION:    " << std::fixed << std::setprecision(2) << r.trigger.duration_ms << L" ms (Nominal: " << r.present_threshold_ms << L" ms, Effective: " << eff_thresh << L" ms)\r\n";
+    if (r.trigger.source == TriggerSource::FRAME_PACING_JUDDER ||
+        r.trigger.reason == TriggerReason::CADENCE_JUDDER) {
+        oss << L"  JUDDER EPISODE SPAN: " << std::fixed << std::setprecision(2)
+            << r.trigger.duration_ms << L" ms";
+        if (r.trigger.judder_alternations > 0) {
+            oss << L" (" << r.trigger.judder_alternations << L" alternations";
+            if (r.trigger.judder_max_swing_q100 > 0) {
+                oss << L", peak swing " << r.trigger.judder_max_swing_q100 << L"%";
+            }
+            oss << L")";
+        }
+        oss << L"\r\n";
+    } else if (r.trigger.source == TriggerSource::AUDIO_GLITCH) {
+        const uint32_t gc = r.trigger.glitch_count > 0 ? r.trigger.glitch_count : 1;
+        oss << L"  AUDIO GLITCH:        x" << gc << L" buffer underrun(s)\r\n";
+    } else {
+        const double eff_thresh =
+            r.present_threshold_ms + std::max(0.5, r.present_threshold_ms * 0.05);
+        oss << L"  STUTTER DURATION:    " << std::fixed << std::setprecision(2)
+            << r.trigger.duration_ms << L" ms (Nominal: " << r.present_threshold_ms
+            << L" ms, Effective: " << eff_thresh << L" ms)\r\n";
+    }
     oss << L"  CAPTURE WINDOW:      " << r.window_pre_ms << L" ms pre-trigger / " << r.window_post_ms << L" ms post-trigger\r\n";
     oss << L"  PROVIDER TIER:       " << utf8_to_wstring(r.provider_tier) << (r.redacted ? L" [REDACTED]" : L"") << L"\r\n\r\n";
 
@@ -390,10 +410,17 @@ static void clear_stutter_history() {
     g_engine_logs.clear();
     g_has_received_data = false;
     g_selected_stutter_index = -1;
+    g_next_stutter_id = 1;
     g_session_stutter_count = 0;
     g_session_audio_count = 0;
     g_capture_start_tick = 0;
     g_capture_elapsed_seconds = 0;
+    if (g_controller) {
+        auto bench = g_controller->get_session_benchmark();
+        if (bench) {
+            bench->reset();
+        }
+    }
     update_metrics_text();
     update_inspector(-1);
     update_clear_button_state();

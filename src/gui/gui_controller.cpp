@@ -511,7 +511,8 @@ void GuiController::session_worker_loop(GuiConfig config) {
                     .present_threshold_ms = trig_config.present_threshold_ms,
                     .hardware_vblank_ms = trig_config.vblank_interval_ms,
                     .provider_tier = config.provider_tier,
-                    .redact = config.redact
+                    .redact = config.redact,
+                    .judder_swing_ratio = config.judder_swing_ratio
                 };
 
                 auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());

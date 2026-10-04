@@ -789,6 +789,15 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             RECT tbl_title_rc = { table_rc.left + scale(16), table_rc.top + scale(12), table_rc.right - scale(16), table_rc.top + scale(32) };
             DrawTextW(mem_dc, L"Top Stutter Causes", -1, &tbl_title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+            if (summary.judder_episodes > 0) {
+                wchar_t j_buf[128];
+                swprintf_s(j_buf, L"Judder: %llu episode(s), %.1f ms total span (worst %.1f ms)",
+                           summary.judder_episodes, summary.judder_total_span_ms, summary.worst_judder_span_ms);
+                SelectObject(mem_dc, state->font_small);
+                SetTextColor(mem_dc, RGB(148, 163, 184));
+                DrawTextW(mem_dc, j_buf, -1, &tbl_title_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            }
+
             const TableColumn columns[] = {
                 { L"HYPOTHESIS",  0,          ColumnAlign::Left   }, // Dynamically auto-stretched
                 { L"TOP DRIVER",  scale(180), ColumnAlign::Left   },

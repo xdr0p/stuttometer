@@ -136,6 +136,46 @@ constexpr std::array<HypothesisTagEntry, 15> kHypothesisTagTable = {{
     return ev;
 }
 
+[[nodiscard]] inline double software_coverage(const ProviderContext& ctx) noexcept {
+    int active = 0;
+    int total  = 0;
+    auto chk = [&](bool v) { total++; if (v) active++; };
+
+    chk(ctx.kernel_dpc_active);
+    chk(ctx.kernel_cswitch_active);
+    chk(ctx.kernel_disk_active);
+    chk(ctx.user_dwm_active);
+    chk(ctx.user_vram_paging_active);
+
+    return (total > 0) ? (static_cast<double>(active) / total) : 0.0;
+}
+
+[[nodiscard]] inline std::string software_ruling_out_clause(const ProviderContext& ctx) {
+    const bool dpc_ok     = ctx.kernel_dpc_active;
+    const bool cswitch_ok = ctx.kernel_cswitch_active;
+    const bool disk_ok    = ctx.kernel_disk_active;
+
+    if (dpc_ok && cswitch_ok && disk_ok) {
+        return "No software driver DPC/ISR, disk, or thread preemption freezes were observed.";
+    }
+    if (!dpc_ok && !cswitch_ok && !disk_ok) {
+        return "No software-cause providers were active; software-side attribution is unavailable.";
+    }
+    std::string s = "No software-side freezes were observed among the active providers (";
+    bool first = true;
+    auto append = [&](const char* name, bool ok) {
+        if (!first) s += ", ";
+        s += name;
+        s += (ok ? ": active" : ": INACTIVE");
+        first = false;
+    };
+    append("DPC/ISR", dpc_ok);
+    append("CSwitch", cswitch_ok);
+    append("Disk", disk_ok);
+    s += ").";
+    return s;
+}
+
 } // anonymous namespace
 
 AttributionTag attribution_tag_for_hypothesis(std::string_view hypothesis) noexcept {
@@ -662,6 +702,7 @@ DiagnosticReport CorrelationEngine::correlate(
                                     trigger.reason == TriggerReason::RELATIVE_SPIKE));
 
     if (is_gpu_candidate && 
+        provider_ctx.kernel_dpc_active &&
         dpc_candidates.empty() && 
         disk_candidates.empty() && 
         cswitch_candidates.empty() &&
@@ -681,9 +722,14 @@ DiagnosticReport CorrelationEngine::correlate(
         const bool is_dxgi_relative_spike =
             (trigger.source == TriggerSource::DXGI_PRESENT_STUTTER &&
              trigger.reason == TriggerReason::RELATIVE_SPIKE);
-        diag.confidence = std::clamp(is_dxgi_relative_spike ? raw_conf * detail::severity::gpu_stall::DXGI_RELATIVE_PENALTY : raw_conf,
-                                     detail::severity::gpu_stall::MIN_CONFIDENCE,
-                                     detail::severity::gpu_stall::MAX_CONFIDENCE);
+        const double base_conf = is_dxgi_relative_spike
+            ? (raw_conf * detail::severity::gpu_stall::DXGI_RELATIVE_PENALTY)
+            : raw_conf;
+        const double coverage = software_coverage(provider_ctx);
+        diag.confidence = std::clamp(
+            base_conf * (0.5 + 0.5 * coverage),
+            detail::severity::gpu_stall::MIN_CONFIDENCE,
+            detail::severity::gpu_stall::MAX_CONFIDENCE);
         diag.factors = { std::min(trigger.duration_ms / detail::severity::gpu_stall::FACTOR_DURATION_DIVISOR_MS, 1.0), 0.5, 1.0 };
 
         std::stringstream ss;
@@ -706,7 +752,7 @@ DiagnosticReport CorrelationEngine::correlate(
         } else if (trigger.baseline_fps > 0.0 && trigger.reason == TriggerReason::RELATIVE_SPIKE) {
             ss << " from " << trigger.baseline_fps << " FPS / " << trigger.baseline_avg_ms << "ms baseline";
         }
-        ss << "). No software driver DPC/ISR or thread preemption freezes were observed. "
+        ss << "). " << software_ruling_out_clause(provider_ctx) << " "
            << "Suspected GPU-side pipeline stall (GPU decompression/DirectStorage contention, shader compilation, or rasterization bottleneck).";
         diag.summary = ss.str();
 
@@ -1076,13 +1122,24 @@ DiagnosticReport CorrelationEngine::correlate(
         diag.confidence = 0.80;
         diag.factors = { 0.80, 0.5, 1.0 };
         std::stringstream ss;
-        ss << "Severe presentation cadence judder detected (alternating frame delivery swing >= 35% around ";
-        if (trigger.baseline_fps > 0.0) {
-            ss << std::fixed << std::setprecision(1) << trigger.baseline_fps << " FPS / " << trigger.baseline_avg_ms << "ms baseline). ";
-        } else {
-            ss << "stream baseline). ";
+        const int swing_pct = static_cast<int>(std::lround(
+            std::max(0.01, options.judder_swing_ratio) * 100.0));
+
+        ss << "Severe presentation cadence judder detected (alternating frame "
+           << "delivery swing \u2265 " << swing_pct << "%";
+        if (trigger.judder_max_swing_q100 > 0) {
+            ss << ", observed peak " << static_cast<int>(trigger.judder_max_swing_q100) << "%";
         }
-        ss << "Presentation queue or compositor timing is de-synced with the display refresh rate.";
+        ss << ", " << trigger.judder_alternations << " alternations";
+        if (trigger.baseline_fps > 0.0) {
+            ss << " around " << std::fixed << std::setprecision(1)
+               << trigger.baseline_fps << " FPS / " << trigger.baseline_avg_ms
+               << "ms baseline). ";
+        } else {
+            ss << " around stream baseline). ";
+        }
+        ss << "Presentation queue or compositor timing is de-synced with the display "
+           << "refresh rate.";
         diag.summary = ss.str();
         hypotheses.push_back(std::move(diag));
     }
@@ -1098,9 +1155,11 @@ DiagnosticReport CorrelationEngine::correlate(
     const bool is_severe = (trigger.source == TriggerSource::AUDIO_GLITCH) || 
                            (trigger.source == TriggerSource::KERNEL_FRAME_STALL) || 
                            (trigger.duration_ms >= effective_smi_threshold);
-    const bool no_preemption_anomaly = (trigger.target_tid != 0) 
-        ? (target_thread_preempt_us < (thresholds_.cswitch_preempt_ms * 1000)) 
-        : (core_cswitch_preempt_us[trigger.cpu_index] < (thresholds_.cswitch_preempt_ms * 1000));
+    const bool no_preemption_anomaly =
+        !provider_ctx.kernel_cswitch_active
+        || (trigger.target_tid != 0
+            ? (target_thread_preempt_us < (thresholds_.cswitch_preempt_ms * 1000))
+            : (core_cswitch_preempt_us[trigger.cpu_index] < (thresholds_.cswitch_preempt_ms * 1000)));
 
     if (hypotheses.empty() && 
         dwm_candidates.empty() &&
@@ -1109,13 +1168,18 @@ DiagnosticReport CorrelationEngine::correlate(
         no_preemption_anomaly) {
         Diagnosis diag;
         diag.hypothesis = "unprofiled_hardware_or_smi_stall";
-        diag.confidence = provider_ctx.kernel_cswitch_active ? detail::severity::SMI_CAP_WITH_CSWITCH : detail::severity::SMI_CAP_WITHOUT_CSWITCH; // Strictly capped <= 0.35
+        const double base_cap = provider_ctx.kernel_cswitch_active
+            ? detail::severity::SMI_CAP_WITH_CSWITCH
+            : detail::severity::SMI_CAP_WITHOUT_CSWITCH;
+        diag.confidence = base_cap * (0.5 + 0.5 * software_coverage(provider_ctx));
         diag.factors = { detail::severity::SMI_CAP_WITH_CSWITCH, 0.0, 1.0 };
         diag.summary = (trigger.source == TriggerSource::AUDIO_GLITCH)
-            ? "Audio buffer underrun occurred without corresponding software DPC/ISR or context-switch stalls. "
-              "Unprofiled hardware interrupt or BIOS SMI is suspected."
-            : "Severe frame delay occurred without corresponding software DPC/ISR or context-switch stalls. "
-              "Unprofiled hardware interrupt, BIOS SMI, or GPU pipeline wait is suspected.";
+            ? "Audio buffer underrun occurred without evidence of software DPC/ISR or context-switch stalls in the monitored subsystems. "
+              + software_ruling_out_clause(provider_ctx)
+              + " Unprofiled hardware interrupt or BIOS SMI is suspected."
+            : "Severe frame delay occurred without evidence of software DPC/ISR or context-switch stalls in the monitored subsystems. "
+              + software_ruling_out_clause(provider_ctx)
+              + " Unprofiled hardware interrupt, BIOS SMI, or GPU pipeline wait is suspected.";
         hypotheses.push_back(std::move(diag));
     }
 

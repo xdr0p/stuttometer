@@ -210,6 +210,16 @@ static inline PresentDeltaResult calculate_effective_present_duration(
         api_dur_us = static_cast<uint64_t>(qpc_delta_to_us(current_timestamp_qpc - present_start_qpc, qpc_freq));
     }
 
+    // Stale in-flight guard: a Present API duration exceeding the pause ceiling
+    // indicates the Start/Stop pair spans a suspension (thread preemption inside
+    // the Present call, or a pairing across a process pause). Treat as a baseline
+    // reset so the trigger path does not interpret it as a frame stall.
+    if (api_dur_us > max_pause_ceiling_us) {
+        result.effective_dur_us = api_dur_us;
+        result.is_baseline_reset = true;
+        return result;
+    }
+
     if (previous_timestamp_qpc == 0 || current_timestamp_qpc <= previous_timestamp_qpc) {
         // First frame seen on this swapchain: baseline initialization
         result.effective_dur_us = api_dur_us;
