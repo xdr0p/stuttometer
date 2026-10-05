@@ -83,9 +83,9 @@ inline constexpr COLORREF COLOR_ACCENT_DANGER   = RGB(239, 68, 68);  // Refined 
 inline constexpr COLORREF COLOR_ACCENT_AMB      = RGB(245, 158, 11); // Amber / Warning (#F59E0B)
 inline constexpr COLORREF COLOR_ACCENT_CYAN     = RGB(56, 189, 248); // Sky / Info (#38BDF8)
 
-// Centralized Attribution Palette (unified 35% desaturated palette)
-inline constexpr COLORREF COLOR_ATTR_GAME_ENGINE         = RGB(218, 161, 66);  // #daa142
-inline constexpr COLORREF COLOR_ATTR_EXTERNAL_CONTENTION = RGB(197, 86, 86);   // #c55656
+// Centralized Attribution Palette (hue-shifted to avoid severity collision)
+inline constexpr COLORREF COLOR_ATTR_GAME_ENGINE         = RGB(168, 122, 60);  // #A87A3C (rust/brown ~18° hue, distinct from WARNING #F59E0B)
+inline constexpr COLORREF COLOR_ATTR_EXTERNAL_CONTENTION = RGB(168, 90, 74);   // #A85A4A (brick/rust ~12° hue, distinct from DANGER #EF4444)
 inline constexpr COLORREF COLOR_ATTR_DWM_COMPOSITION     = RGB(154, 100, 205); // #9a64cd
 inline constexpr COLORREF COLOR_ATTR_UNKNOWN             = RGB(105, 115, 130); // #697382
 

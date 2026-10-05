@@ -261,6 +261,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         trig_config.min_spike_delta_ms = config.min_spike_delta_ms;
         trig_config.enable_judder_detection = config.enable_judder_detection;
         trig_config.judder_swing_ratio = config.judder_swing_ratio;
+        trig_config.judder_min_alternations = config.judder_min_alternations;
 
         DisplayRefreshInfo disp_info = query_display_refresh_info(config.target_pid);
         trig_config.vblank_interval_ms = disp_info.vblank_interval_ms;

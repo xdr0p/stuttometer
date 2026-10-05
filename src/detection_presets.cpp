@@ -44,6 +44,7 @@ void apply_detection_preset(DetectionPreset p, TriggerConfig& trig, GuiConfig& g
     }
     gui.pacing_profile = trig.pacing_profile;
     gui.judder_swing_ratio = trig.judder_swing_ratio;
+    gui.judder_min_alternations = trig.judder_min_alternations;
 }
 
 void apply_detection_preset(DetectionPreset p, TriggerConfig& trig) noexcept {

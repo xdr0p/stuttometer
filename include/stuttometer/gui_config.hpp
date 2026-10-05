@@ -85,6 +85,7 @@ struct GuiConfig {
     double min_spike_delta_ms{4.0};
     bool enable_judder_detection{true};
     double judder_swing_ratio{0.35};
+    uint8_t judder_min_alternations{5};
 
     // In-Game OSD Toast Configuration
     bool enable_osd{false};
@@ -105,8 +106,30 @@ nlohmann::json serialize_gui_settings_to_json(
     uint32_t hotkey_vk,
     uint32_t hotkey_mods,
     bool sound_cues,
+    bool advanced_unlocked,
     const std::string& last_target_process = ""
 );
+
+// 5-parameter overload preserving backwards compatibility with call sites passing last_target_process as 5th argument
+inline nlohmann::json serialize_gui_settings_to_json(
+    const GuiConfig& config,
+    uint32_t hotkey_vk,
+    uint32_t hotkey_mods,
+    bool sound_cues,
+    const std::string& last_target_process
+) {
+    return serialize_gui_settings_to_json(config, hotkey_vk, hotkey_mods, sound_cues, false, last_target_process);
+}
+
+// 4-parameter overload preserving backwards compatibility
+inline nlohmann::json serialize_gui_settings_to_json(
+    const GuiConfig& config,
+    uint32_t hotkey_vk,
+    uint32_t hotkey_mods,
+    bool sound_cues
+) {
+    return serialize_gui_settings_to_json(config, hotkey_vk, hotkey_mods, sound_cues, false, "");
+}
 
 void deserialize_gui_settings_from_json(
     const nlohmann::json& j,
@@ -114,8 +137,24 @@ void deserialize_gui_settings_from_json(
     uint32_t& out_hotkey_vk,
     uint32_t& out_hotkey_mods,
     bool& out_sound_cues,
+    bool& out_advanced_unlocked,
     std::string& out_last_target_process
 );
+
+// 6-parameter overload preserving backwards compatibility with existing call sites
+inline void deserialize_gui_settings_from_json(
+    const nlohmann::json& j,
+    GuiConfig& out_config,
+    uint32_t& out_hotkey_vk,
+    uint32_t& out_hotkey_mods,
+    bool& out_sound_cues,
+    std::string& out_last_target_process
+) {
+    bool dummy_adv = false;
+    deserialize_gui_settings_from_json(
+        j, out_config, out_hotkey_vk, out_hotkey_mods, out_sound_cues, dummy_adv, out_last_target_process
+    );
+}
 
 void apply_detection_preset(DetectionPreset p, TriggerConfig& trig, GuiConfig& gui) noexcept;
 void apply_detection_preset(DetectionPreset p, TriggerConfig& trig) noexcept;

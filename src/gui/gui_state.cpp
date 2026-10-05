@@ -42,6 +42,7 @@ OsdToast g_osd_toast;
 
 GuiConfig g_settings_config;
 bool g_sound_cues_enabled = true;
+bool g_advanced_unlocked = false;
 uint32_t g_hotkey_vk = VK_F11;
 uint32_t g_hotkey_mods = MOD_CONTROL;
 std::wstring g_settings_file_path;
@@ -165,6 +166,7 @@ void load_user_settings() {
             g_hotkey_vk,
             g_hotkey_mods,
             g_sound_cues_enabled,
+            g_advanced_unlocked,
             g_settings_last_target_process
         );
     } catch (...) {
@@ -181,6 +183,7 @@ void save_user_settings() {
             g_hotkey_vk,
             g_hotkey_mods,
             g_sound_cues_enabled,
+            g_advanced_unlocked,
             active_cfg.target_process_name
         );
 

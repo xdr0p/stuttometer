@@ -104,7 +104,7 @@ Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Con
 
   ![Stuttometer Visual Stutter Card](assets/dummy_card_game_engine.png)
 
-- **In-Game OSD Toast:** Non-intrusive on-screen notification (`WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT`) displaying stall duration, attribution tag, culprit driver/module, and diagnosis summary when a stutter occurs, without stealing game focus or input. *Note: OSD notifications are suppressed by hardware fullscreen-exclusive presentations; use borderless-windowed mode to receive in-game notifications.*
+- **In-Game OSD Toast:** Non-intrusive on-screen notification (`WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT`) displaying stall duration, attribution tag, culprit driver/module, and diagnosis summary when a stutter occurs, without stealing game focus or input. *(Note: In-game notifications may be suppressed by some games running in exclusive fullscreen mode; borderless-windowed mode is recommended for guaranteed visibility).*
 
   ![Stuttometer In-Game OSD Toast](assets/osd_toast_ingame.png)
 - **Process Picker:** Discovers running graphical games and applications via `EnumWindows`.
@@ -247,7 +247,7 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 ## Limitations
 
 - **Platform & Privileges:** Windows 10/11 x64 only. Live tracing strictly requires administrator privileges.
-- **In-Game OSD Presentation:** OSD notifications are suppressed by hardware fullscreen-exclusive presentations; use borderless-windowed mode to receive in-game notifications.
+- **In-Game OSD Presentation:** In-game notifications may be suppressed by some games running in exclusive fullscreen mode; borderless-windowed mode ensures visibility.
 - **Heuristic Confidence:** Root-cause rankings are probabilistic correlation heuristics designed as high-signal starting points for investigation.
 - **Scope:** Stuttometer identifies root causes and isolates culpable subsystems; it does not alter driver behavior, inject into game processes, or modify system scheduler priorities.
 

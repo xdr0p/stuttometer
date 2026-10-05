@@ -99,6 +99,7 @@ int main(int argc, char** argv) {
     double min_spike_delta_ms = config.min_spike_delta_ms;
     bool enable_judder = config.enable_judder;
     double judder_swing_ratio = config.judder_swing_ratio;
+    uint8_t judder_min_alternations = config.judder_min_alternations;
     std::string dump_events_path = config.dump_events_path;
     size_t dump_max_mb = config.dump_max_mb;
     size_t dump_max_files = config.dump_max_files;
@@ -226,6 +227,7 @@ int main(int argc, char** argv) {
     trig_config.min_spike_delta_ms = min_spike_delta_ms;
     trig_config.enable_judder_detection = enable_judder;
     trig_config.judder_swing_ratio = judder_swing_ratio;
+    trig_config.judder_min_alternations = judder_min_alternations;
     trig_config.min_report_severity = config.min_report_severity;
 
     stuttometer::DisplayRefreshInfo disp_info = stuttometer::query_display_refresh_info(target_pid);

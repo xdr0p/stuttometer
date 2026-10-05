@@ -519,12 +519,14 @@ static void test_detection_presets_roundtrip() {
 
     for (auto p : presets) {
         GuiConfig in_cfg;
-        in_cfg.detection_preset = p;
+        TriggerConfig dummy_trig{};
+        apply_detection_preset(p, dummy_trig, in_cfg);
         if (p == DetectionPreset::CUSTOM) {
             in_cfg.pacing_profile = PacingProfile::CUSTOM;
             in_cfg.spike_multiplier = 3.5;
             in_cfg.min_spike_delta_ms = 8.0;
             in_cfg.judder_swing_ratio = 0.42;
+            in_cfg.judder_min_alternations = 7;
         }
 
         nlohmann::json j = serialize_gui_settings_to_json(in_cfg, 0, 0, false);
@@ -539,12 +541,15 @@ static void test_detection_presets_roundtrip() {
             STUTTO_ASSERT(std::abs(out_cfg.spike_multiplier - 3.5) < 1e-6);
             STUTTO_ASSERT(std::abs(out_cfg.min_spike_delta_ms - 8.0) < 1e-6);
             STUTTO_ASSERT(std::abs(out_cfg.judder_swing_ratio - 0.42) < 1e-6);
+            STUTTO_ASSERT(out_cfg.judder_min_alternations == 7);
         } else if (p == DetectionPreset::CONSERVATIVE) {
             STUTTO_ASSERT(out_cfg.pacing_profile == PacingProfile::CONSERVATIVE);
             STUTTO_ASSERT(std::abs(out_cfg.judder_swing_ratio - 0.60) < 1e-6);
+            STUTTO_ASSERT(out_cfg.judder_min_alternations == 8);
         } else if (p == DetectionPreset::BALANCED) {
             STUTTO_ASSERT(out_cfg.pacing_profile == PacingProfile::AUTO_ADAPTIVE);
             STUTTO_ASSERT(std::abs(out_cfg.judder_swing_ratio - 0.50) < 1e-6);
+            STUTTO_ASSERT(out_cfg.judder_min_alternations == 5);
         }
     }
 
@@ -621,33 +626,168 @@ static void test_v1_settings_migration() {
     std::cout << "  -> PASSED\n";
 }
 
-// 12. Deserialization Authority (Preset table overrides conflicting fields for non-CUSTOM presets)
-static void test_deserialization_authority() {
-    std::cout << "[TEST] 12. Deserialization Authority...\n";
+// 12. Deserialization Demotion (D1: conflicting fields demote preset to CUSTOM; matching fields preserve preset)
+static void test_deserialization_demotion() {
+    std::cout << "[TEST] 12. Deserialization Demotion (Decision D1)...\n";
 
-    nlohmann::json j;
-    j["settings_version"] = 2;
-    j["detection_preset"] = "competitive";
-    // Conflicting raw fields that should be overridden by competitive preset
-    j["pacing_profile"] = "conservative";
-    j["judder_swing_ratio"] = 0.85;
+    // 12a. Conflicting fields -> demotes to CUSTOM
+    {
+        nlohmann::json j;
+        j["settings_version"] = 2;
+        j["detection_preset"] = "competitive";
+        // Conflicting raw fields that trigger demotion
+        j["pacing_profile"] = "conservative";
+        j["judder_swing_ratio"] = 0.85;
 
-    GuiConfig out;
-    uint32_t vk = 0, mods = 0;
-    bool snd = false;
-    std::string proc;
-    deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
+        GuiConfig out;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
 
-    STUTTO_ASSERT(out.detection_preset == DetectionPreset::COMPETITIVE);
-    STUTTO_ASSERT(out.pacing_profile == PacingProfile::AUTO_ADAPTIVE);
-    STUTTO_ASSERT(std::abs(out.judder_swing_ratio - 0.35) < 1e-6);
+        STUTTO_ASSERT(out.detection_preset == DetectionPreset::CUSTOM);
+        STUTTO_ASSERT(out.pacing_profile == PacingProfile::CONSERVATIVE);
+        STUTTO_ASSERT(std::abs(out.judder_swing_ratio - 0.85) < 1e-6);
+    }
+
+    // 12b. Matching fields -> preserves COMPETITIVE preset
+    {
+        nlohmann::json j;
+        j["settings_version"] = 3;
+        j["detection_preset"] = "competitive";
+        j["pacing_profile"] = "auto_adaptive";
+        j["judder_swing_ratio"] = 0.35;
+        j["judder_min_alternations"] = 3;
+
+        GuiConfig out;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
+
+        STUTTO_ASSERT(out.detection_preset == DetectionPreset::COMPETITIVE);
+        STUTTO_ASSERT(out.pacing_profile == PacingProfile::AUTO_ADAPTIVE);
+        STUTTO_ASSERT(std::abs(out.judder_swing_ratio - 0.35) < 1e-6);
+        STUTTO_ASSERT(out.judder_min_alternations == 3);
+    }
+
+    std::cout << "  -> PASSED\n";
+}
+
+// 13. Schema 3 & Advanced Settings Features
+static void test_schema_3_settings() {
+    std::cout << "[TEST] 13. Schema 3 & Advanced Settings Features...\n";
+
+    // 13a. advanced_unlocked true round-trip
+    {
+        GuiConfig cfg;
+        nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, true, "Game.exe");
+        STUTTO_ASSERT(j["settings_version"] == 3);
+        STUTTO_ASSERT(j["advanced_unlocked"] == true);
+
+        GuiConfig out_cfg;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false, adv = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc);
+        STUTTO_ASSERT(adv == true);
+        STUTTO_ASSERT(proc == "Game.exe");
+    }
+
+    // 13b. advanced_unlocked false round-trip
+    {
+        GuiConfig cfg;
+        nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, false, "Game.exe");
+        STUTTO_ASSERT(j["advanced_unlocked"] == false);
+
+        GuiConfig out_cfg;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false, adv = true;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc);
+        STUTTO_ASSERT(adv == false);
+    }
+
+    // 13c. Absent advanced_unlocked in older schema files defaults to false
+    {
+        nlohmann::json j;
+        j["settings_version"] = 2;
+        j["detection_preset"] = "balanced";
+
+        GuiConfig out_cfg;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false, adv = true;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc);
+        STUTTO_ASSERT(adv == false);
+    }
+
+    // 13d. judder_min_alternations round-trips within range (1-50)
+    {
+        GuiConfig cfg;
+        cfg.detection_preset = DetectionPreset::CUSTOM;
+        cfg.judder_min_alternations = 12;
+
+        nlohmann::json j = serialize_gui_settings_to_json(cfg, 0, 0, false, false);
+        STUTTO_ASSERT(j["judder_min_alternations"] == 12);
+
+        GuiConfig out_cfg;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false, adv = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc);
+        STUTTO_ASSERT(out_cfg.judder_min_alternations == 12);
+    }
+
+    // 13e. Out-of-range judder_min_alternations (0, 51) retains struct default 5
+    {
+        nlohmann::json j0;
+        j0["settings_version"] = 3;
+        j0["detection_preset"] = "custom";
+        j0["judder_min_alternations"] = 0;
+
+        GuiConfig out0;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j0, out0, vk, mods, snd, proc);
+        STUTTO_ASSERT(out0.judder_min_alternations == 5);
+
+        nlohmann::json j51;
+        j51["settings_version"] = 3;
+        j51["detection_preset"] = "custom";
+        j51["judder_min_alternations"] = 51;
+
+        GuiConfig out51;
+        deserialize_gui_settings_from_json(j51, out51, vk, mods, snd, proc);
+        STUTTO_ASSERT(out51.judder_min_alternations == 5);
+    }
+
+    // 13f. Demotion triggered solely by judder_min_alternations mismatch
+    {
+        nlohmann::json j;
+        j["settings_version"] = 3;
+        j["detection_preset"] = "balanced";
+        j["pacing_profile"] = "auto_adaptive";
+        j["judder_swing_ratio"] = 0.50;
+        j["judder_min_alternations"] = 3; // Mismatch: BALANCED expects 5
+
+        GuiConfig out;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false;
+        std::string proc;
+        deserialize_gui_settings_from_json(j, out, vk, mods, snd, proc);
+
+        STUTTO_ASSERT(out.detection_preset == DetectionPreset::CUSTOM);
+        STUTTO_ASSERT(out.judder_min_alternations == 3);
+    }
 
     std::cout << "  -> PASSED\n";
 }
 
 int main() {
     std::cout << "========================================\n";
-    std::cout << "Running test_gui_settings (12 scenarios)\n";
+    std::cout << "Running test_gui_settings (13 scenarios)\n";
     std::cout << "========================================\n";
 
     try {
@@ -662,12 +802,13 @@ int main() {
         test_full_settings_roundtrip_manual();
         test_detection_presets_roundtrip();
         test_v1_settings_migration();
-        test_deserialization_authority();
+        test_deserialization_demotion();
+        test_schema_3_settings();
     } catch (const std::exception& e) {
         std::cerr << "Test failed with exception: " << e.what() << "\n";
         return 1;
     }
 
-    std::cout << "All 12 GUI settings test scenarios PASSED!\n";
+    std::cout << "All 13 GUI settings test scenarios PASSED!\n";
     return 0;
 }

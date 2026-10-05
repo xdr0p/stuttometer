@@ -82,6 +82,7 @@ extern OsdToast g_osd_toast;
 // Centralized Settings & Preferences State
 extern GuiConfig g_settings_config;
 extern bool g_sound_cues_enabled;
+extern bool g_advanced_unlocked;
 extern uint32_t g_hotkey_vk;
 extern uint32_t g_hotkey_mods;
 extern std::wstring g_settings_file_path;

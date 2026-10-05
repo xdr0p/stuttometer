@@ -4,9 +4,9 @@
 
 .DESCRIPTION
     Generates high-resolution PNG assets with the unified 4-attribution palette:
-    - GAME ENGINE: #daa142
+    - GAME ENGINE: #a87a3c
     - DWM COMPOSITION: #9a64cd
-    - EXTERNAL CONTENTION: #c55656
+    - EXTERNAL CONTENTION: #a85a4a
     - UNKNOWN: #697382
     Along with refresh-rate-aware severity colors (#f1f5f9, #f59e0b, #ef4444).
 
@@ -40,7 +40,7 @@ function Render-OsdToast {
         [string]$CalloutHex = "#ef4444",
         [string]$DiagSummary = "nvlddmkm.sys: DPC routine execution spike (94% Conf)",
         [string]$AttrTag = "EXTERNAL CONTENTION",
-        [string]$AccentHex = "#c55656",
+        [string]$AccentHex = "#a85a4a",
         [string]$ConfText = "",
         [int]$Alpha = 235,
         [bool]$AddShadow = $true
@@ -253,12 +253,12 @@ function Render-InGameContext {
 
 Write-Host "Rendering OSD Toast assets into $assetsPath..." -ForegroundColor Cyan
 
-# 1. Primary OSD Toast with Elevation Shadow (External Contention - Crimson Red #c55656, Danger #ef4444)
+# 1. Primary OSD Toast with Elevation Shadow (External Contention - Rust-Brick #a85a4a, Danger #ef4444)
 Render-OsdToast -OutputPath "$assetsPath\osd_toast.png" -Scale 2.0 `
     -ProcessName "Cyberpunk2077.exe" `
     -Callout "68.4 ms STUTTER" -CalloutHex "#ef4444" `
     -DiagSummary "nvlddmkm.sys: DPC routine execution spike" `
-    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#c55656" `
+    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#a85a4a" `
     -ConfText "94% CONF" -AddShadow $true
 
 # 2. Frame-Bounded Clean PNG (No outer margin/shadow)
@@ -266,23 +266,23 @@ Render-OsdToast -OutputPath "$assetsPath\osd_toast_clean.png" -Scale 2.0 `
     -ProcessName "Cyberpunk2077.exe" `
     -Callout "68.4 ms STUTTER" -CalloutHex "#ef4444" `
     -DiagSummary "nvlddmkm.sys: DPC routine execution spike" `
-    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#c55656" `
+    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#a85a4a" `
     -ConfText "94% CONF" -AddShadow $false
 
-# 3. Game Engine Stall Snapshot (Game Engine - Warm Gold #daa142, Warning #f59e0b)
+# 3. Game Engine Stall Snapshot (Game Engine - Muted Ochre #a87a3c, Warning #f59e0b)
 Render-OsdToast -OutputPath "$assetsPath\osd_toast_game_engine.png" -Scale 2.0 `
     -ProcessName "EldenRing.exe" `
     -Callout "34.2 ms STUTTER" -CalloutHex "#f59e0b" `
     -DiagSummary "Main thread stalled waiting on worker thread lock" `
-    -AttrTag "GAME ENGINE" -AccentHex "#daa142" `
+    -AttrTag "GAME ENGINE" -AccentHex "#a87a3c" `
     -ConfText "88% CONF" -AddShadow $true
 
-# 4. Audio Glitch Snapshot (External Contention - Crimson Red #c55656, Danger #ef4444)
+# 4. Audio Glitch Snapshot (External Contention - Rust-Brick #a85a4a, Danger #ef4444)
 Render-OsdToast -OutputPath "$assetsPath\osd_toast_audio_glitch.png" -Scale 2.0 `
     -ProcessName "audiodg.exe" `
     -Callout "AUDIO GLITCH (x2)" -CalloutHex "#ef4444" `
     -DiagSummary "RealtekAudio.sys: Endpoint buffer underrun detected" `
-    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#c55656" `
+    -AttrTag "EXTERNAL CONTENTION" -AccentHex "#a85a4a" `
     -ConfText "96% CONF" -AddShadow $true
 
 # 5. In-Game Context View

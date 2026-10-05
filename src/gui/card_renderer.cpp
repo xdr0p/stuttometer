@@ -2,6 +2,7 @@
 #include "gui_string_utils.hpp"
 #include "theme.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
+#include "stuttometer/internal/display_strings.hpp"
 #include "stuttometer/version.hpp"
 
 #include <objidl.h>
@@ -301,29 +302,11 @@ static void fill_rounded_rect(
 // Friendly label formatters
 // -----------------------------------------------------------------------------
 static std::wstring format_trigger_reason_label(TriggerReason r) {
-    switch (r) {
-        case TriggerReason::STATIC_THRESHOLD:      return L"Static Threshold";
-        case TriggerReason::RELATIVE_SPIKE:        return L"Relative Spike";
-        case TriggerReason::STATISTICAL_OUTLIER:   return L"Statistical Outlier";
-        case TriggerReason::CADENCE_JUDDER:        return L"Cadence Judder";
-        case TriggerReason::AUDIO_BUFFER_UNDERRUN: return L"Audio Underrun";
-        case TriggerReason::DWM_COMPOSITOR_GLITCH: return L"DWM Compositor Glitch";
-        case TriggerReason::NONE:
-        default:                                   return L"None";
-    }
+    return utf8_to_wide(display::trigger_reason_display(trigger_reason_to_string(r)));
 }
 
 static std::wstring format_trigger_source_label(TriggerSource s) {
-    switch (s) {
-        case TriggerSource::DXGI_PRESENT_STUTTER: return L"DXGI Present";
-        case TriggerSource::AUDIO_GLITCH:         return L"Audio Glitch";
-        case TriggerSource::MANUAL:               return L"Manual";
-        case TriggerSource::KERNEL_FRAME_STALL:   return L"Kernel Frame Stall";
-        case TriggerSource::DWM_GLITCH:           return L"DWM Glitch";
-        case TriggerSource::FRAME_PACING_JUDDER:  return L"Pacing Judder";
-        case TriggerSource::NONE:
-        default:                                  return L"None";
-    }
+    return utf8_to_wide(display::trigger_source_display(trigger_source_to_string(s)));
 }
 
 // -----------------------------------------------------------------------------

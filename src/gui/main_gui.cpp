@@ -8,6 +8,8 @@
 #include "dark_controls.hpp"
 #include "export_utils.hpp"
 #include "settings_dialog.hpp"
+#include "gui_string_utils.hpp"
+#include "stuttometer/internal/display_strings.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -33,6 +35,15 @@
 
 namespace stuttometer::gui {
 
+// Fixed-width geometry helper for the real-time status pill in the top header
+static RECT get_status_pill_rect(int client_width) {
+    const int elem_h = scale_dpi(32);
+    const int elem_y = scale_dpi(8);
+    const int pill_w = scale_dpi(280);
+    const int pill_left = (client_width - pill_w) / 2;
+    return { pill_left, elem_y, pill_left + pill_w, elem_y + elem_h };
+}
+
 // Fixed-width geometry helper for the live telemetry badge on the Action Toolbar
 static RECT get_telemetry_badge_rect(int client_width) {
     const int act_y = scale_dpi(116);
@@ -43,13 +54,23 @@ static RECT get_telemetry_badge_rect(int client_width) {
 }
 
 static std::wstring get_trigger_mode_text() {
-    if (g_settings_config.frame_trigger_mode == FrameTriggerMode::HYBRID) {
-        return L"Trigger Mode: Hybrid (Auto Pacing & Judder)";
-    } else if (g_settings_config.frame_trigger_mode == FrameTriggerMode::DYNAMIC_ONLY) {
-        return L"Trigger Mode: Dynamic Only (Relative & Judder)";
-    } else {
+    if (g_settings_config.frame_trigger_mode == FrameTriggerMode::STATIC_ONLY) {
         int fps_val = static_cast<int>(std::round((g_settings_config.present_threshold_ms > 0.0) ? (1000.0 / g_settings_config.present_threshold_ms) : 60.0));
         return L"Trigger Mode: Static (" + std::to_wstring(fps_val) + L" FPS Floor)";
+    }
+    switch (g_settings_config.detection_preset) {
+        case DetectionPreset::BALANCED:
+            return L"Detection: Balanced";
+        case DetectionPreset::COMPETITIVE:
+            return L"Detection: Competitive";
+        case DetectionPreset::CONSERVATIVE:
+            return L"Detection: Conservative";
+        case DetectionPreset::FORENSIC:
+            return L"Detection: Forensic";
+        case DetectionPreset::CUSTOM:
+            return L"Detection: Custom";
+        default:
+            return L"Detection: Custom";
     }
 }
 
@@ -58,22 +79,8 @@ static RECT get_trigger_mode_badge_rect(int client_width) {
     const int card_h = scale_dpi(52);
     const int badge_mode_h = scale_dpi(28);
     const int badge_mode_y = card_y + (card_h - badge_mode_h) / 2;
-
-    std::wstring text = get_trigger_mode_text();
-    HDC hdc = g_hwnd_main ? GetDC(g_hwnd_main) : nullptr;
-    HFONT old_font = hdc ? static_cast<HFONT>(SelectObject(hdc, g_font_ui_bold)) : nullptr;
-    RECT calc_rc = { 0, 0, 0, 0 };
-    if (hdc) {
-        DrawTextW(hdc, text.c_str(), -1, &calc_rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(hdc, old_font);
-        ReleaseDC(g_hwnd_main, hdc);
-    } else {
-        calc_rc.right = scale_dpi(280);
-    }
-
-    int text_w = calc_rc.right - calc_rc.left;
-    int badge_w = text_w + scale_dpi(24);
-    int badge_x = client_width - scale_dpi(16) - scale_dpi(12) - badge_w;
+    const int badge_w = scale_dpi(220);
+    const int badge_x = client_width - scale_dpi(16) - scale_dpi(12) - badge_w;
     return { badge_x, badge_mode_y, badge_x + badge_w, badge_mode_y + badge_mode_h };
 }
 
@@ -145,8 +152,8 @@ static void update_inspector(int selected_index) {
     if (!r.frame_timeline.empty()) {
         oss << L"  RETAINED FRAMES:     " << r.frame_timeline.size() << L"\r\n";
     }
-    oss << L"  TRIGGER CAUSE:       " << utf8_to_wstring(trigger_source_to_string(r.trigger.source))
-        << L" (" << utf8_to_wstring(trigger_reason_to_string(r.trigger.reason)) << L")\r\n";
+    oss << L"  TRIGGER CAUSE:       " << utf8_to_wide(display::trigger_source_display(trigger_source_to_string(r.trigger.source)))
+        << L" (" << utf8_to_wide(display::trigger_reason_display(trigger_reason_to_string(r.trigger.reason))) << L")\r\n";
     if (r.trigger.baseline_avg_ms > 0.0) {
         oss << L"  BASELINE DELIVERY:   " << std::fixed << std::setprecision(1) << r.trigger.baseline_fps << L" FPS (" 
             << r.trigger.baseline_avg_ms << L" ms/frame, " << r.trigger.spike_ratio << L"x spike)\r\n";
@@ -186,7 +193,7 @@ static void update_inspector(int selected_index) {
         oss << L"  ------------------------------------------------------------------------------\r\n";
 
         for (const auto& diag : r.diagnoses) {
-            oss << L"   Rank #" << diag.rank << L": " << utf8_to_wstring(diag.hypothesis) << L"\r\n";
+            oss << L"   Rank #" << diag.rank << L": " << utf8_to_wide(display::hypothesis_display(diag.hypothesis)) << L"\r\n";
             oss << L"   Confidence: " << std::fixed << std::setprecision(1) << (diag.confidence * 100.0) << L"%\r\n";
             oss << L"   Summary:    " << utf8_to_wstring(diag.summary) << L"\r\n\r\n";
 
@@ -251,7 +258,7 @@ static void insert_record_into_listview(const StutterRecord& rec, int item_index
         w_dur = oss_dur.str();
     }
 
-    std::wstring w_diag = utf8_to_wstring(rec.top_hypothesis);
+    std::wstring w_diag = utf8_to_wide(display::hypothesis_display(rec.top_hypothesis));
     std::wstring w_conf = std::to_wstring(static_cast<int>(rec.confidence * 100.0 + 0.5)) + L"%";
 
     ListView_SetItemText(g_h_list_stutters, item_index, 1, w_time.data());
@@ -315,9 +322,9 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
     rec.id = g_next_stutter_id++;
     rec.timestamp = report->timestamp_utc;
     rec.process_name = report->target_process.empty() ? ("PID:" + std::to_string(report->trigger.target_pid)) : report->target_process;
-    std::string trig_str = std::string(trigger_source_to_string(report->trigger.source));
+    std::string trig_str = std::string(display::trigger_source_display(trigger_source_to_string(report->trigger.source)));
     if (report->trigger.reason != TriggerReason::NONE && report->trigger.reason != TriggerReason::STATIC_THRESHOLD) {
-        trig_str += " (" + std::string(trigger_reason_to_string(report->trigger.reason)) + ")";
+        trig_str += " (" + std::string(display::trigger_reason_display(trigger_reason_to_string(report->trigger.reason))) + ")";
     }
     rec.trigger_reason = trig_str;
     rec.duration_ms = report->trigger.duration_ms;
@@ -381,15 +388,10 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
     update_clear_button_state();
     update_metrics_text();
 
-    std::wstring w_proc = utf8_to_wstring(last_rec.process_name);
-    g_status_text = L"Stutter Captured (" + w_proc + L")";
     RECT client_rc;
     GetClientRect(g_hwnd_main, &client_rc);
-    int pill_w = scale_dpi(280);
-    int pill_left = (client_rc.right - pill_w) / 2;
-    int pill_top = scale_dpi(8);
-    int pill_bottom = pill_top + scale_dpi(32);
-    RECT rc_pill = { pill_left - scale_dpi(2), pill_top - scale_dpi(2), pill_left + pill_w + scale_dpi(2), pill_bottom + scale_dpi(2) };
+    RECT rc_pill_base = get_status_pill_rect(client_rc.right - client_rc.left);
+    RECT rc_pill = { rc_pill_base.left - scale_dpi(2), rc_pill_base.top - scale_dpi(2), rc_pill_base.right + scale_dpi(2), rc_pill_base.bottom + scale_dpi(2) };
     InvalidateRect(g_hwnd_main, &rc_pill, FALSE);
 
     RECT rc_b = get_telemetry_badge_rect(client_rc.right - client_rc.left);
@@ -682,12 +684,10 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     MoveWindow(g_h_lbl_target, col1_x, lbl_y, lbl_target_w, lbl_h, TRUE);
     MoveWindow(g_h_combo_process, col1_x + lbl_target_w + gap_lbl_box, ctrl_y + scale_dpi(2), combo_proc_w, scale_dpi(250), TRUE);
 
-    // Trigger Mode badge anchors the far right of the card
-    RECT rc_mode = get_trigger_mode_badge_rect(width);
-
-    // Severity Filter label + combobox (Positioned immediately to the left of the Trigger Mode badge)
+    // Preset chip badge anchors the far right of the card with fixed reservation
+    const int badge_reserved_w = scale_dpi(220);
     const int combo_filter_w = scale_dpi(165);
-    const int combo_filter_x = rc_mode.left - scale_dpi(10) - combo_filter_w;
+    const int combo_filter_x = width - margin - scale_dpi(12) - badge_reserved_w - scale_dpi(10) - combo_filter_w;
 
     const int lbl_sev_w = scale_dpi(42);
     const int lbl_sev_x = combo_filter_x - scale_dpi(6) - lbl_sev_w;
@@ -846,7 +846,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             EnableWindow(g_h_btn_clear, FALSE);
 
             // Severity Filter Combobox (Positioned on Configuration Card)
-            g_h_lbl_sev_filter = CreateWindowExW(0, L"STATIC", L"Show:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
+            g_h_lbl_sev_filter = CreateWindowExW(0, L"STATIC", L"Filter:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
             SendMessageW(g_h_lbl_sev_filter, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(g_h_lbl_sev_filter);
 
@@ -953,7 +953,6 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             // Register Hotkey with loaded configuration
             UnregisterHotKey(hwnd, ID_HOTKEY_TOGGLE_CAPTURE);
             if (!RegisterHotKey(hwnd, ID_HOTKEY_TOGGLE_CAPTURE, g_hotkey_mods | MOD_NOREPEAT, g_hotkey_vk)) {
-                g_status_text = L"Hotkey Warning: " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is in use by another app";
                 append_engine_log(L"[WARN] Hotkey " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is in use by another application.");
             }
 
@@ -1028,12 +1027,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 DrawTextW(mem_dc, L"REAL-TIME ETW DIAGNOSTIC", -1, &subtitle_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Real-Time Status Pill (True Horizontal Center)
-                int elem_h = scale_dpi(32);
-                int elem_y = scale_dpi(8);
-                int pill_w = scale_dpi(280);
-                int pill_left = (width - pill_w) / 2;
-                int pill_right = pill_left + pill_w;
-                RECT pill_rc = { pill_left, elem_y, pill_right, elem_y + elem_h };
+                RECT pill_rc = get_status_pill_rect(width);
+                int pill_w = pill_rc.right - pill_rc.left;
 
                 SelectObject(mem_dc, g_theme.br_pill);
                 SelectObject(mem_dc, g_theme.pen_pill_border);
@@ -1078,7 +1073,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 SelectObject(mem_dc, g_theme.pen_card_border);
                 RoundRect(mem_dc, cfg_card_rc.left, cfg_card_rc.top, cfg_card_rc.right, cfg_card_rc.bottom, scale_dpi(12), scale_dpi(12));
 
-                // Right-aligned Trigger Mode badge pill inside Configuration Card (Anchored on the right edge)
+                // Right-aligned Detection Preset badge pill inside Configuration Card (Anchored on the right edge)
                 RECT badge_mode_rc = get_trigger_mode_badge_rect(width);
                 std::wstring mode_status_text = get_trigger_mode_text();
 
@@ -1090,12 +1085,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 SelectObject(mem_dc, g_font_ui_bold);
                 SetTextColor(mem_dc, COLOR_TEXT_MUTED);
 
-                RECT calc_mode_rc = { 0, 0, 0, 0 };
-                DrawTextW(mem_dc, mode_status_text.c_str(), -1, &calc_mode_rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-                int mode_text_w = calc_mode_rc.right - calc_mode_rc.left;
-                int mode_start_x = badge_mode_rc.left + ((badge_mode_rc.right - badge_mode_rc.left) - mode_text_w) / 2;
-                RECT text_mode_rc = { mode_start_x, badge_mode_rc.top, mode_start_x + mode_text_w, badge_mode_rc.bottom };
-                DrawTextW(mem_dc, mode_status_text.c_str(), -1, &text_mode_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                const int pad_x = scale_dpi(8);
+                RECT text_mode_rc = { badge_mode_rc.left + pad_x, badge_mode_rc.top, badge_mode_rc.right - pad_x, badge_mode_rc.bottom };
+                DrawTextW(mem_dc, mode_status_text.c_str(), -1, &text_mode_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             }
 
             // 4. Live Telemetry Badge (Right Aligned on Action Toolbar)
@@ -1109,13 +1101,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 SelectObject(mem_dc, g_font_ui);
                 SetTextColor(mem_dc, COLOR_TEXT_MUTED);
 
-                RECT calc_rc = { 0, 0, 0, 0 };
-                DrawTextW(mem_dc, g_metrics_text.c_str(), -1, &calc_rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-                int text_w = calc_rc.right - calc_rc.left;
-                int badge_w = badge_rc.right - badge_rc.left;
-                int start_x = badge_rc.left + (badge_w - text_w) / 2;
-                RECT text_rc = { start_x, badge_rc.top, start_x + text_w, badge_rc.bottom };
-                DrawTextW(mem_dc, g_metrics_text.c_str(), -1, &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                const int pad_x = scale_dpi(8);
+                RECT text_rc = { badge_rc.left + pad_x, badge_rc.top,
+                                 badge_rc.right - pad_x, badge_rc.bottom };
+                DrawTextW(mem_dc, g_metrics_text.c_str(), -1, &text_rc,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             }
 
             // 5. Diagnostic Report Inspector Card Background

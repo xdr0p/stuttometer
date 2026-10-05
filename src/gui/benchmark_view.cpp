@@ -2,6 +2,7 @@
 #include "theme.hpp"
 #include "gui_string_utils.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
+#include "stuttometer/internal/display_strings.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
@@ -441,6 +442,12 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 dismiss_benchmark_view(hwnd);
                 return 0;
             } else if (id == IDC_BENCH_RESET_SESSION) {
+                int res = MessageBoxW(hwnd,
+                    L"This will permanently clear all session benchmark data, including frame pacing statistics and cumulative root-cause attribution.\n\nContinue?",
+                    L"Reset Session Benchmark",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+                if (res != IDYES) return 0;
+
                 state->copy_btn_text = L"Copy Summary";
                 state->export_btn_text = L"Export JSON";
                 state->benchmark->reset();
@@ -814,7 +821,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 wfmt(stl_buf, L"%.1f ms", c.total_stall_ms);
                 wfmt(pct_buf, L"%.1f%%", c.stall_pct);
                 rows.push_back({
-                    { utf8_to_wide(c.hypothesis) },
+                    { utf8_to_wide(display::hypothesis_display(c.hypothesis)) },
                     { c.top_driver_module.empty() ? L"-" : utf8_to_wide(c.top_driver_module) },
                     { std::to_wstring(c.count) },
                     { stl_buf },
@@ -943,7 +950,7 @@ void ShowBenchmarkView(
     HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         L"StuttometerBenchmarkWindowClass",
-        L"Session Benchmark Summary",
+        L"Session Summary",
         dwStyle,
         pos_x, pos_y,
         outer_w, outer_h,

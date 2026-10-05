@@ -1389,9 +1389,14 @@ static void test_palette_and_theme() {
 
     g_theme.init();
 
-    // Attribution colors match centralized palette constants
-    STUTTO_ASSERT(COLOR_ATTR_GAME_ENGINE         == RGB(0xda, 0xa1, 0x42));
-    STUTTO_ASSERT(COLOR_ATTR_EXTERNAL_CONTENTION == RGB(0xc5, 0x56, 0x56));
+    // Attribution colors match centralized palette constants.
+    // Hue-shifted per Plan §2.3 to eliminate collisions with severity colors:
+    //   WARNING = #F59E0B (hue ~38°), DANGER = #EF4444 (hue 0°)
+    // The new attribution hues (~18° rust and ~12° brick) are intentionally
+    // distinct. Do not revert without re-verifying hue separation on the
+    // dark canvas (COLOR_BG #111317, COLOR_CARD_BG #1C212C).
+    STUTTO_ASSERT(COLOR_ATTR_GAME_ENGINE         == RGB(0xa8, 0x7a, 0x3c));
+    STUTTO_ASSERT(COLOR_ATTR_EXTERNAL_CONTENTION == RGB(0xa8, 0x5a, 0x4a));
     STUTTO_ASSERT(COLOR_ATTR_DWM_COMPOSITION     == RGB(0x9a, 0x64, 0xcd));
     STUTTO_ASSERT(COLOR_ATTR_UNKNOWN             == RGB(0x69, 0x73, 0x82));
 
