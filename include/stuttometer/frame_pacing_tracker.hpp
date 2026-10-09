@@ -25,6 +25,10 @@ namespace pacing_tuning {
     inline constexpr uint32_t INITIAL_WARMUP_SAMPLES     = 4;  // sample_count < 4: catastrophic-only gate
     inline constexpr double   DELTA_SCALE_FACTOR         = 0.3;
     inline constexpr double   CATASTROPHIC_FACTOR        = 12.0;
+    // CATASTROPHIC_FLOOR_MS and CATASTROPHIC_CEIL_MS are hardcoded constants rather than
+    // display-derived fractions. They establish absolute boundaries for the early-warmup
+    // catastrophic stall detector (sample_count < 4) independent of display cadence, ensuring
+    // high-refresh displays (e.g. 500 Hz) do not suffer from an overly narrow warmup gate.
     inline constexpr double   CATASTROPHIC_FLOOR_MS      = 50.0;
     inline constexpr double   CATASTROPHIC_CEIL_MS       = 500.0;
     inline constexpr double   DEFAULT_JUDDER_SWING_RATIO = 0.35;

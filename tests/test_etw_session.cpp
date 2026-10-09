@@ -527,8 +527,11 @@ static void test_session_manager_insertion_failures() {
     EtwSessionManager mgr(recorder, engine, cfg);
     STUTTO_ASSERT(mgr.insertion_failures() == 0);
     STUTTO_ASSERT(mgr.unpaired_evictions() == 0);
+    const ProviderStatus ps = mgr.provider_status();
+    STUTTO_ASSERT(!ps.dxgi_enabled);
+    STUTTO_ASSERT(!ps.kernel_dpc_enabled);
 
-    std::cout << "  -> Insertion failure initial zero assertions PASSED.\n";
+    std::cout << "  -> Insertion failure initial zero assertions and ProviderStatus smoke test PASSED.\n";
 }
 
 static void test_fixed_table_concurrent_tombstone_stress() {
@@ -1887,6 +1890,343 @@ static void test_mpo_duplicate_path_adversarial_matrix() {
     std::cout << "  -> Dynamic MPO duplicate path adversarial matrix PASSED.\n";
 }
 
+static void test_dpc_12byte_payload_rejection() {
+    std::cout << "[TEST] Validating 12-byte DPC/ISR MOF payload rejection vs 16-byte acceptance (F5)...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    EtwSessionConfig cfg;
+    cfg.enable_kernel_dpc = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    const uint64_t t_now = 100000000ULL;
+    const uint64_t delta_ticks = qpc_freq / 1000; // 1.0 ms in QPC domain
+
+    // 1. Synthesize 12-byte DPC payload (32-bit InitialTime + 64-bit Routine)
+    #pragma pack(push, 1)
+    struct Dpc12BytePayload {
+        uint32_t initial_time;
+        uint64_t routine;
+    } p12{ static_cast<uint32_t>(t_now - delta_ticks), 0xFFFFF80012345678ULL };
+    #pragma pack(pop)
+
+    EVENT_RECORD ev12{};
+    ev12.UserContext = &mgr;
+    ev12.EventHeader.ProviderId = PERFINFO_MOF_GUID;
+    ev12.EventHeader.EventDescriptor.Opcode = 68; // KERNEL_OPCODE_DPC_CLASSIC
+    ev12.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t_now);
+    ev12.UserData = &p12;
+    ev12.UserDataLength = sizeof(p12); // exactly 12 bytes
+    EtwSessionManager::on_event_record(&ev12);
+
+    // Assert that 12-byte payload was rejected (data_ok=false -> did not enter flight recorder)
+    uint64_t drops = 0;
+    auto snap12 = recorder.snapshot(t_now - (delta_ticks * 10), t_now + (delta_ticks * 10), &drops);
+    STUTTO_ASSERT(snap12.empty());
+
+    // 2. Synthesize 16-byte DPC payload (64-bit InitialTime + 64-bit Routine)
+    #pragma pack(push, 1)
+    struct Dpc16BytePayload {
+        uint64_t initial_time;
+        uint64_t routine;
+    } p16{ t_now - delta_ticks, 0xFFFFF80012345678ULL };
+    #pragma pack(pop)
+
+    EVENT_RECORD ev16{};
+    ev16.UserContext = &mgr;
+    ev16.EventHeader.ProviderId = PERFINFO_MOF_GUID;
+    ev16.EventHeader.EventDescriptor.Opcode = 68; // KERNEL_OPCODE_DPC_CLASSIC
+    ev16.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t_now);
+    ev16.UserData = &p16;
+    ev16.UserDataLength = sizeof(p16); // exactly 16 bytes
+    EtwSessionManager::on_event_record(&ev16);
+
+    // Assert that 16-byte payload was accepted and recorded with correct duration
+    auto snap16 = recorder.snapshot(t_now - 100000, t_now + 100000, &drops);
+    STUTTO_ASSERT(snap16.size() == 1);
+    STUTTO_ASSERT(snap16[0].category == static_cast<uint16_t>(EventCategory::DPC));
+    STUTTO_ASSERT(snap16[0].duration_us == 1000);
+    STUTTO_ASSERT(snap16[0].auxiliary_data == 0xFFFFF80012345678ULL);
+
+    mgr.set_running_for_test(false);
+    std::cout << "  -> 12-byte rejection vs 16-byte acceptance PASSED.\n";
+}
+
+static void test_kernel_mof_guid_routing() {
+    std::cout << "[TEST] Validating Kernel MOF Provider GUID routing in on_event_record...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    EtwSessionConfig cfg;
+    cfg.enable_kernel_dpc = true;
+    cfg.enable_kernel_cswitch = true;
+    cfg.enable_kernel_disk = true;
+    cfg.enable_kernel_pagefault = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    const uint64_t t_base = 200000000ULL;
+
+    // 1. DPC/ISR MOF: PERFINFO_MOF_GUID with Opcode 68 and 16-byte valid payload
+    #pragma pack(push, 1)
+    struct DpcPayload {
+        uint64_t initial_time{t_base - 1000};
+        uint64_t routine{0xFFFFF80151F78950ULL};
+    } dpc_data;
+    #pragma pack(pop)
+
+    EVENT_RECORD ev_dpc{};
+    ev_dpc.UserContext = &mgr;
+    ev_dpc.EventHeader.ProviderId = PERFINFO_MOF_GUID;
+    ev_dpc.EventHeader.EventDescriptor.Opcode = 68;
+    ev_dpc.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t_base);
+    ev_dpc.UserData = &dpc_data;
+    ev_dpc.UserDataLength = sizeof(dpc_data);
+    EtwSessionManager::on_event_record(&ev_dpc);
+
+    // 2. CSwitch: THREAD_GUID with Opcode 36 and >= 15-byte payload
+    #pragma pack(push, 1)
+    struct CSwitchPayload {
+        uint32_t new_tid{1001};
+        uint32_t old_tid{1002};
+        uint8_t dummy[6]{};
+        uint8_t old_state{2};
+    } cswitch_data;
+    #pragma pack(pop)
+
+    EVENT_RECORD ev_cswitch{};
+    ev_cswitch.UserContext = &mgr;
+    ev_cswitch.EventHeader.ProviderId = THREAD_GUID;
+    ev_cswitch.EventHeader.EventDescriptor.Opcode = 36;
+    ev_cswitch.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t_base + 1000);
+    ev_cswitch.UserData = &cswitch_data;
+    ev_cswitch.UserDataLength = sizeof(cswitch_data);
+    EtwSessionManager::on_event_record(&ev_cswitch);
+
+    // 3. Disk: DISK_IO_GUID with Opcode 12 (Init) then Opcode 10 (Read) to emit completed record
+    constexpr uint64_t TEST_IRP = 0xFFFFFA80AABBCCDDULL;
+    #pragma pack(push, 1)
+    struct DiskInitPayload {
+        uint64_t irp{TEST_IRP};
+        uint32_t tid{500};
+    } disk_init_data;
+    struct DiskReadPayload {
+        uint64_t dummy1{0};
+        uint32_t size_bytes{4096};
+        uint8_t dummy2[20]{};
+        uint64_t irp{TEST_IRP};
+    } disk_read_data;
+    #pragma pack(pop)
+
+    EVENT_RECORD ev_disk_init{};
+    ev_disk_init.UserContext = &mgr;
+    ev_disk_init.EventHeader.ProviderId = DISK_IO_GUID;
+    ev_disk_init.EventHeader.EventDescriptor.Opcode = 12; // KERNEL_OPCODE_DISK_READ_INIT
+    ev_disk_init.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t_base + 1500);
+    ev_disk_init.EventHeader.ProcessId = 1234;
+    ev_disk_init.EventHeader.ThreadId = 500;
+    ev_disk_init.UserData = &disk_init_data;
+    ev_disk_init.UserDataLength = sizeof(disk_init_data);
+    EtwSessionManager::on_event_record(&ev_disk_init);
+
+    EVENT_RECORD ev_disk_read{};
+    ev_disk_read.UserContext = &mgr;
+    ev_disk_read.EventHeader.ProviderId = DISK_IO_GUID;
+    ev_disk_read.EventHeader.EventDescriptor.Opcode = 10; // KERNEL_OPCODE_DISK_READ
+    ev_disk_read.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t_base + 2000);
+    ev_disk_read.UserData = &disk_read_data;
+    ev_disk_read.UserDataLength = sizeof(disk_read_data);
+    EtwSessionManager::on_event_record(&ev_disk_read);
+
+    // 4. Page Fault: PAGE_FAULT_GUID with Opcode 32 (HardFault) and 40-byte payload
+    #pragma pack(push, 1)
+    struct PageFaultPayload {
+        int64_t initial_time{static_cast<int64_t>(t_base + 2200)};
+        uint8_t dummy[16]{};
+        uint64_t file_obj{0xDEADBEEFULL};
+        uint32_t pad{0};
+        uint32_t byte_count{4096};
+    } pf_data;
+    #pragma pack(pop)
+    static_assert(sizeof(PageFaultPayload) == 40, "PageFaultPayload must be 40 bytes");
+    static_assert(offsetof(PageFaultPayload, byte_count) == 36, "byte_count must be at offset 36 to match handler");
+
+    EVENT_RECORD ev_pf{};
+    ev_pf.UserContext = &mgr;
+    ev_pf.EventHeader.ProviderId = PAGE_FAULT_GUID;
+    ev_pf.EventHeader.EventDescriptor.Opcode = 32; // KERNEL_OPCODE_HARDFAULT
+    ev_pf.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(t_base + 2500);
+    ev_pf.UserData = &pf_data;
+    ev_pf.UserDataLength = sizeof(pf_data);
+    EtwSessionManager::on_event_record(&ev_pf);
+
+    mgr.set_running_for_test(false);
+
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(t_base - 100, t_base + 5000, &drops);
+    STUTTO_ASSERT(snap.size() == 4);
+
+    bool found_dpc = false, found_cswitch = false, found_disk = false, found_pf = false;
+    for (const auto& r : snap) {
+        if (r.category == static_cast<uint16_t>(EventCategory::DPC)) found_dpc = true;
+        if (r.category == static_cast<uint16_t>(EventCategory::CSWITCH)) found_cswitch = true;
+        if (r.category == static_cast<uint16_t>(EventCategory::DISK)) found_disk = true;
+        if (r.category == static_cast<uint16_t>(EventCategory::PAGE_FAULT)) {
+            found_pf = true;
+            STUTTO_ASSERT(r.auxiliary_data == 4096);
+        }
+    }
+    STUTTO_ASSERT(found_dpc);
+    STUTTO_ASSERT(found_cswitch);
+    STUTTO_ASSERT(found_disk);
+    STUTTO_ASSERT(found_pf);
+
+    std::cout << "  -> PERFINFO_MOF, THREAD, DISK_IO, and PAGE_FAULT event routing PASSED.\n";
+}
+
+static void test_dpc_cross_domain_timestamp_translation() {
+    std::cout << "[TEST] Validating DPC FILETIME -> QPC cross-domain duration translation...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    EtwSessionConfig cfg;
+    cfg.enable_kernel_dpc = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    // Prime the sync pair: FILETIME (~1.34e17) and QPC (~3.3e11)
+    constexpr uint64_t sync_utc = 134358865120687882ULL; // Real FILETIME (100ns since 1601)
+    const uint64_t sync_qpc = 339191978391ULL;           // Real QPC ticks
+
+    mgr.update_sync_time_for_test(sync_utc, sync_qpc);
+
+    // DPC completes 1.0 ms (10,000 FILETIME ticks) after sync:
+    constexpr uint64_t FILETIME_TICKS_PER_SEC = 10000000ULL;
+    const uint64_t delta_ft = 10000ULL; // 1 ms in 100ns units
+    const uint64_t ev_ft = sync_utc + delta_ft;
+
+    // Derived event QPC using same formula as production code
+    const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
+    const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
+    const uint64_t delta_qpc = (q * qpc_freq) + ((r * qpc_freq) / FILETIME_TICKS_PER_SEC);
+    const uint64_t event_qpc = sync_qpc + delta_qpc;
+
+    // DPC began 250 us earlier in QPC domain:
+    const uint64_t expected_dur_us = 250ULL;
+    const uint64_t dpc_dur_ticks = (expected_dur_us * qpc_freq) / 1000000ULL;
+    const uint64_t initial_qpc = event_qpc - dpc_dur_ticks;
+
+    #pragma pack(push, 1)
+    struct DpcPayload {
+        uint64_t initial_time;
+        uint64_t routine;
+    } p{ initial_qpc, 0xFFFFF80151F78950ULL };
+    #pragma pack(pop)
+
+    EVENT_RECORD ev{};
+    ev.UserContext = &mgr;
+    ev.EventHeader.ProviderId = PERFINFO_MOF_GUID;
+    ev.EventHeader.EventDescriptor.Opcode = 68; // KERNEL_OPCODE_DPC
+    ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(ev_ft);
+    ev.UserData = &p;
+    ev.UserDataLength = sizeof(p);
+
+    EtwSessionManager::on_event_record(&ev);
+
+    mgr.set_running_for_test(false);
+
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(ev_ft - 100, ev_ft + 100, &drops);
+    STUTTO_ASSERT(snap.size() == 1);
+
+    const auto& rec = snap[0];
+    STUTTO_ASSERT(rec.category == static_cast<uint16_t>(EventCategory::DPC));
+
+    // CRITICAL: rec.qpc_timestamp MUST remain in the FILETIME domain (== ctx.timestamp),
+    // not be overwritten with event_qpc. All other events in the flight recorder
+    // (DXGI, CSWITCH, DISK) carry FILETIME timestamps, and FlightRecorder::snapshot
+    // compares them against the trigger window in the same domain. Translating this
+    // field to QPC would silently exclude every DPC from every snapshot.
+    STUTTO_ASSERT(rec.qpc_timestamp == ev_ft);
+
+    // Duration is accurately translated across time domains
+    STUTTO_ASSERT(rec.duration_us == expected_dur_us);
+    STUTTO_ASSERT(rec.auxiliary_data == 0xFFFFF80151F78950ULL);
+
+    std::cout << "  -> Cross-domain DPC translation (dur=" << rec.duration_us
+              << "us, qpc_ts=" << rec.qpc_timestamp << ") PASSED.\n";
+}
+
+static void test_dpc_pre_sync_underflow_guard() {
+    std::cout << "[TEST] Validating pre-sync DPC underflow guard (ctx.timestamp < sync_utc)...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    EtwSessionConfig cfg;
+    cfg.enable_kernel_dpc = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    constexpr uint64_t sync_utc = 134358865120687882ULL;
+    const uint64_t sync_qpc = 339191978391ULL;
+
+    mgr.update_sync_time_for_test(sync_utc, sync_qpc);
+
+    // Event arrived with timestamp 500 ticks BEFORE sync snapshot:
+    constexpr uint64_t FILETIME_TICKS_PER_SEC = 10000000ULL;
+    const uint64_t delta_ft = 500ULL;
+    const uint64_t ev_ft = sync_utc - delta_ft;
+
+    const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
+    const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
+    const uint64_t delta_qpc = (q * qpc_freq) + ((r * qpc_freq) / FILETIME_TICKS_PER_SEC);
+    const uint64_t event_qpc = (sync_qpc >= delta_qpc) ? (sync_qpc - delta_qpc) : 0;
+
+    const uint64_t expected_dur_us = 100ULL;
+    const uint64_t dpc_dur_ticks = (expected_dur_us * qpc_freq) / 1000000ULL;
+    const uint64_t initial_qpc = event_qpc - dpc_dur_ticks;
+
+    #pragma pack(push, 1)
+    struct DpcPayload {
+        uint64_t initial_time;
+        uint64_t routine;
+    } p{ initial_qpc, 0xFFFFF80151ED2C50ULL };
+    #pragma pack(pop)
+
+    EVENT_RECORD ev{};
+    ev.UserContext = &mgr;
+    ev.EventHeader.ProviderId = PERFINFO_MOF_GUID;
+    ev.EventHeader.EventDescriptor.Opcode = 68;
+    ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(ev_ft);
+    ev.UserData = &p;
+    ev.UserDataLength = sizeof(p);
+
+    EtwSessionManager::on_event_record(&ev);
+
+    mgr.set_running_for_test(false);
+
+    uint64_t drops = 0;
+    auto snap = recorder.snapshot(ev_ft - 100, ev_ft + 100, &drops);
+    STUTTO_ASSERT(snap.size() == 1);
+    STUTTO_ASSERT(snap[0].duration_us == expected_dur_us);
+    STUTTO_ASSERT(snap[0].qpc_timestamp == ev_ft);
+
+    std::cout << "  -> Pre-sync DPC underflow guard PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer ETW Session Manager Tests ===\n";
     try {
@@ -1920,6 +2260,10 @@ int main() {
         test_trigger_engine_stale_writer_concurrent_claimed_race();
         test_working_set_trim_cross_thread_correlation();
         test_mpo_duplicate_path_adversarial_matrix();
+        test_dpc_12byte_payload_rejection();
+        test_kernel_mof_guid_routing();
+        test_dpc_cross_domain_timestamp_translation();
+        test_dpc_pre_sync_underflow_guard();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

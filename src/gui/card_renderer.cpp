@@ -147,9 +147,8 @@ BannerRects compute_banner_rects(
 }
 
 Gdiplus::PointF compute_peak_pixel(
-    const DiagnosticReport& report, int width, int height, float s
+    const DiagnosticReport& report, int width, int /*height*/, float s
 ) {
-    (void)height; // Base height is fixed; vertical scaling derived via s
     if (report.frame_timeline.empty()) {
         return Gdiplus::PointF(0.0f, 0.0f);
     }

@@ -720,6 +720,28 @@ static void test_presets_and_cli_flags() {
         STUTTO_ASSERT(err.str().find("CUSTOM preset") != std::string::npos);
     }
 
+    // 10. Preset propagation for vblank floors (F1)
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "conservative" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.preset == DetectionPreset::CONSERVATIVE);
+        STUTTO_ASSERT(config.dwm_min_missed_vblanks == 3);
+        STUTTO_ASSERT(config.kernel_frame_stall_min_missed_vblanks == 3);
+    }
+    {
+        const char* argv[] = { "stuttometer.exe", "--preset", "balanced" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(config.preset == DetectionPreset::BALANCED);
+        STUTTO_ASSERT(config.dwm_min_missed_vblanks == 2);
+        STUTTO_ASSERT(config.kernel_frame_stall_min_missed_vblanks == 2);
+    }
+
     std::cout << "  -> Presets and new CLI flags verified successfully.\n";
 }
 

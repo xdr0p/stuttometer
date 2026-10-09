@@ -39,5 +39,9 @@ namespace stuttometer::detail::severity {
         inline constexpr double MIN_CONFIDENCE             = 0.50;
         inline constexpr double MAX_CONFIDENCE             = 0.90;
         inline constexpr double FACTOR_DURATION_DIVISOR_MS = 50.0;
+        // A software candidate vetoes the GPU stall hypothesis only if its severity is at least
+        // VETO_DOMINANCE_FACTOR * the configured threshold. Compile-time constant; expose as
+        // user-tunable only after calibration data is available.
+        inline constexpr double VETO_DOMINANCE_FACTOR       = 2.0;
     }
 }

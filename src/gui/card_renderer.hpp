@@ -64,7 +64,7 @@ namespace detail {
      * highest duration sample in the timeline.
      */
     [[nodiscard]] Gdiplus::PointF compute_peak_pixel(
-        const DiagnosticReport& report, int width, int height, float s
+        const DiagnosticReport& report, int width, int /*height*/, float s
     );
 
     /**

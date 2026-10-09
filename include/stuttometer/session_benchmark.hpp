@@ -167,6 +167,11 @@ private:
     // Member declaration order matching constructor initializer list
     const uint64_t qpc_freq_;
     const uint64_t pause_ceiling_qpc_;
+    // scratch_buffer_ is a shared reusable buffer to avoid per-call allocations.
+    // Concurrency contract: accessed ONLY from within get_summary(), which holds
+    // summary_mutex_ for its full duration. If get_summary() is ever called from
+    // multiple threads concurrently, this buffer must move to thread-local storage
+    // or the lock scope must be widened accordingly.
     const std::unique_ptr<double[]> scratch_buffer_;
 
     // Ring buffer

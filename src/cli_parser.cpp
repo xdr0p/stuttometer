@@ -341,6 +341,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     out_config.osd_min_severity_manual = has_osd_min_sev;
     out_config.judder_min_alternations = static_cast<uint8_t>(judder_min_alternations);
     out_config.judder_min_alternations_manual = has_judder_alt;
+    out_config.dwm_min_missed_vblanks = trig_defaults.dwm_min_missed_vblanks;
+    out_config.kernel_frame_stall_min_missed_vblanks = trig_defaults.kernel_frame_stall_min_missed_vblanks;
     out_config.target_pid_manual = (app.count("--target-pid") > 0 && target_pid != 0);
     out_config.present_threshold_manual = (app.count("--present-threshold-ms") > 0);
     out_config.smi_threshold_manual = (app.count("--smi-threshold-ms") > 0);

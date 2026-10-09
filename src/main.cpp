@@ -229,6 +229,8 @@ int main(int argc, char** argv) {
     trig_config.judder_swing_ratio = judder_swing_ratio;
     trig_config.judder_min_alternations = judder_min_alternations;
     trig_config.min_report_severity = config.min_report_severity;
+    trig_config.dwm_min_missed_vblanks = config.dwm_min_missed_vblanks;
+    trig_config.kernel_frame_stall_min_missed_vblanks = config.kernel_frame_stall_min_missed_vblanks;
 
     stuttometer::DisplayRefreshInfo disp_info = stuttometer::query_display_refresh_info(target_pid);
     trig_config.vblank_interval_ms = disp_info.vblank_interval_ms;
@@ -269,6 +271,26 @@ int main(int argc, char** argv) {
     } else if (start_result == stuttometer::SessionStartResult::DEGRADED_KERNEL_ONLY) {
         std::cout << "[STUTTOMETER] Notice: Running in DEGRADED KERNEL-ONLY mode (User DXGI/Audio session unavailable).\n";
     }
+
+    const auto ps = session_mgr.provider_status();
+    auto warn_provider = [](bool active, bool requested, const char* name) {
+        if (requested && !active) {
+            std::cout << "[STUTTOMETER] Notice: " << name << " provider failed to enable.\n";
+        }
+    };
+    warn_provider(ps.dxgi_enabled, etw_config.enable_dxgi, "DXGI");
+    warn_provider(ps.audio_enabled, etw_config.enable_audio, "Audio");
+    warn_provider(ps.dxgkrnl_enabled, etw_config.enable_dxgkrnl, "DxgKrnl");
+    warn_provider(ps.dwm_core_enabled, etw_config.enable_dwm_core, "DWM-Core");
+    warn_provider(ps.kernel_dpc_enabled, etw_config.enable_kernel_dpc, "Kernel DPC/ISR");
+    warn_provider(ps.kernel_disk_enabled, etw_config.enable_kernel_disk, "Kernel Disk I/O");
+    warn_provider(ps.kernel_cswitch_enabled, etw_config.enable_kernel_cswitch, "Kernel Context Switch");
+    warn_provider(ps.kernel_pagefault_enabled, etw_config.enable_kernel_pagefault, "Kernel Page Fault");
+    warn_provider(ps.processor_power_enabled, etw_config.enable_processor_power, "Processor Power");
+    warn_provider(ps.antimalware_enabled, etw_config.enable_antimalware, "Antimalware Engine");
+    warn_provider(ps.d3d12_enabled, etw_config.enable_d3d12, "Direct3D 12");
+    warn_provider(ps.kernel_memory_enabled, etw_config.enable_kernel_memory, "Kernel Memory");
+    warn_provider(ps.kernel_process_enabled, etw_config.enable_kernel_process_events, "Kernel Process");
 
     std::cout << "[STUTTOMETER] Active. Monitoring frame delivery (Mode: " << stuttometer::frame_trigger_mode_to_string(frame_trig_mode)
               << ", Spike: " << spike_multiplier << "x, Static Threshold: " << present_threshold_ms << "ms)...\n";

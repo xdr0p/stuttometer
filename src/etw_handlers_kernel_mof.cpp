@@ -1,3 +1,5 @@
+#include <iostream>
+#include <atomic>
 #include <algorithm>
 #include <cstring>
 #include "stuttometer/constants.hpp"
@@ -14,21 +16,16 @@ namespace {
 [[nodiscard]] inline bool unpack_dpc_isr(
     const EVENT_RECORD* ev, uint64_t& out_initial_time, uint64_t& out_routine
 ) noexcept {
-    if (!ev->UserData || ev->UserDataLength < 12) return false;
+    // 12-byte MOF schema uses a 32-bit InitialTime (lower 32 bits of QPC at DPC start).
+    // On x64 with ClientContext=1, ctx.timestamp is a full 64-bit QPC value, so
+    // zero-extending the truncated field produces a garbage delta and silently
+    // yields duration_us = 0 after the cap check. Modern Win10/11 (19041+) emits the
+    // 16-byte form. Reject payloads < 16 bytes rather than misparsing them.
+    if (!ev->UserData || ev->UserDataLength < 16) return false;
     const auto* raw = static_cast<const uint8_t*>(ev->UserData);
-    if (ev->UserDataLength == 12) {
-        uint32_t t32 = 0;
-        std::memcpy(&t32, raw, sizeof(uint32_t));
-        out_initial_time = t32;
-        std::memcpy(&out_routine, raw + 4, sizeof(uint64_t));
-        return true;
-    }
-    if (ev->UserDataLength >= 16) {
-        std::memcpy(&out_initial_time, raw, sizeof(uint64_t));
-        std::memcpy(&out_routine, raw + 8, sizeof(uint64_t));
-        return true;
-    }
-    return false;
+    std::memcpy(&out_initial_time, raw, sizeof(uint64_t));
+    std::memcpy(&out_routine, raw + 8, sizeof(uint64_t));
+    return true;
 }
 
 // 100ns intervals per second for QPC -> FILETIME conversion (NOT a duration cap).
@@ -62,9 +59,47 @@ void EtwSessionManager::handle_nt_dpc_isr_event(
         if (data_ok) {
             rec.payload.routine_addr = routine;
             rec.auxiliary_data = routine;
-            rec.duration_us = clamped_qpc_delta_us(
-                ctx.timestamp, initial_time, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
+
+            constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL; // Jan 1, 2000 00:00:00 UTC
+            if (ctx.timestamp >= MIN_VALID_FILETIME) {
+                // NT Kernel Logger emits EventHeader.TimeStamp in FILETIME (100ns since 1601)
+                // regardless of Wnode.ClientContext=1, while the MOF payload's InitialTime is
+                // QPC ticks. Translate ctx.timestamp into the QPC domain via the periodic sync
+                // pair before subtracting.
+                uint64_t sync_utc = 0, sync_qpc = 0;
+                read_sync_time(sync_utc, sync_qpc);
+                if (sync_utc > 0 && sync_qpc > 0) {
+                    uint64_t event_qpc = 0;
+                    if (ctx.timestamp >= sync_utc) {
+                        const uint64_t delta_ft = ctx.timestamp - sync_utc;
+                        const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
+                        const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
+                        const uint64_t delta_qpc = (q * qpc_freq_) + ((r * qpc_freq_) / FILETIME_TICKS_PER_SEC);
+                        event_qpc = sync_qpc + delta_qpc;
+                    } else {
+                        const uint64_t delta_ft = sync_utc - ctx.timestamp;
+                        const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
+                        const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
+                        const uint64_t delta_qpc = (q * qpc_freq_) + ((r * qpc_freq_) / FILETIME_TICKS_PER_SEC);
+                        event_qpc = (sync_qpc >= delta_qpc) ? (sync_qpc - delta_qpc) : 0;
+                    }
+                    if (event_qpc > 0) {
+                        // rec.qpc_timestamp stays as ctx.timestamp (FILETIME domain, matching all other events)
+                        rec.duration_us = clamped_qpc_delta_us(
+                            event_qpc, initial_time, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
+                    } else {
+                        rec.duration_us = 0;
+                    }
+                } else {
+                    rec.duration_us = 0;
+                }
+            } else {
+                // Synthetic / direct QPC timestamp (unit tests or custom providers)
+                rec.duration_us = clamped_qpc_delta_us(
+                    ctx.timestamp, initial_time, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
+            }
         }
+
         emit_event(rec, data_ok);
         return;
     }

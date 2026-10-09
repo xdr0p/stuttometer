@@ -144,11 +144,11 @@ bool TriggerEngine::initiate_trigger_atomic(
     }
 
     // ---- Phase 2: Atomic metadata updates (no lock required) ----
-    // NOTE: ETW timestamps (timestamp_qpc) are in FileTime domain (~1.34e17, 100ns since 1601),
-    // not QPC domain (~get_current_qpc()). poll_state compares against get_current_qpc(), so
-    // post_target_qpc_ and claimed_timestamp_qpc_ must be in QPC domain or the deadline is
-    // unreachable and the state machine sticks permanently in COLLECTING_POST.
-    // active_trigger_.trigger_timestamp_qpc (Phase 3) stays in ETW domain for snapshot windowing.
+    // Both ETW sessions set Wnode.ClientContext = 1, so EventHeader.TimeStamp is in the
+    // QPC domain, not FileTime. The state machine deadlines below must therefore use
+    // get_current_qpc() so poll_state comparisons are domain-consistent.
+    // active_trigger_.trigger_timestamp_qpc stays in the same QPC domain and is used
+    // directly for snapshot windowing.
     const uint64_t now_qpc = get_current_qpc();
     claimed_timestamp_qpc_.store(now_qpc, std::memory_order_release);
     active_source_.store(src, std::memory_order_release);
@@ -440,6 +440,13 @@ bool TriggerEngine::on_dwm_glitch(uint32_t pid, uint32_t tid, uint32_t missed_vb
     const double effective_threshold = std::max(1.0, vblank_ms - jitter_guard);
 
     if (duration_ms < effective_threshold) {
+        record_filtered_event(
+            TriggerSource::DWM_GLITCH,
+            TriggerReason::DWM_COMPOSITOR_GLITCH,
+            timestamp_qpc, duration_ms,
+            /*baseline_avg_ms=*/0.0, /*spike_ratio=*/1.0,
+            pid, tid, cpu_index,
+            FilterKind::VBLANK_FLOOR);
         return false;
     }
 

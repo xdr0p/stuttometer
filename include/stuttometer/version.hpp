@@ -10,11 +10,11 @@
 // =============================================================================
 
 #define STUTTOMETER_VERSION_MAJOR 0
-#define STUTTOMETER_VERSION_MINOR 7
-#define STUTTOMETER_VERSION_PATCH 9
-#define STUTTOMETER_VERSION_STRING "0.7.9"
-#define STUTTOMETER_VERSION_QUAD 0,7,9,0
-#define STUTTOMETER_VERSION_QUAD_STRING "0.7.9.0"
+#define STUTTOMETER_VERSION_MINOR 8
+#define STUTTOMETER_VERSION_PATCH 0
+#define STUTTOMETER_VERSION_STRING "0.8.0"
+#define STUTTOMETER_VERSION_QUAD 0,8,0,0
+#define STUTTOMETER_VERSION_QUAD_STRING "0.8.0.0"
 
 #ifdef __cplusplus
 #include <string_view>

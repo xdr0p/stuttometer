@@ -13,18 +13,27 @@ static void test_make_flip_key_distribution() {
     std::cout << "[TEST] Validating make_flip_key hash combiner & injectivity...\n";
 
     std::unordered_set<uint64_t> keys;
-    for (uint32_t vidpn = 0; vidpn < 4; ++vidpn) {
-        for (uint64_t ptr = 0x10000; ptr <= 0x100000; ptr += 0x1000) {
-            uint64_t k = stuttometer::make_flip_key(vidpn, ptr);
-            STUTTO_ASSERT(k != 0);
-            STUTTO_ASSERT(keys.find(k) == keys.end());
-            keys.insert(k);
-        }
-    }
+    for (uint32_t vidpn = 0; vidpn < 32; ++vidpn) {
+        uint64_t k = stuttometer::make_flip_key(vidpn);
+        STUTTO_ASSERT(k != 0);
+        STUTTO_ASSERT(keys.find(k) == keys.end());
+        keys.insert(k);
 
-    // Zero / null swapchain pointer fallback
-    uint64_t k_null = stuttometer::make_flip_key(0, 0);
-    STUTTO_ASSERT(k_null != 0);
+        // F2 invariant: allocation pointers must map to identical key for the same VidPn
+        uint64_t k_alloc1 = stuttometer::make_flip_key(vidpn, 0x10000ULL);
+        uint64_t k_alloc2 = stuttometer::make_flip_key(vidpn, 0x20000ULL);
+        STUTTO_ASSERT(k == k_alloc1);
+        STUTTO_ASSERT(k_alloc1 == k_alloc2);
+
+        // F10 invariant: Same vidpn, different pid -> distinct keys
+        uint64_t k_pid_a = stuttometer::make_flip_key(vidpn, 0, 1000);
+        uint64_t k_pid_b = stuttometer::make_flip_key(vidpn, 0, 2000);
+        STUTTO_ASSERT(k_pid_a != k_pid_b);
+
+        // F10 invariant: Same vidpn, same pid, different allocation_ptr -> identical keys
+        STUTTO_ASSERT(stuttometer::make_flip_key(vidpn, 0x10000, 1000)
+                   == stuttometer::make_flip_key(vidpn, 0x20000, 1000));
+    }
 
     std::cout << "  -> Generated " << keys.size() << " unique flip keys with 0 collisions. PASSED.\n";
 }
@@ -111,7 +120,7 @@ static void test_last_flip_table_lifecycle() {
     const uint64_t qpc1 = 1000000;
     const uint64_t k1 = stuttometer::make_flip_key(0, 0xABCDEF00);
 
-    table.insert(k1, { qpc1, 0xABCDEF00, 1234, 5678 });
+    table.insert(k1, { qpc1, 1234, 5678 });
 
     stuttometer::LastFlipEntry found{};
     STUTTO_ASSERT(table.lookup(k1, found));

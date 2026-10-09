@@ -271,6 +271,48 @@ static void test_correlator_timestamp_anchor_verification() {
     std::cout << "  -> End-to-end correlator timestamp anchor PASSED.\n";
 }
 
+static void test_judder_eviction_aging_from_episode_start() {
+    std::cout << "[TEST] Validating judder eviction aging from episode start (F6)...\n";
+
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::TriggerConfig config{};
+    stuttometer::TriggerEngine engine(config, qpc_freq);
+
+    const uint64_t key_active = 0xAAAA1111ULL;
+    const uint64_t key_inactive = 0xBBBB2222ULL;
+
+    // Stream 1 (active judder episode): started at QPC 1000, last frame at QPC 2000
+    stuttometer::RollingFrameStats stats_active{};
+    stats_active.judder_episode_active = 1;
+    stats_active.judder_episode_start_qpc = 1000;
+    stats_active.last_frame_timestamp_qpc = 2000;
+    engine.inject_pacing_stats_for_test(key_active, stats_active);
+
+    // Stream 2 (inactive judder): started at QPC 1000, last frame at QPC 2000
+    stuttometer::RollingFrameStats stats_inactive{};
+    stats_inactive.judder_episode_active = 0;
+    stats_inactive.judder_episode_start_qpc = 1000;
+    stats_inactive.last_frame_timestamp_qpc = 2000;
+    engine.inject_pacing_stats_for_test(key_inactive, stats_inactive);
+
+    STUTTO_ASSERT(engine.has_pacing_entry_for_test(key_active));
+    STUTTO_ASSERT(engine.has_pacing_entry_for_test(key_inactive));
+
+    // Eviction test at current_qpc = 2500, max_age_qpc = 1000:
+    // - Active episode ages from start_qpc (1000) -> age = 2500 - 1000 = 1500 > 1000 -> EVICTED
+    // - Inactive stream ages from last_frame_qpc (2000) -> age = 2500 - 2000 = 500 <= 1000 -> RETAINED
+    engine.evict_stale_pacing_entries(2500, 1000);
+    STUTTO_ASSERT(!engine.has_pacing_entry_for_test(key_active));
+    STUTTO_ASSERT(engine.has_pacing_entry_for_test(key_inactive));
+
+    // Second eviction at current_qpc = 3500, max_age_qpc = 1000:
+    // - Inactive stream ages from last_frame_qpc (2000) -> age = 3500 - 2000 = 1500 > 1000 -> EVICTED
+    engine.evict_stale_pacing_entries(3500, 1000);
+    STUTTO_ASSERT(!engine.has_pacing_entry_for_test(key_inactive));
+
+    std::cout << "  -> Judder eviction aging from episode start (F6) PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Judder Episode Tracker Tests ===\n";
     try {
@@ -278,6 +320,7 @@ int main() {
         test_judder_close_on_5s_cap();
         test_judder_mid_episode_spike_bridge();
         test_correlator_timestamp_anchor_verification();
+        test_judder_eviction_aging_from_episode_start();
         std::cout << ">>> All Judder Episode tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

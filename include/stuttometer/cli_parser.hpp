@@ -64,6 +64,8 @@ struct CliConfig {
     bool osd_min_severity_manual{false};
     uint8_t judder_min_alternations{5};
     bool judder_min_alternations_manual{false};
+    uint8_t dwm_min_missed_vblanks{1};
+    uint8_t kernel_frame_stall_min_missed_vblanks{1};
 };
 
 struct CliRangeDef {

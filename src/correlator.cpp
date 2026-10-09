@@ -128,7 +128,7 @@ constexpr std::array<HypothesisTagEntry, 15> kHypothesisTagTable = {{
     std::string_view event_type
 ) {
     EvidenceItem ev{};
-    ev.event_type = event_type; // Direct string_view assignment in C++17 (no temporary string)
+    ev.event_type = event_type; // string_view -> string construction (EvidenceItem::event_type is std::string)
     ev.duration_us = rec.duration_us;
     ev.cpu_core = rec.cpu_index;
     ev.offset_from_trigger_ms = offset_ms;
@@ -713,20 +713,48 @@ DiagnosticReport CorrelationEngine::correlate(
                                    (trigger.reason == TriggerReason::STATIC_THRESHOLD ||
                                     trigger.reason == TriggerReason::RELATIVE_SPIKE));
 
+    constexpr double k = detail::severity::gpu_stall::VETO_DOMINANCE_FACTOR;
+
+    auto dur_dominant_us = [](uint32_t dur_us, uint32_t thresh_us) noexcept {
+        return dur_us >= static_cast<uint32_t>(k * thresh_us);
+    };
+    auto dur_dominant_ms = [](uint32_t dur_us, uint32_t thresh_ms) noexcept {
+        return dur_us >= static_cast<uint32_t>(k * thresh_ms * 1000u);
+    };
+    auto size_dominant = [](uint64_t bytes, uint32_t thresh_mb) noexcept {
+        return bytes >= static_cast<uint64_t>(k * thresh_mb) * 1024ULL * 1024ULL;
+    };
+
+    const uint32_t dpc_isr_dom_thresh = std::min(thresholds_.dpc_threshold_us,
+                                                 thresholds_.isr_threshold_us);
+
+    const bool any_dominant =
+        std::any_of(dpc_candidates.begin(), dpc_candidates.end(),
+            [&](const DpcCandidate& c){ return dur_dominant_us(c.record.duration_us, dpc_isr_dom_thresh); })
+        || std::any_of(mem_physical_candidates.begin(), mem_physical_candidates.end(),
+            [&](const MemPhysicalAllocCandidate& c){ return dur_dominant_us(c.record.duration_us, thresholds_.mem_physical_latency_us); })
+        || std::any_of(disk_candidates.begin(), disk_candidates.end(),
+            [&](const DiskCandidate& c){ return dur_dominant_ms(c.record.duration_us, thresholds_.disk_threshold_ms); })
+        || std::any_of(cswitch_candidates.begin(), cswitch_candidates.end(),
+            [&](const CSwitchCandidate& c){ return dur_dominant_ms(c.record.duration_us, thresholds_.cswitch_preempt_ms); })
+        || std::any_of(pagefault_candidates.begin(), pagefault_candidates.end(),
+            [&](const PageFaultCandidate& c){ return dur_dominant_ms(c.record.duration_us, thresholds_.pagefault_threshold_ms); })
+        || std::any_of(antimalware_candidates.begin(), antimalware_candidates.end(),
+            [&](const AntimalwareCandidate& c){ return dur_dominant_ms(c.record.duration_us, thresholds_.antimalware_threshold_ms); })
+        || std::any_of(d3d12_candidates.begin(), d3d12_candidates.end(),
+            [&](const D3D12PsoCandidate& c){ return dur_dominant_ms(c.record.duration_us, thresholds_.d3d12_pso_threshold_ms); })
+        || std::any_of(vram_candidates.begin(), vram_candidates.end(),
+            [&](const VramPagingCandidate& c){ return size_dominant(c.record.auxiliary_data, thresholds_.vram_demoted_threshold_mb); })
+        || std::any_of(mem_alloc_candidates.begin(), mem_alloc_candidates.end(),
+            [&](const MemVirtualAllocCandidate& c){ return size_dominant(c.record.auxiliary_data, thresholds_.mem_alloc_threshold_mb); })
+        || std::any_of(mem_trim_candidates.begin(), mem_trim_candidates.end(),
+            [&](const MemTrimCandidate& c){ return size_dominant(c.record.auxiliary_data, thresholds_.mem_trim_threshold_mb); })
+        || !dwm_candidates.empty();
+
     if (is_gpu_candidate && 
         provider_ctx.kernel_dpc_active &&
         no_cumulative_preemption &&
-        dpc_candidates.empty() && 
-        disk_candidates.empty() && 
-        cswitch_candidates.empty() &&
-        dwm_candidates.empty() &&
-        vram_candidates.empty() && 
-        mem_alloc_candidates.empty() && 
-        mem_trim_candidates.empty() && 
-        mem_physical_candidates.empty() && 
-        d3d12_candidates.empty() && 
-        antimalware_candidates.empty() && 
-        pagefault_candidates.empty()) {
+        !any_dominant) {
         Diagnosis diag;
         diag.hypothesis = "gpu_pipeline_stall";
 

@@ -103,6 +103,58 @@ static void test_provider_guids_and_events() {
     STUTTO_ASSERT(stuttometer::KERNEL_PROCESS_PROVIDER_GUID.Data4[6] == 0xE7);
     STUTTO_ASSERT(stuttometer::KERNEL_PROCESS_PROVIDER_GUID.Data4[7] == 0x16);
 
+    // PerfInfo MOF Provider {CE1DBFB4-137E-4DA6-87B0-3F59AA102CBC} (Windows kernel DPC/ISR MOF)
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data1 == 0xCE1DBFB4);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data2 == 0x137E);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data3 == 0x4DA6);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[0] == 0x87);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[1] == 0xB0);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[2] == 0x3F);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[3] == 0x59);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[4] == 0xAA);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[5] == 0x10);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[6] == 0x2C);
+    STUTTO_ASSERT(stuttometer::PERFINFO_MOF_GUID.Data4[7] == 0xBC);
+
+    // Thread Provider {3D6FA8D1-FE05-11D0-9DDA-00C04FD7BA7C} (Data4 must be 9D DA 00 C0 4F D7 BA 7C)
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data1 == 0x3D6FA8D1);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data2 == 0xFE05);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data3 == 0x11D0);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[0] == 0x9D);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[1] == 0xDA);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[2] == 0x00);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[3] == 0xC0);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[4] == 0x4F);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[5] == 0xD7);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[6] == 0xBA);
+    STUTTO_ASSERT(stuttometer::THREAD_GUID.Data4[7] == 0x7C);
+
+    // Disk I/O Provider {3D6FA8D4-FE05-11D0-9DDA-00C04FD7BA7C}
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data1 == 0x3D6FA8D4);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data2 == 0xFE05);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data3 == 0x11D0);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[0] == 0x9D);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[1] == 0xDA);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[2] == 0x00);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[3] == 0xC0);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[4] == 0x4F);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[5] == 0xD7);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[6] == 0xBA);
+    STUTTO_ASSERT(stuttometer::DISK_IO_GUID.Data4[7] == 0x7C);
+
+    // Page Fault Provider {3D6FA8D2-FE05-11D0-9DDA-00C04FD7BA7C}
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data1 == 0x3D6FA8D2);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data2 == 0xFE05);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data3 == 0x11D0);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[0] == 0x9D);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[1] == 0xDA);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[2] == 0x00);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[3] == 0xC0);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[4] == 0x4F);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[5] == 0xD7);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[6] == 0xBA);
+    STUTTO_ASSERT(stuttometer::PAGE_FAULT_GUID.Data4[7] == 0x7C);
+
     STUTTO_ASSERT(stuttometer::category_to_string(stuttometer::EventCategory::D3D12_PSO_CREATE) == "D3D12_PSO_CREATE");
     STUTTO_ASSERT(stuttometer::category_to_string(stuttometer::EventCategory::DXGKRNL_VRAM_PAGING) == "DXGKRNL_VRAM_PAGING");
     STUTTO_ASSERT(stuttometer::category_to_string(stuttometer::EventCategory::MEM_VIRTUAL_ALLOC) == "MEM_VIRTUAL_ALLOC");

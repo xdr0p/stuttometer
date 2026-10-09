@@ -172,13 +172,17 @@ void test_mpsc_concurrency_stress() {
             std::this_thread::yield();
         }
         // Drain remaining
-        while (ring.pop(out)) {
-            ++popped_count;
-            const double expected_dur = static_cast<double>(out.qpc_timestamp) * 1.5;
-            if (out.duration_ms != expected_dur ||
-                out.target_pid != static_cast<uint32_t>(out.qpc_timestamp >> 32) ||
-                out.target_tid != static_cast<uint32_t>(out.qpc_timestamp & 0xFFFFFFFFULL)) {
-                ++torn_reads;
+        while (ring.get_read_pos_for_test() < ring.get_write_pos_for_test()) {
+            if (ring.pop(out)) {
+                ++popped_count;
+                const double expected_dur = static_cast<double>(out.qpc_timestamp) * 1.5;
+                if (out.duration_ms != expected_dur ||
+                    out.target_pid != static_cast<uint32_t>(out.qpc_timestamp >> 32) ||
+                    out.target_tid != static_cast<uint32_t>(out.qpc_timestamp & 0xFFFFFFFFULL)) {
+                    ++torn_reads;
+                }
+            } else {
+                std::this_thread::yield();
             }
         }
     });

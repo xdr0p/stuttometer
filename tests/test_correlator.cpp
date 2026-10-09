@@ -1923,6 +1923,83 @@ static void test_gpu_pipeline_stall_suppression_by_cumulative_cswitch() {
     std::cout << "  -> gpu_pipeline_stall suppression by cumulative CSwitch PASSED.\n";
 }
 
+static void test_gpu_pipeline_stall_software_veto_dominance() {
+    std::cout << "[TEST] Validating gpu_pipeline_stall software veto dominance (F3)...\n";
+
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = stuttometer::get_current_qpc();
+    stuttometer::DriverSymbolResolver driver_resolver;
+    stuttometer::CorrelationEngine correlator(driver_resolver);
+
+    stuttometer::TriggerInfo trigger{};
+    trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trigger.reason = stuttometer::TriggerReason::STATIC_THRESHOLD;
+    trigger.trigger_timestamp_qpc = base_qpc + stuttometer::ms_to_qpc_delta(250.0, qpc_freq);
+    trigger.duration_ms = 40.0;
+    trigger.target_pid = 4000;
+    trigger.target_tid = 8000;
+
+    stuttometer::ProviderContext p_ctx{};
+    p_ctx.kernel_dpc_active = true;
+
+    // 1. Non-dominant ISR candidate: 600 us (>= 500 us isr_threshold, but < 2.0 * min(dpc, isr) = 1000 us)
+    // Both dpc_isr_spike and gpu_pipeline_stall should be emitted
+    {
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::EtwEventRecord isr{};
+        isr.category = static_cast<uint16_t>(stuttometer::EventCategory::ISR);
+        isr.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+        isr.duration_us = 600; // 0.6 ms
+        isr.cpu_index = 0;
+        isr.payload.routine_addr = 0xFFFFF80012340000ULL;
+        snapshot.push_back(isr);
+
+        auto rep = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+        bool found_gpu_stall = false;
+        bool found_dpc_spike = false;
+        for (const auto& diag : rep.diagnoses) {
+            if (diag.hypothesis == "gpu_pipeline_stall") {
+                found_gpu_stall = true;
+                STUTTO_ASSERT(diag.confidence >= 0.50);
+            }
+            if (diag.hypothesis == "dpc_isr_spike") {
+                found_dpc_spike = true;
+            }
+        }
+        STUTTO_ASSERT(found_dpc_spike);
+        STUTTO_ASSERT(found_gpu_stall);
+    }
+
+    // 2. Dominant DPC candidate: 2500 us (>= 2.0 * min(dpc, isr) = 1000 us)
+    // gpu_pipeline_stall MUST be vetoed/suppressed
+    {
+        std::vector<stuttometer::EtwEventRecord> snapshot;
+        stuttometer::EtwEventRecord dpc{};
+        dpc.category = static_cast<uint16_t>(stuttometer::EventCategory::DPC);
+        dpc.qpc_timestamp = trigger.trigger_timestamp_qpc - stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+        dpc.duration_us = 2500; // 2.5 ms
+        dpc.cpu_index = 0;
+        dpc.payload.routine_addr = 0xFFFFF80012340000ULL;
+        snapshot.push_back(dpc);
+
+        auto rep = correlator.correlate(snapshot, trigger, qpc_freq, p_ctx);
+        bool found_gpu_stall = false;
+        bool found_dpc_spike = false;
+        for (const auto& diag : rep.diagnoses) {
+            if (diag.hypothesis == "gpu_pipeline_stall") {
+                found_gpu_stall = true;
+            }
+            if (diag.hypothesis == "dpc_isr_spike") {
+                found_dpc_spike = true;
+            }
+        }
+        STUTTO_ASSERT(found_dpc_spike);
+        STUTTO_ASSERT(!found_gpu_stall);
+    }
+
+    std::cout << "  -> gpu_pipeline_stall software veto dominance (F3) PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -1964,6 +2041,7 @@ int main() {
         test_smi_auto_scaling_and_hardware_vblank();
         test_software_coverage_etw_loss_gate();
         test_gpu_pipeline_stall_suppression_by_cumulative_cswitch();
+        test_gpu_pipeline_stall_software_veto_dominance();
         std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

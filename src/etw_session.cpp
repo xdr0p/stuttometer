@@ -86,6 +86,7 @@ SessionStartResult EtwSessionManager::start() {
     const size_t prop_size = sizeof(EVENT_TRACE_PROPERTIES) + 1024;
     bool user_started = false;
     bool kernel_started = false;
+    ProviderStatus local_status{};
     const std::wstring user_session_name = get_user_session_name();
 
     // 1. Configure User-Mode Trace Session (DXGI, Audio, DxgKrnl, DWM-Core, Power, Antimalware)
@@ -133,6 +134,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable DXGI provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.dxgi_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -143,6 +145,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Audio provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.audio_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -152,6 +155,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable DxgKrnl provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.dxgkrnl_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -162,6 +166,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable DWM-Core provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.dwm_core_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -171,6 +176,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Kernel-Processor-Power provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.processor_power_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -180,6 +186,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Antimalware-Engine provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.antimalware_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -189,6 +196,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Direct3D12 provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.d3d12_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -198,6 +206,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Microsoft-Windows-Kernel-Memory provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.kernel_memory_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -207,6 +216,7 @@ SessionStartResult EtwSessionManager::start() {
                 if (en_status != ERROR_SUCCESS) {
                     std::cerr << "[ETW] Warning: Failed to enable Microsoft-Windows-Kernel-Process provider (Error " << en_status << ")\n";
                 } else {
+                    local_status.kernel_process_enabled = true;
                     any_user_provider_enabled = true;
                 }
             }
@@ -231,7 +241,7 @@ SessionStartResult EtwSessionManager::start() {
         std::vector<uint8_t> kernel_props_buf(prop_size, 0);
         auto p_kernel_props = reinterpret_cast<PEVENT_TRACE_PROPERTIES>(kernel_props_buf.data());
         p_kernel_props->Wnode.BufferSize = static_cast<ULONG>(prop_size);
-        p_kernel_props->Wnode.Guid = SYSTEM_TRACE_CONTROL_GUID;
+        p_kernel_props->Wnode.Guid = {0x9E814AAD, 0x3204, 0x11D2, {0x9A, 0x82, 0x00, 0x60, 0x08, 0xA8, 0x69, 0x39}};
         p_kernel_props->Wnode.ClientContext = 1; // QPC Clock
         p_kernel_props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
         p_kernel_props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
@@ -281,7 +291,19 @@ SessionStartResult EtwSessionManager::start() {
         } else {
             kernel_session_handle_.store(local_kernel_handle, std::memory_order_release);
             kernel_started = true;
+            local_status.kernel_dpc_enabled = config_.enable_kernel_dpc;
+            local_status.kernel_disk_enabled = config_.enable_kernel_disk;
+            local_status.kernel_cswitch_enabled = config_.enable_kernel_cswitch;
+            local_status.kernel_pagefault_enabled = config_.enable_kernel_pagefault;
         }
+    }
+
+    // Publish provider status under seqlock
+    {
+        const uint64_t s = provider_status_seq_.load(std::memory_order_relaxed);
+        provider_status_seq_.store(s + 1, std::memory_order_release);
+        provider_status_ = local_status;
+        provider_status_seq_.store(s + 2, std::memory_order_release);
     }
 
     if (!user_started && !kernel_started) {
@@ -590,6 +612,8 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         const uint16_t task = p_event->EventHeader.EventDescriptor.Task;
         if (task == 17) { // Task 17 = MMIOFlip (Event 116) - WDDM authoritative flip
             mgr->handle_dxgkrnl_flip_event(p_event, rec, ctx);
+        } else if (task == 68) { // Task 68 = WDDM 2.x+ Present (Event 105=Start, Event 106=Stop)
+            mgr->handle_dxgkrnl_present_event(p_event, rec, ctx);
         } else if (task == 4 && (opcode == 17 || opcode == 1)) {
             mgr->handle_dxgkrnl_vsync_event(p_event, rec, ctx);
         } else if (event_id == 370 || task == 222 || event_id == 367 || task == 219) {
@@ -613,10 +637,11 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         mgr->handle_process_event(p_event, rec, ctx);
     } else if (IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID) ||
                IsEqualGUID(prov_guid, PERFINFO_GUID) ||
+               IsEqualGUID(prov_guid, PERFINFO_MOF_GUID) ||
                IsEqualGUID(prov_guid, THREAD_GUID) ||
                IsEqualGUID(prov_guid, DISK_IO_GUID) ||
                IsEqualGUID(prov_guid, PAGE_FAULT_GUID)) {
-        const bool is_perfinfo  = IsEqualGUID(prov_guid, PERFINFO_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
+        const bool is_perfinfo  = IsEqualGUID(prov_guid, PERFINFO_GUID) || IsEqualGUID(prov_guid, PERFINFO_MOF_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
         const bool is_thread    = IsEqualGUID(prov_guid, THREAD_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
         const bool is_disk      = IsEqualGUID(prov_guid, DISK_IO_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
         const bool is_pagefault = IsEqualGUID(prov_guid, PAGE_FAULT_GUID) || IsEqualGUID(prov_guid, SYSTEM_TRACE_CONTROL_GUID);
@@ -636,6 +661,8 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         } else if (is_pagefault && (opcode == KERNEL_OPCODE_HARDFAULT || opcode == KERNEL_OPCODE_VIRTUAL_ALLOC)) {
             mgr->handle_nt_fault_event(p_event, rec, ctx);
         }
+    } else {
+        // Do NOT emit UNKNOWN into NDJSON (high-frequency kernel noise)
     }
 
     // Monotonically advance highest processed QPC timestamp for deterministic post-trigger draining

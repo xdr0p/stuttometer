@@ -48,16 +48,21 @@ inline constexpr GUID PERFINFO_GUID = {
     0xCE1DB73A, 0x284E, 0x417B, { 0xBE, 0x4D, 0x7A, 0x13, 0x41, 0x79, 0x64, 0x44 }
 };
 
+// PerfInfo MOF provider (kernel classic DPC/ISR events — the one Windows actually uses)
+inline constexpr GUID PERFINFO_MOF_GUID = {
+    0xCE1DBFB4, 0x137E, 0x4DA6, { 0x87, 0xB0, 0x3F, 0x59, 0xAA, 0x10, 0x2C, 0xBC }
+};
+
 inline constexpr GUID THREAD_GUID = {
-    0x3D6FA8D1, 0xFE05, 0x11D0, { 0x9D, 0x06, 0x00, 0xC0, 0x4F, 0xD7, 0xB1, 0x40 }
+    0x3D6FA8D1, 0xFE05, 0x11D0, { 0x9D, 0xDA, 0x00, 0xC0, 0x4F, 0xD7, 0xBA, 0x7C }
 };
 
 inline constexpr GUID DISK_IO_GUID = {
-    0x3D6FA8D4, 0xFE05, 0x11D0, { 0x9D, 0x06, 0x00, 0xC0, 0x4F, 0xD7, 0xB1, 0x40 }
+    0x3D6FA8D4, 0xFE05, 0x11D0, { 0x9D, 0xDA, 0x00, 0xC0, 0x4F, 0xD7, 0xBA, 0x7C }
 };
 
 inline constexpr GUID PAGE_FAULT_GUID = {
-    0x3D6FA8D2, 0xFE05, 0x11D0, { 0x9D, 0x06, 0x00, 0xC0, 0x4F, 0xD7, 0xB1, 0x40 }
+    0x3D6FA8D2, 0xFE05, 0x11D0, { 0x9D, 0xDA, 0x00, 0xC0, 0x4F, 0xD7, 0xBA, 0x7C }
 };
 
 inline constexpr GUID KERNEL_PROCESSOR_POWER_GUID = {
@@ -170,11 +175,9 @@ struct LastPresentEntry {
 
 struct LastFlipEntry {
     uint64_t last_flip_qpc{0};
-    uint32_t swapchain_hash{0};
     uint32_t pid{0};
     uint32_t tid{0};
 };
-
 static_assert(sizeof(PresentInFlight) == 24, "PresentInFlight must be 24 bytes");
 static_assert(std::is_trivially_copyable_v<PresentInFlight>, "PresentInFlight must be trivially copyable");
 static_assert(sizeof(DiskInFlight) == 24, "DiskInFlight must be 24 bytes");
@@ -187,7 +190,7 @@ static_assert(sizeof(TidPidEntry) == 16, "TidPidEntry must be 16 bytes");
 static_assert(std::is_trivially_copyable_v<TidPidEntry>, "TidPidEntry must be trivially copyable");
 static_assert(sizeof(LastPresentEntry) == 16, "LastPresentEntry must be 16 bytes");
 static_assert(std::is_trivially_copyable_v<LastPresentEntry>, "LastPresentEntry must be trivially copyable");
-static_assert(sizeof(LastFlipEntry) == 24, "LastFlipEntry must be 24 bytes");
+static_assert(sizeof(LastFlipEntry) == 16, "LastFlipEntry must be 16 bytes");
 static_assert(std::is_trivially_copyable_v<LastFlipEntry>, "LastFlipEntry must be trivially copyable");
 
 struct PresentDeltaResult {
@@ -295,11 +298,14 @@ static inline uint64_t make_swapchain_key(uint32_t pid, uint64_t swapchain_ptr) 
     return (k != 0) ? k : 0xCAFEBABEDEADBEEFULL;
 }
 
-static inline uint64_t make_flip_key(uint32_t vidpn_source_id, uint64_t swapchain_ptr) noexcept {
-    // Fallback to 0x1ULL (guaranteed-unmapped 64KB null-page zone) when swapchain_ptr is null
-    uint64_t ptr_val = swapchain_ptr ? swapchain_ptr : 0x1ULL;
-    uint64_t k = (static_cast<uint64_t>(vidpn_source_id) << 32) | (vidpn_source_id ^ 0x9E3779B9U);
-    k ^= ptr_val + 0x517cc1b727220a95ULL + (k << 6) + (k >> 2);
+// Key strictly on (VidPnSourceId, PID). FlipToDriverAllocation alternates per frame
+// under standard flip-model double/triple buffering, so allocation pointers are ignored
+// to measure consecutive display frame delivery rather than same-buffer refresh cycles.
+// PID isolation ensures multiple presenting processes targeting the same output do not
+// conflate delivery intervals or share pacing state.
+static inline uint64_t make_flip_key(uint32_t vidpn_source_id, uint64_t /*allocation_ptr*/ = 0, uint32_t pid = 0) noexcept {
+    uint64_t k = (static_cast<uint64_t>(vidpn_source_id) << 32) | pid;
+    k ^= 0x9E3779B97F4A7C15ULL;
     k ^= (k >> 30);
     k *= 0xbf58476d1ce4e5b9ULL;
     k ^= (k >> 27);
@@ -346,6 +352,23 @@ static inline uint64_t make_pso_key(uint32_t tid, uint64_t pso_ptr) noexcept {
     return (d <= cap_us) ? static_cast<uint32_t>(d) : 0U;
 }
 
+// Provider enablement tracking for diagnostic visibility
+struct ProviderStatus {
+    bool dxgi_enabled{false};
+    bool audio_enabled{false};
+    bool dxgkrnl_enabled{false};
+    bool dwm_core_enabled{false};
+    bool kernel_dpc_enabled{false};
+    bool kernel_disk_enabled{false};
+    bool kernel_cswitch_enabled{false};
+    bool kernel_pagefault_enabled{false};
+    bool processor_power_enabled{false};
+    bool antimalware_enabled{false};
+    bool d3d12_enabled{false};
+    bool kernel_memory_enabled{false};
+    bool kernel_process_enabled{false};
+};
+
 class NdjsonWriter;
 
 class EtwSessionManager {
@@ -356,6 +379,22 @@ public:
         const EtwSessionConfig& config = EtwSessionConfig{}
     );
     ~EtwSessionManager();
+
+    [[nodiscard]] ProviderStatus provider_status() const noexcept {
+        ProviderStatus out{};
+        uint64_t s1 = 0, s2 = 0;
+        do {
+            s1 = provider_status_seq_.load(std::memory_order_acquire);
+            while (s1 % 2 != 0) {
+                cpu_pause();
+                s1 = provider_status_seq_.load(std::memory_order_acquire);
+            }
+            out = provider_status_;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            s2 = provider_status_seq_.load(std::memory_order_acquire);
+        } while (s1 != s2);
+        return out;
+    }
 
     // Must be called prior to start(). Pointer must remain valid for the session lifetime.
     void set_ndjson_writer(NdjsonWriter* writer) noexcept {
@@ -464,6 +503,7 @@ private:
     void handle_dxgi_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
     void handle_audio_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
     void handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
+    void handle_dxgkrnl_present_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
     void handle_dxgkrnl_vsync_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
     void handle_dxgkrnl_vidmm_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
     void handle_dxgkrnl_paging_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept;
@@ -502,6 +542,8 @@ private:
     std::atomic<uint64_t> sync_time_utc_{0};
     std::atomic<uint64_t> sync_time_qpc_{0};
     std::atomic<uint64_t> sync_time_seq_{0};
+    ProviderStatus provider_status_{};
+    std::atomic<uint64_t> provider_status_seq_{0};
     std::atomic<uint32_t> user_events_lost_{0};
     std::atomic<uint32_t> kernel_events_lost_{0};
     std::atomic<uint32_t> user_buffers_lost_{0};

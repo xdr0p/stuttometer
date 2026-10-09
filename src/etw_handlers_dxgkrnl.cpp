@@ -29,7 +29,7 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
     rec.payload.dxgi.present_flags = vidpn_source_id;
     rec.payload.dxgi.frame_index = flip_present_id;
 
-    const uint64_t flip_key = make_flip_key(vidpn_source_id, allocation_ptr);
+    const uint64_t flip_key = make_flip_key(vidpn_source_id, allocation_ptr, ctx.pid);
     LastFlipEntry last_entry{};
     bool has_prev = last_flip_table_.lookup(flip_key, last_entry);
     uint64_t prev_qpc = has_prev ? last_entry.last_flip_qpc : 0;
@@ -47,13 +47,64 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
         }
     }
 
-    last_flip_table_.insert(flip_key, { ctx.timestamp, static_cast<uint32_t>(allocation_ptr & 0xFFFFFFFF), ctx.pid, ctx.tid });
+    last_flip_table_.insert(flip_key, { ctx.timestamp, ctx.pid, ctx.tid });
 
     emit_event(rec);
 
     // DWM/System Filtering (S1, N-3):
     // In DWM-composed borderless mode, flips originate from DWM/System (PID 4) and are filtered here;
     // DXGI_PRESENT_STUTTER and DWM_GLITCH handle composed presentation.
+    const uint32_t dwm_pid = cached_dwm_pid_.load(std::memory_order_relaxed);
+    if (ctx.pid == 4 || (dwm_pid != 0 && ctx.pid == dwm_pid)) {
+        return;
+    }
+
+    if (!is_baseline && delivery_ms > 0.0) {
+        trigger_engine_.on_kernel_frame_stall(ctx.pid, ctx.tid, delivery_ms, ctx.timestamp, flip_key, ctx.cpu);
+    }
+}
+
+void EtwSessionManager::handle_dxgkrnl_present_event(PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx) noexcept {
+    // Only act on EventId 106 (Present_Stop / Opcode 2). Ignore EventId 105 (Present_Start).
+    if (ctx.opcode != 2 || ctx.event_id != 106) {
+        return;
+    }
+
+    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_MMIOFLIP);
+
+    uint32_t present_id = 0;
+    if (p_event->UserDataLength >= sizeof(uint32_t) && p_event->UserData) {
+        std::memcpy(&present_id, p_event->UserData, sizeof(uint32_t));
+    }
+
+    rec.auxiliary_data = 0;
+    rec.payload.dxgi.present_flags = 0;
+    rec.payload.dxgi.frame_index = present_id;
+
+    // Key last_flip_table_ on (pid, tid) to isolate per-thread present streams
+    const uint64_t flip_key = make_thread_key(ctx.pid, ctx.tid);
+    LastFlipEntry last_entry{};
+    bool has_prev = last_flip_table_.lookup(flip_key, last_entry);
+    uint64_t prev_qpc = has_prev ? last_entry.last_flip_qpc : 0;
+
+    double delivery_ms = 0.0;
+    bool is_baseline = true;
+
+    if (has_prev && prev_qpc > 0 && ctx.timestamp > prev_qpc) {
+        uint64_t delta_qpc = ctx.timestamp - prev_qpc;
+        double delta_us = qpc_delta_to_us(delta_qpc, qpc_freq_);
+        if (delta_us <= static_cast<double>(PAUSE_CEILING_US)) { // 2.0s ceiling for loading / Alt-Tab
+            delivery_ms = delta_us / 1000.0;
+            is_baseline = false;
+            rec.duration_us = static_cast<uint32_t>(delta_us);
+        }
+    }
+
+    last_flip_table_.insert(flip_key, { ctx.timestamp, ctx.pid, ctx.tid });
+
+    emit_event(rec);
+
+    // DWM/System Filtering (S1, N-3):
     const uint32_t dwm_pid = cached_dwm_pid_.load(std::memory_order_relaxed);
     if (ctx.pid == 4 || (dwm_pid != 0 && ctx.pid == dwm_pid)) {
         return;

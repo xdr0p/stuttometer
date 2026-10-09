@@ -184,6 +184,13 @@ public:
 
     void evict_stale_pacing_entries(uint64_t current_qpc, uint64_t max_age_qpc) noexcept {
         pacing_table_.evict_stale(current_qpc, max_age_qpc, [](const RollingFrameStats& s) {
+            if (s.judder_episode_active == 1) {
+                // Age from episode start. Live episodes are bounded at
+                // JUDDER_EPISODE_DURATION_CAP_MS (5s) in evaluate_frame_pacing, which only
+                // runs on frame arrival — a stalled stream does not close its episode.
+                // Aging from start ensures a stalled entry still ages out at max_age_qpc.
+                return s.judder_episode_start_qpc;
+            }
             return s.last_frame_timestamp_qpc;
         });
     }
@@ -225,6 +232,18 @@ public:
     // Test-only: returns the current rolling baseline for the specified stream key (or derived pid/tid).
     // Returns 0.0 if the stream is not present or has <1 sample. Not used in production.
     double current_stream_baseline_ms_for_test(uint64_t stream_key, uint32_t pid, uint32_t tid) const noexcept;
+
+    // Test-only pacing table seams: must be used with a fresh TriggerEngine instance,
+    // or against a stream key that the production code path under test does not touch.
+    // Not reset by reset_test_seams().
+    void inject_pacing_stats_for_test(uint64_t key, const RollingFrameStats& stats) noexcept {
+        pacing_table_.insert(key, stats);
+    }
+
+    bool has_pacing_entry_for_test(uint64_t key) const noexcept {
+        RollingFrameStats s{};
+        return pacing_table_.lookup(key, s);
+    }
 
 private:
     inline bool should_trigger_on_process(uint32_t pid) const noexcept {
