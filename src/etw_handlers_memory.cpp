@@ -11,6 +11,9 @@ namespace {
 }
 } // namespace
 
+// Verified 2026-10-09 against Microsoft-Windows-Kernel-Memory manifest on
+// Windows 11 Pro (build 26200.9457): WorkingSetOutSwapStart/Stop emit only
+// EventId 4/5 (v0/v1). No additional variants observed.
 void EtwSessionManager::handle_kernel_memory_event(
     PEVENT_RECORD p_event, EtwEventRecord& rec, const EventContext& ctx
 ) noexcept {
