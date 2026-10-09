@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include "stuttometer/constants.hpp"
 #include "stuttometer/internal/dxgkrnl_layout.hpp"
 #include "stuttometer/etw_session.hpp"
@@ -23,6 +24,23 @@ void EtwSessionManager::handle_dxgkrnl_flip_event(PEVENT_RECORD p_event, EtwEven
         if (p_event->UserDataLength >= dxgkrnl_layout::task17::MIN_PAYLOAD_LEN_EXTENDED) {
             std::memcpy(&flip_present_id, raw + dxgkrnl_layout::task17::OFFSET_FLIP_PRESENT_ID, sizeof(uint32_t));
         }
+    }
+
+    // Offset drift detection: if the hardcoded offsets in dxgkrnl_layout.hpp ever
+    // shift on a future Windows build, vidpn_source_id will decode as garbage.
+    // Real values are typically 0-3 (one per display output); allow a generous
+    // upper bound and treat anything beyond as a signal that parsing has drifted.
+    // Log once per process and continue emitting the event for data fidelity.
+    constexpr uint32_t VIDPN_SOURCE_ID_SANITY_MAX = 64;
+    if (vidpn_source_id > VIDPN_SOURCE_ID_SANITY_MAX) {
+        static std::atomic<bool> offset_drift_logged{false};
+        bool expected = false;
+        if (offset_drift_logged.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+            std::cerr << "[ETW] Warning: DxgKrnl MMIOFlip VidPnSourceId decoded as "
+                      << vidpn_source_id << " (expected 0-" << VIDPN_SOURCE_ID_SANITY_MAX
+                      << "). Suspected offset drift in dxgkrnl_layout.hpp on this Windows build.\n";
+        }
+        // Continue — the event is still emitted below; this is observability only.
     }
 
     rec.auxiliary_data = allocation_ptr;
