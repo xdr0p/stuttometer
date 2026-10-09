@@ -63,7 +63,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
 
     app.add_option("--preset", preset_str, "Detection preset: balanced, competitive, conservative, forensic, custom (default: balanced)");
     app.add_option("--osd-min-severity", osd_min_severity_str, "Minimum severity for in-game OSD toast: all, warning, danger (default: danger)");
-    app.add_option("--judder-min-alternations", judder_min_alternations, "Minimum alternations to trigger judder episode (1-50, default: 5)");
+    app.add_option("--judder-min-alternations", judder_min_alternations, "Minimum alternations to trigger judder episode (1-50; preset-dependent, balanced: 5)");
     app.add_option("--window-ms", window_pre_ms, "Pre-trigger window duration in ms (50-1000, default: 250)");
     app.add_option("--post-trigger-ms", window_post_ms, "Post-trigger capture duration in ms (0-200, default: 30)");
     app.add_option("--present-threshold-ms", present_threshold_ms, present_thresh_help);
@@ -72,9 +72,9 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     app.add_flag("--high-refresh", high_refresh_preset, "Alias for --pacing-profile high-refresh");
     app.add_option("--spike-multiplier", spike_multiplier, "Relative stutter spike multiplier (1.2-10.0, default: 2.0)");
     app.add_option("--min-spike-delta-ms", min_spike_delta_ms, "Minimum absolute spike delta in ms (1.0-50.0, default: 4.0)");
-    app.add_option("--min-report-severity", min_report_severity_str, "Minimum severity to trigger a correlated report: all, warning, danger (default: warning)");
+    app.add_option("--min-report-severity", min_report_severity_str, "Minimum severity to trigger a correlated report: all, warning, danger (preset-dependent, balanced: warning)");
     app.add_flag("--judder-detection,!--no-judder", enable_judder, "Enable/disable cadence judder detection (default: enabled)");
-    app.add_option("--judder-swing-ratio", judder_swing_ratio, "Judder cadence swing threshold ratio (0.1-0.9, default: 0.35)");
+    app.add_option("--judder-swing-ratio", judder_swing_ratio, "Judder cadence swing threshold ratio (0.1-0.9; preset-dependent, balanced: 0.50)");
     app.add_flag("--audio-trigger,!--no-audio", enable_audio, "Enable/disable AudioGlitch Event ID 11 trigger");
     app.add_option("--cooldown-ms", cooldown_ms, "Minimum cooldown between reports in ms (100-10000, default: 1000)");
     app.add_option("--dpc-threshold-us", dpc_threshold_us, "DPC anomaly threshold in microseconds (100-50000, default: 1000)");

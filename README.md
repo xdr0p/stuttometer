@@ -8,20 +8,39 @@ The standard way to diagnose a game stutter is to record a full system trace usi
 
 Leave it running in the background; when a stutter happens, the evidence is already captured.
 
-> **Note:** Stuttometer is a diagnostic and troubleshooting tool with built-in session benchmarking. It is not an in-game overlay, frame limiter, or permanent ETL trace recorder.
+> **Note:** Stuttometer is a diagnostic and troubleshooting tool with built-in session benchmarking. Not a full in-game overlay; an optional non-activating diagnostic OSD toast is available.
+
+---
+
+## Quick Start
+
+```powershell
+# 1. Build Release binaries
+cmake -S . -B build
+cmake --build build --config Release
+
+# 2. Run non-destructive environment & ETW provider diagnostics
+.\build\Release\stuttometer.exe --self-check
+
+# 3. Launch the desktop GUI (requests elevation via UAC manifest)
+.\build\Release\stuttometer_gui.exe
+
+# Or start headless CLI capture (requires elevated terminal)
+.\build\Release\stuttometer.exe --output stutto_report.json
+```
 
 ---
 
 ## How It Works
 
-- **Zero-Allocation Flight Recorder:** Events stream into a pre-allocated lock-free ring buffer (262,144 slots × 64 bytes, one seqlock per slot). No heap allocations occur while tracing is active, preventing diagnostic overhead from inducing its own DPCs or memory pressure.
-- **Active ETW Flushing:** A dedicated worker thread issues kernel flush commands (`ControlTraceW` with `EVENT_TRACE_CONTROL_FLUSH`) every 100 ms (configurable down to 25–50 ms) so events reach the flight recorder with minimal delivery latency. Periodic clock resynchronization bounds the age of the last UTC↔QPC snapshot to ≤ 3 seconds + flush interval (default: ~3.1 seconds), ensuring tear-free alignment between wall-clock timestamps and hardware query performance counters.
+- **Zero-Allocation Flight Recorder:** Events stream into a pre-allocated lock-free ring buffer (262,144 slots × 64 bytes, one seqlock per slot). No heap allocations on the ETW hot path (`FlightRecorder::push`, `FixedInFlightTable`, `FilteredEventRing`, `SessionBenchmark::ingest_frame`). Report correlation and export occur off the hot path and may allocate.
+- **Active ETW Flushing:** A dedicated worker thread issues kernel flush commands (`ControlTraceW` with `EVENT_TRACE_CONTROL_FLUSH`) every 100 ms (internally configurable via `EtwSessionConfig::flush_interval_ms`; not exposed through CLI or GUI) so events reach the flight recorder with minimal delivery latency. Periodic clock resynchronization bounds the age of the last UTC↔QPC snapshot to ≤ 3 seconds + flush interval (default: ~3.1 seconds), ensuring tear-free alignment between wall-clock timestamps and hardware query performance counters.
 - **Dynamic Display Refresh & VBlank Cadence:** Automatically queries the active monitor's physical refresh rate (Hz) and vblank interval (ms) via Win32 display APIs for the target game window, dynamically scaling Present stutter thresholds, DWM compositor glitch evaluations, and hardware SMI stall limits to the hardware cadence (e.g. 4.17 ms at 240 Hz, 6.94 ms at 144 Hz, 16.67 ms at 60 Hz).
 - **Hybrid Trigger Engine:** Tracks a zero-allocation rolling-mean frametime baseline with outlier quarantine and dynamic cadence adaptation to catch relative spikes (`--spike-multiplier`) and detects cadence variance ("judder")—the micro-stutters that never cross a fixed millisecond threshold. Static and dynamic trigger modes are also supported.
 - **Three-Tier Presentation Timing:**
   - `Microsoft-Windows-DxgKrnl` (`MMIOFlip` / `FlipEvent` / `PresentStop`) — hardware flip completion events (DirectX 12, Vulkan, DirectX 11).
   - `Microsoft-Windows-DXGI` — CPU-side Present submission latency to isolate API bottlenecks from GPU delivery stalls.
-  - `Microsoft-Windows-Dwm-Core` — desktop compositor schedule glitches with kernel-side keyword filtering. Rapid successive glitches within 50 ms are tagged with `DWM_GLITCH_DEDUPLICATED` (`0x0800`) and parsed completely with accurate durations synthesized from missed vblanks.
+  - `Microsoft-Windows-Dwm-Core` — desktop compositor schedule glitches with provider-side keyword filtering. Rapid successive glitches within 50 ms are tagged with `DWM_GLITCH_DEDUPLICATED` (`0x0800`) and parsed completely with accurate durations synthesized from missed vblanks.
 - **Audio Underrun Detection:** Subscribes to `Microsoft-Windows-Audio` (Event ID 11) to capture audio dropouts and crackling.
 
 ---
@@ -46,28 +65,33 @@ Every trigger report produces a structured JSON output with ranked probable caus
 
 ## Memory Footprint & Resource Impact
 
-Stuttometer is engineered for continuous background monitoring during active gameplay. All telemetry structures are pre-allocated at startup so that **zero runtime heap allocations** occur while tracing is active, ensuring the diagnostic tool never induces garbage collection pauses, working set paging, or frametime spikes itself.
+Stuttometer is engineered for continuous background monitoring during active gameplay. All telemetry structures are pre-allocated at startup so that **zero runtime heap allocations** occur on the ETW hot path, ensuring the diagnostic tool never induces garbage collection pauses, working set paging, or frametime spikes itself during tracing.
 
 ### Real-World Working Set (Task Manager)
 
 | Operating Mode | Working Set (RAM) | CPU Overhead | Use Case / Architecture |
 | :--- | ---:| ---:| :--- |
-| **Desktop GUI (`stuttometer_gui.exe`)** | **~48–50 MB** | 0.0% – 0.3% | Full interactive dashboard, live frametime plots, session benchmark, & OSD toast |
+| **Desktop GUI (`stuttometer_gui.exe`)** | **~48–50 MB** | 0.0% – 0.3% | Full interactive dashboard, stutter inspector, session benchmark, & OSD toast |
 | **CLI Diagnostic (`stuttometer.exe`)** | **~23–24 MB** | < 0.1% | Headless diagnostic flight recorder and in-flight tracking tables (zero GUI overhead) |
 
 *(Note: Prior to starting an active capture session, the standalone GUI idle footprint is ~20 MB).*
 
 ### Internal Telemetry Allocation Breakdown
 
+<details>
+<summary>View internal memory allocation breakdown</summary>
+
 | Telemetry Subsystem | Resident Allocation | Implementation Architecture |
 | :--- | ---:| :--- |
-| **Diagnostic Flight Recorder** | 16.78 MB | 262,144 slots × 64 bytes (`Slot` cache-line aligned seqlocks) |
-| **Session Benchmark Pacing Buffer** | 16.78 MB | 262,144 slots × 64 bytes (`FrameSlot` cache-line aligned seqlocks) |
+| **Diagnostic Flight Recorder** | 16 MiB | 262,144 slots × 64 bytes (`Slot` cache-line aligned seqlocks; 16,777,216 bytes) |
+| **Session Benchmark Pacing Buffer** | 16 MiB | 262,144 slots × 64 bytes (`FrameSlot` cache-line aligned seqlocks; 16,777,216 bytes) |
 | **In-Flight Tracking Tables** | 6.61 MB | 9 pre-allocated lock-free open-addressing hash tables |
-| **ETW Consumer Buffers & Win32 GUI** | ~8–10 MB | Kernel-mapped consumer pages, GDI objects, and control state |
+| **ETW Consumer Buffers & Win32 GUI** | ~8–10 MB | Kernel-mapped consumer pages (capped at 8 MB per session: 128 KB × 64 buffers, not all committed up front), GDI objects, and control state |
 | **Total Active Working Set** | **~48–50 MB** | Highly stable memory working set throughout long gaming sessions |
 
 Buffer capacity can be adjusted with `--buffer-slots` (65,536 to 1,048,576).
+
+</details>
 
 ---
 
@@ -97,9 +121,9 @@ The build produces two executables:
 
 ## Desktop GUI (`stuttometer_gui.exe`)
 
-Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Controls v6 with zero external runtime dependencies.
+Stuttometer includes a standalone native Win32 GUI built on Common Controls v6 with zero external runtime dependencies.
 
-- **Stutter Inspector:** Live report feed with ranked root-cause diagnoses, confidence score meters, and evidence timelines.
+- **Stutter Inspector:** Live report feed with ranked root-cause diagnoses, confidence percentages, and evidence timelines.
 - **Visual Stutter Card:** Export high-resolution diagnostic cards (PNG) or copy directly to clipboard (`CF_DIB` format) for seamless `Ctrl+V` pasting into Discord, Slack, Reddit, GitHub issues, and community forums.
 
   ![Stuttometer Visual Stutter Card](assets/dummy_card_game_engine.png)
@@ -108,7 +132,8 @@ Stuttometer includes a standalone native Win32 GUI (~1.2 MB) built on Common Con
 
   ![Stuttometer In-Game OSD Toast](assets/osd_toast_ingame.png)
 - **Process Picker:** Discovers running graphical games and applications via `EnumWindows`.
-- **Live Activity Feed:** Visualizes real-time frametimes, DPC/ISR spikes, disk I/O, and memory events.
+- **Global Hotkey:** `Ctrl+F11` toggles background trace capture on and off on demand during active gameplay.
+- **Stutter Event List & Diagnostic Inspector:** Chronological list of detected stutters with severity, duration, trigger reason, and top hypothesis; the inspector shows full evidence timeline and engine diagnostics.
 - **Export & Privacy:** One-click JSON report export and clipboard copying, with a toggleable `--redact` mode to sanitize process names, file paths, and usernames. Unquoted path redaction operates conservatively: it scans without an arbitrary length bound until a delimiter (`\n`, `\r`, `\t`, `"`, `'`, `` ` ``, `,`, `;`, `]`, `}`, `>`, `<`) or end of string; trailing unquoted prose without an intervening delimiter is conservatively over-redacted into `[PATH_REDACTED]`; and exotic pathnames containing unquoted commas or brackets should be enclosed in quotes.
 
 ```powershell
@@ -122,14 +147,14 @@ Click **Session Summary** in the top header to inspect real-time, session-wide f
 ![Stuttometer Session Benchmark Summary](assets/session_summary.png)
 
 - **Continuous Lock-Free Ingestion:** Ingests every delivered frame (DXGI Present and Kernel Flip with canonical warm-up fallback) into a dedicated 262,144-slot seqlock ring buffer with zero runtime allocations.
-- **Pacing Metrics:** Computes mathematically rigorous Average FPS, 1% Low FPS, 0.1% Low FPS, and cumulative Net Stall Time.
-- **Cumulative Root-Cause Attribution:** Ranks cumulative stall time across diagnostic subsystems (DPC/ISR, Shader Compilation, VRAM Paging, Context Switches, etc.) and isolates offending driver modules (`dxgkrnl.sys`, `nvlddmkm.sys`, etc.).
+- **Pacing Metrics:** Computes mathematically rigorous Average FPS, 1% Low FPS, 0.1% Low FPS, and cumulative Net Stall Time. *(Note: 1% Low requires ≥ 100 valid frames and 0.1% Low requires ≥ 1,000 valid frames; otherwise displayed as N/A).*
+- **Cumulative Root-Cause Attribution:** Ranks cumulative stall time across diagnostic subsystems (DPC/ISR, Shader Compilation, VRAM Paging, Context Switches, etc.) and isolates offending driver modules (`dxgkrnl.sys`, `nvlddmkm.sys`, etc.). *(Note: Session-wide attribution stats require at least one correlated trigger report).*
 - **Pause & Loading Screen Filtering:** Frames $\ge 2\text{s}$ (alt-tabs, level loads) are automatically ignored so benchmarks reflect genuine active gameplay.
 - **Export & Share:** One-click Markdown summary copying and structured JSON export.
 
 ### Settings & Configuration
 
-Fine-tune buffer capacity, pre/post capture windows, trigger modes (hybrid/judder/static), audio glitch detection, and per-subsystem anomaly thresholds directly from the UI:
+Fine-tune buffer capacity, pre/post capture windows, trigger modes (hybrid/dynamic/static) plus a separate judder detection toggle, audio glitch detection, and per-subsystem anomaly thresholds directly from the UI:
 
 ![Stuttometer Settings Dialog](assets/settings_dialog.png)
 
@@ -161,17 +186,17 @@ Capture Window:
 
 Detection Presets & Trigger Configuration:
   --preset TEXT                   Detection preset: balanced, competitive, conservative, forensic, custom (default: balanced)
-  --min-report-severity TEXT      Minimum severity to trigger a correlated report: all, warning, danger (default: warning)
+  --min-report-severity TEXT      Minimum severity to trigger a correlated report: all, warning, danger (preset-dependent — balanced/competitive: warning, conservative: danger, forensic: all; default: warning)
   --osd-min-severity TEXT         Minimum severity for in-game OSD toast: all, warning, danger (default: danger)
-  --judder-min-alternations INT   Minimum alternations to trigger judder episode (1-50, default: 5)
+  --judder-min-alternations INT   Minimum alternations to trigger judder episode (1-50; preset-dependent — balanced: 5, competitive/forensic: 3, conservative: 8; default: 5)
   --trigger-mode TEXT             Frame trigger mode: hybrid, dynamic, static (default: hybrid)
   --pacing-profile TEXT           Pacing sensitivity profile: auto, high-refresh, conservative (default: auto)
   --high-refresh                  Alias for --pacing-profile high-refresh
   --present-threshold-ms FLOAT    Static Present stutter threshold in ms (2.0-200.0, default: auto-detected vblank, e.g. 16.67 at 60Hz)
-  --spike-multiplier FLOAT        Relative stutter spike multiplier (1.2-10.0, default: 2.0)
-  --min-spike-delta-ms FLOAT      Minimum absolute spike delta in ms (1.0-50.0, default: 4.0)
+  --spike-multiplier FLOAT        Relative stutter spike multiplier (1.2-10.0, default: 2.0; dynamically scaled under AUTO_ADAPTIVE presets)
+  --min-spike-delta-ms FLOAT      Minimum absolute spike delta in ms (1.0-50.0, default: 4.0; dynamically scaled under AUTO_ADAPTIVE presets)
   --judder-detection / --no-judder Enable/disable cadence judder detection (default: enabled)
-  --judder-swing-ratio FLOAT      Judder cadence swing threshold ratio (0.1-0.9, default: 0.35)
+  --judder-swing-ratio FLOAT      Judder cadence swing threshold ratio (0.1-0.9; preset-dependent — balanced: 0.50, competitive/forensic: 0.35, conservative: 0.60; raw default: 0.35)
   --audio-trigger / --no-audio    Enable/disable AudioGlitch Event ID 11 trigger (default: enabled)
 
 Subsystem Anomaly Thresholds:
@@ -179,7 +204,7 @@ Subsystem Anomaly Thresholds:
   --isr-threshold-us INT          ISR anomaly threshold in microseconds (50-50000, default: 500)
   --disk-threshold-ms INT         Disk latency anomaly threshold in ms (1-1000, default: 20)
   --cswitch-threshold-ms INT      Context switch preemption threshold in ms (1-500, default: 5)
-  --smi-threshold-ms FLOAT        Hardware SMI stall threshold in ms (10.0-100.0, default: 33.3; auto-scales to 2x display cadence)
+  --smi-threshold-ms FLOAT        Hardware SMI stall threshold in ms (10.0-100.0, default: 33.3; auto-scales to 2× observed baseline cadence, falling back to hardware vblank before a baseline exists, with a 16.67 ms floor)
   --d3d12-pso-threshold-ms INT    D3D12 PSO compilation threshold in ms (1-500, default: 5)
   --vram-threshold-mb INT         GPU VRAM demotion anomaly threshold in MB (1-1024, default: 8)
   --mem-alloc-threshold-mb INT    VirtualAlloc commit stall threshold in MB (1-1024, default: 16)
@@ -212,13 +237,13 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 - **NDJSON Schema (v1):**
   ```json
   {"v":1,"ts_qpc":123456789,"cat":"DXGI","id":43,"pid":4568,"tid":8912,"cpu":2,"dur_us":16670,"aux":0,"flags":0}
-  {"v":1,"ts_qpc":123456890,"cat":"TRIGGER_FILTERED","id":4,"pid":4568,"tid":8912,"cpu":2,"dur_us":350000,"aux":16,"flags":3}
+  {"v":1,"ts_qpc":123456890,"cat":"TRIGGER_FILTERED","id":4,"pid":4568,"tid":8912,"cpu":2,"dur_us":350000,"aux":0,"flags":6}
   ```
   - `dur_us` is `0` for instant/start events; for `TRIGGER_FILTERED`, it contains the trigger stall duration (or full cadence judder episode duration) in microseconds.
   - Disk Init events carry `"aux": 0` rather than leaking kernel virtual addresses (KVA), while completed I/O byte counts remain in `aux` on Stop events.
   - For `TRIGGER_FILTERED` (cat 20):
     - `id`: raw `TriggerReason` enum integer (0: NONE, 1: STATIC_THRESHOLD, 2: RELATIVE_SPIKE, 3: STATISTICAL_OUTLIER, 4: CADENCE_JUDDER, 5: AUDIO_BUFFER_UNDERRUN, 6: DWM_COMPOSITOR_GLITCH).
-    - `flags`: raw `TriggerSource` enum integer (0: NONE, 1: DXGI_PRESENT, 2: FRAME_PACING_SPIKE, 3: FRAME_PACING_JUDDER, 4: AUDIO_GLITCH, 5: DWM_GLITCH, 6: KERNEL_FRAME_STALL).
+    - `flags`: raw `TriggerSource` enum integer (0: NONE, 1: DXGI_PRESENT_STUTTER, 2: AUDIO_GLITCH, 3: MANUAL, 4: KERNEL_FRAME_STALL, 5: DWM_GLITCH, 6: FRAME_PACING_JUDDER).
     - `aux`: encoded integer containing `severity | (filter_kind << 4)`:
       - Bits 0..3: `MetricSeverity` (0 = NORMAL, 1 = WARNING, 2 = DANGER).
       - Bits 4..7: `FilterKind` (0 = SEVERITY_GATE, 1 = VBLANK_FLOOR).
@@ -238,7 +263,7 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 
 ## Design Notes
 
-- **Zero Allocation During Active Tracing:** A diagnostic utility that dynamically allocates memory mid-trace risks triggering its own page faults, DPCs, and thread preemptions, distorting the very latency it is trying to observe. All ring slots and in-flight hash tables are pre-allocated at startup.
+- **Zero Allocation on the ETW Hot Path:** A diagnostic utility that dynamically allocates memory mid-trace risks triggering its own page faults, DPCs, and thread preemptions, distorting the very latency it is trying to observe. All ring slots and in-flight hash tables are pre-allocated at startup.
 - **Fixed-Size Dashboard Layout (1020×660 @ 96 DPI, DPI-Scaled):** The GUI dashboard is hand-tuned to present dense telemetry data without horizontal/vertical scrollbars or awkward control clipping. `ptMaxTrackSize` equals `ptMinTrackSize` to guarantee a clean layout.
 - **UAC Manifest on the GUI:** Real-time kernel ETW sessions require `SeSystemProfilePrivilege`. Elevating once via application manifest on launch avoids mid-session failures and secondary restart prompts.
 
