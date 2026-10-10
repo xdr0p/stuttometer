@@ -299,8 +299,9 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 
 ---
 
-## Limitations
+## Limitations & Best Practices
 
+- **Engine State Transitions (Menus & Focus Changes):** When games open UI overlays (e.g. pressing ESC), transition between scenes, or regain window focus, game engines often perform synchronous state teardown, frame-buffer capture, or asset garbage collection. These transient frame delays are real display stalls, but are inherent engine transition behaviors rather than gameplay performance defects. For clean benchmarking runs, start capture before gameplay begins and avoid evaluating menu transitions.
 - **Platform & Privileges:** Windows 10/11 x64 only. Live tracing strictly requires administrator privileges.
 - **In-Game OSD Presentation:** In-game notifications may be suppressed by some games running in exclusive fullscreen mode; borderless-windowed mode ensures visibility.
 - **Heuristic Confidence:** Root-cause rankings are probabilistic correlation heuristics designed as high-signal starting points for investigation.
