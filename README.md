@@ -251,7 +251,7 @@ Settings can be loaded from a JSON configuration file using `-c, --config <path>
 
 Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 - **Stdout Streaming (`--dump-events -`):** Emits newline-delimited JSON (NDJSON) to standard output. When active, all non-event diagnostic logging is redirected to `stderr`, and stdout is set to binary mode. Can be combined with `--output-dir <dir>` to capture per-trigger reports to disk while streaming raw events.
-- **Categorized Event Stream:** The stream captures all actionable stall categories (DXGI presents, audio glitches, DPC/ISR spikes, Disk I/O, context switches, DWM glitches, page faults, CPU throttling, antimalware scans, D3D12 PSO compilation, VRAM paging, and kernel memory allocations). High-frequency non-stall API trace events (such as per-draw D3D12 calls) are filtered to ensure high signal-to-noise ratio and zero consumer ring buffer saturation.
+- **Categorized Event Stream:** The stream captures all actionable stall categories (DXGI presents, DxgKrnl presents, audio glitches, DPC/ISR spikes, Disk I/O, context switches, DWM glitches, page faults, CPU throttling, antimalware scans, D3D12 PSO compilation, VRAM paging, and kernel memory allocations). High-frequency non-stall API trace events (such as per-draw D3D12 calls) are filtered to ensure high signal-to-noise ratio and zero consumer ring buffer saturation.
 - **Filtered Trigger Diagnostics (`cat: "TRIGGER_FILTERED"`):** Sub-threshold triggers (below `--min-report-severity` or dropped by vblank floors) are recorded into a dedicated lock-free MPSC ring and streamed as category 20 (`TRIGGER_FILTERED`), enabling empirical tuning and calibration without state-machine report noise.
 - **NDJSON Schema (v1):**
   ```json
@@ -276,7 +276,7 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 ### Frame Pacing CSV Export & Auto-Save Retention
 
 - `--export-csv <path>` writes the retained frame pacing timeline in RFC 4180 CRLF format.
-- When `--output-dir <dir>` is specified, Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (Diagnostic Report JSON Schema v1.3) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix. DiagnosticReport (Schema 1.3) and BenchmarkSummary (Schema 1.4) version their schemas independently.
+- When `--output-dir <dir>` is specified, Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (Diagnostic Report JSON Schema v1.4) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix. In the current release both DiagnosticReport and BenchmarkSummary happen to be Schema 1.4, but the schemas version independently as a matter of policy.
 - When `--output <path>` or `--export-csv <path>` is specified without `--output-dir` (and `--max-reports` is not 1), Stuttometer emits an overwrite notice to `stderr`, warning that the file will be overwritten with the latest report or timeline on each subsequent trigger.
 
 ### Exit Codes
@@ -293,6 +293,7 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 ## Design Notes
 
 - **Zero Allocation on the ETW Hot Path:** A diagnostic utility that dynamically allocates memory mid-trace risks triggering its own page faults, DPCs, and thread preemptions, distorting the very latency it is trying to observe. All ring slots and in-flight hash tables are pre-allocated at startup.
+- **DXGI Authoritative Pacing:** When a target process presents via user-mode DXGI (the standard path for DirectX titles), kernel-level `KERNEL_FRAME_STALL` triggers are suppressed for 1000 ms after each DXGI present. This prevents driver-internal worker thread events (Task 68 / Event 106) from generating false-positive stalls across disparate driver completion threads. Kernel stall detection remains active for Vulkan/OpenGL titles and automatically resumes for DXGI targets after 1 s of DXGI silence.
 - **Fixed-Size Dashboard Layout (1020×660 @ 96 DPI, DPI-Scaled):** The GUI dashboard is hand-tuned to present dense telemetry data without horizontal/vertical scrollbars or awkward control clipping. `ptMaxTrackSize` equals `ptMinTrackSize` to guarantee a clean layout.
 - **UAC Manifest on the GUI:** Real-time kernel ETW sessions require `SeSystemProfilePrivilege`. Elevating once via application manifest on launch avoids mid-session failures and secondary restart prompts.
 

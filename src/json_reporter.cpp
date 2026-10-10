@@ -17,9 +17,8 @@ namespace stuttometer {
 nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact) const {
     nlohmann::json root;
 
-    // Note: DiagnosticReport uses Schema 1.3 (with is_relative_spike in timeline),
-    // while BenchmarkSummary independently uses Schema 1.4.
-    root["schema_version"] = report.schema_version.empty() ? "1.3" : report.schema_version;
+    // Note: DiagnosticReport and BenchmarkSummary each independently use Schema 1.4.
+    root["schema_version"] = report.schema_version.empty() ? "1.4" : report.schema_version;
     root["tool_version"]   = report.tool_version.empty() ? std::string(TOOL_VERSION) : report.tool_version;
     root["timestamp_utc"]  = report.timestamp_utc;
 
@@ -166,6 +165,7 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
             {"CSWITCH", report.event_counts.cswitch},
             {"PROFILE", report.event_counts.profile},
             {"DXGKRNL_MMIOFLIP", report.event_counts.dxgkrnl_mmioflip},
+            {"DXGKRNL_PRESENT", report.event_counts.dxgkrnl_present},
             {"DXGKRNL_VSYNCDPC", report.event_counts.dxgkrnl_vsyncdpc},
             {"DWM_GLITCH", report.event_counts.dwm_glitch},
             {"PAGE_FAULT", report.event_counts.page_fault},

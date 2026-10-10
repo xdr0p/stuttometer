@@ -610,8 +610,12 @@ void WINAPI EtwSessionManager::on_event_record(PEVENT_RECORD p_event) {
         mgr->handle_audio_event(p_event, rec, ctx);
     } else if (IsEqualGUID(prov_guid, DXGKRNL_PROVIDER_GUID)) {
         const uint16_t task = p_event->EventHeader.EventDescriptor.Task;
-        if (task == 17) { // Task 17 = MMIOFlip (Event 116) - WDDM authoritative flip
+        if (task == 17 && event_id == 116) { // Task 17 = MMIOFlip (Event 116) - WDDM authoritative flip
             mgr->handle_dxgkrnl_flip_event(p_event, rec, ctx);
+        } else if (task == 17) {
+            // Unknown Task 17 payload; forward to raw NDJSON only stamped as DXGKRNL_MMIOFLIP
+            rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_MMIOFLIP);
+            mgr->emit_ndjson_only(rec);
         } else if (task == 68) { // Task 68 = WDDM 2.x+ Present (Event 105=Start, Event 106=Stop)
             mgr->handle_dxgkrnl_present_event(p_event, rec, ctx);
         } else if (task == 4 && (opcode == 17 || opcode == 1)) {

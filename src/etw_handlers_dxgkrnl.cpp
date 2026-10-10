@@ -88,7 +88,7 @@ void EtwSessionManager::handle_dxgkrnl_present_event(PEVENT_RECORD p_event, EtwE
         return;
     }
 
-    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_MMIOFLIP);
+    rec.category = static_cast<uint16_t>(EventCategory::DXGKRNL_PRESENT);
 
     uint32_t present_id = 0;
     if (p_event->UserDataLength >= sizeof(uint32_t) && p_event->UserData) {
@@ -99,21 +99,19 @@ void EtwSessionManager::handle_dxgkrnl_present_event(PEVENT_RECORD p_event, EtwE
     rec.payload.dxgi.present_flags = 0;
     rec.payload.dxgi.frame_index = present_id;
 
-    // Key last_flip_table_ on (pid, tid) to isolate per-thread present streams
+    // Key last_flip_table_ on (pid, tid) to isolate per-thread present streams.
+    // Note: Sharing last_flip_table_ between Task 68 (make_thread_key with PID/TID) and
+    // Task 17 (make_flip_key with VidPn/PID) is collision-safe because they operate on
+    // disjoint hash domains with distinct seeds.
     const uint64_t flip_key = make_thread_key(ctx.pid, ctx.tid);
     LastFlipEntry last_entry{};
     bool has_prev = last_flip_table_.lookup(flip_key, last_entry);
     uint64_t prev_qpc = has_prev ? last_entry.last_flip_qpc : 0;
 
-    double delivery_ms = 0.0;
-    bool is_baseline = true;
-
     if (has_prev && prev_qpc > 0 && ctx.timestamp > prev_qpc) {
         uint64_t delta_qpc = ctx.timestamp - prev_qpc;
         double delta_us = qpc_delta_to_us(delta_qpc, qpc_freq_);
         if (delta_us <= static_cast<double>(PAUSE_CEILING_US)) { // 2.0s ceiling for loading / Alt-Tab
-            delivery_ms = delta_us / 1000.0;
-            is_baseline = false;
             rec.duration_us = static_cast<uint32_t>(delta_us);
         }
     }
@@ -121,16 +119,11 @@ void EtwSessionManager::handle_dxgkrnl_present_event(PEVENT_RECORD p_event, EtwE
     last_flip_table_.insert(flip_key, { ctx.timestamp, ctx.pid, ctx.tid });
 
     emit_event(rec);
-
-    // DWM/System Filtering (S1, N-3):
-    const uint32_t dwm_pid = cached_dwm_pid_.load(std::memory_order_relaxed);
-    if (ctx.pid == 4 || (dwm_pid != 0 && ctx.pid == dwm_pid)) {
-        return;
-    }
-
-    if (!is_baseline && delivery_ms > 0.0) {
-        trigger_engine_.on_kernel_frame_stall(ctx.pid, ctx.tid, delivery_ms, ctx.timestamp, flip_key, ctx.cpu);
-    }
+    // Task 68 / Event 106 represents WDDM kernel-side present completion callbacks, which modern
+    // graphics drivers distribute across worker thread and DPC completion pools. It is retained
+    // strictly for raw telemetry and flight recorder diagnostics (DXGKRNL_PRESENT). Frame pacing
+    // stall triggers are decoupled here to prevent false-positive stalls from worker thread sleep cycles;
+    // authoritative hardware frame pacing remains strictly in handle_dxgkrnl_flip_event (Task 17).
 }
 
 void EtwSessionManager::handle_dxgkrnl_vsync_event(PEVENT_RECORD /*p_event*/, EtwEventRecord& rec, const EventContext& /*ctx*/) noexcept {

@@ -305,11 +305,14 @@ bool TriggerEngine::on_dxgi_present(uint32_t pid, uint32_t tid, double duration_
         return false;
     }
 
+    // Universal DXGI observation latch (CLI + GUI):
+    // Unconditionally latch user-mode DXGI activity for the target process to coordinate
+    // with kernel-level presentation tracking and suppress false-positive kernel stalls.
+    dxgi_observed_for_target_.store(true, std::memory_order_release);
+    last_dxgi_timestamp_qpc_.store(timestamp_qpc, std::memory_order_release);
+
     SessionBenchmark* sink = benchmark_sink_.load(std::memory_order_acquire);
     if (sink) {
-        // Note N-3: intentional: only latch when a target is actively benchmarked.
-        dxgi_observed_for_target_.store(true, std::memory_order_release);
-        last_dxgi_timestamp_qpc_.store(timestamp_qpc, std::memory_order_release);
         sink->ingest_frame(pid, duration_ms, timestamp_qpc);
     }
 
@@ -349,6 +352,33 @@ bool TriggerEngine::on_kernel_frame_stall(uint32_t pid, uint32_t tid, double dur
     }
     if (!should_trigger_on_process(pid)) {
         return false;
+    }
+
+    // Concurrency-safe staleness gate:
+    // If user-mode DXGI presentation has been observed recently for this target process,
+    // DXGI is authoritative for frame pacing. Suppress kernel stall triggers to prevent
+    // out-of-phase driver-internal worker thread fragmentation or secondary kernel events.
+    // Exception: If we are already COLLECTING_POST for an active DXGI trigger, do NOT suppress,
+    // allowing the thread-safe trigger upgrade path below to stage GPU stall duration.
+    const TriggerState current_state = state_.load(std::memory_order_acquire);
+    const bool is_collecting_dxgi = (current_state == TriggerState::COLLECTING_POST &&
+                                     active_source_.load(std::memory_order_acquire) == TriggerSource::DXGI_PRESENT_STUTTER);
+
+    if (!is_collecting_dxgi) {
+        const uint64_t last_dxgi = last_dxgi_timestamp_qpc_.load(std::memory_order_acquire);
+        if (last_dxgi > 0) {
+            const uint64_t staleness_ticks = ms_to_qpc_delta(pacing_tuning::DXGI_AUTHORITATIVE_STALENESS_MS, qpc_freq_);
+            // Kernel (DxgKrnl) and user-mode (DXGI) trace sessions use separate ETW buffer
+            // pools, so merged delivery order across sessions is not guaranteed strictly monotonic
+            // even though both emit QPC timestamps. Use absolute delta to tolerate buffer reordering.
+            const uint64_t delta = (timestamp_qpc >= last_dxgi)
+                ? (timestamp_qpc - last_dxgi)
+                : (last_dxgi - timestamp_qpc);
+
+            if (delta < staleness_ticks) {
+                return false; // Active DXGI presentation is authoritative for this target
+            }
+        }
     }
 
     const double vblank_ms = vblank_interval_ms();

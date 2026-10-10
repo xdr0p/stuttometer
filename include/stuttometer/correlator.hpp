@@ -94,6 +94,7 @@ struct EventCategoryCounts {
     uint64_t cswitch{0};
     uint64_t profile{0};
     uint64_t dxgkrnl_mmioflip{0};
+    uint64_t dxgkrnl_present{0};
     uint64_t dxgkrnl_vsyncdpc{0};
     uint64_t dwm_glitch{0};
     uint64_t page_fault{0};
@@ -172,7 +173,7 @@ struct AttributionResult {
 };
 
 struct DiagnosticReport {
-    std::string schema_version{"1.3"};
+    std::string schema_version{"1.4"};
     std::string tool_version{TOOL_VERSION};
     std::string timestamp_utc;
     TriggerInfo trigger;

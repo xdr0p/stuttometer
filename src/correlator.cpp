@@ -433,6 +433,9 @@ DiagnosticReport CorrelationEngine::correlate(
             case EventCategory::DXGKRNL_MMIOFLIP:
                 ++report.event_counts.dxgkrnl_mmioflip;
                 break;
+            case EventCategory::DXGKRNL_PRESENT:
+                ++report.event_counts.dxgkrnl_present;
+                break;
             case EventCategory::DXGKRNL_VSYNCDPC:
                 ++report.event_counts.dxgkrnl_vsyncdpc;
                 break;

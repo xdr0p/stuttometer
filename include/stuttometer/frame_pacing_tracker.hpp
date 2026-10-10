@@ -32,6 +32,7 @@ namespace pacing_tuning {
     inline constexpr double   CATASTROPHIC_FLOOR_MS      = 50.0;
     inline constexpr double   CATASTROPHIC_CEIL_MS       = 500.0;
     inline constexpr double   DEFAULT_JUDDER_SWING_RATIO = 0.35;
+    inline constexpr double   DXGI_AUTHORITATIVE_STALENESS_MS = 1000.0;
 }
 
 // Strongly-typed trigger reason identifier
