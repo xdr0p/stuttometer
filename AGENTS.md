@@ -78,3 +78,9 @@ This document defines standing invariants and operational constraints for automa
 - **Tool Restraints:** Avoid spawning exploratory subagents or background loops during mechanical execution turns.
 - **Fresh Context Transitions:** Suggest a fresh conversation after completing major multi-phase milestones to maintain crisp reasoning.
 
+---
+
+## 7. Protected Core Files & Workflow Tooling
+
+- **Workspace Tooling Invariant:** `repomix.config.json` and `split_codebase.ps1` in the repository root are permanent, core developer workflow files. Never delete, relocate, or modify them during cleanups or refactorings unless explicitly instructed by the user.
+
