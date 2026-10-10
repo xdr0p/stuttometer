@@ -14,6 +14,9 @@
 #include <algorithm>
 #include <new>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <atomic>
 
 static thread_local bool g_disallow_allocations = false;
 static thread_local bool g_allocation_detected = false;
@@ -144,7 +147,7 @@ static void test_pacing_profile_parsing() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.pacing_profile == PacingProfile::AUTO_ADAPTIVE);
     }
 
@@ -153,7 +156,7 @@ static void test_pacing_profile_parsing() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.pacing_profile == PacingProfile::HIGH_REFRESH);
         STUTTO_ASSERT(config.spike_multiplier == HIGH_REFRESH_SPIKE_MULTIPLIER);
         STUTTO_ASSERT(config.min_spike_delta_ms == HIGH_REFRESH_MIN_DELTA_MS);
@@ -164,7 +167,7 @@ static void test_pacing_profile_parsing() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.pacing_profile == PacingProfile::CONSERVATIVE);
         STUTTO_ASSERT(config.spike_multiplier == CONSERVATIVE_SPIKE_MULTIPLIER);
         STUTTO_ASSERT(config.min_spike_delta_ms == CONSERVATIVE_MIN_DELTA_MS);
@@ -181,7 +184,7 @@ static void test_rejection_of_invalid_profiles() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
         STUTTO_ASSERT(err.str().find("Invalid --pacing-profile") != std::string::npos);
     }
 
@@ -190,7 +193,7 @@ static void test_rejection_of_invalid_profiles() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
         STUTTO_ASSERT(err.str().find("Invalid --pacing-profile") != std::string::npos);
     }
 
@@ -204,7 +207,7 @@ static void test_high_refresh_alias() {
     CliConfig config;
     std::ostringstream out, err;
     auto res = parse_cli_args(2, argv, config, out, err);
-    STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+    STUTTO_ASSERT(res == CliParseResult::OK);
     STUTTO_ASSERT(config.pacing_profile == PacingProfile::HIGH_REFRESH);
     STUTTO_ASSERT(config.spike_multiplier == HIGH_REFRESH_SPIKE_MULTIPLIER);
     STUTTO_ASSERT(config.min_spike_delta_ms == HIGH_REFRESH_MIN_DELTA_MS);
@@ -219,7 +222,7 @@ static void test_pacing_profile_precedence_over_alias() {
     CliConfig config;
     std::ostringstream out, err;
     auto res = parse_cli_args(4, argv, config, out, err);
-    STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+    STUTTO_ASSERT(res == CliParseResult::OK);
     STUTTO_ASSERT(config.pacing_profile == PacingProfile::AUTO_ADAPTIVE);
     STUTTO_ASSERT(err.str().find("[Config] Note: --pacing-profile took precedence over --high-refresh") != std::string::npos);
 
@@ -235,7 +238,7 @@ static void test_precedence_explicit_override() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(4, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.pacing_profile == PacingProfile::CUSTOM);
         STUTTO_ASSERT(config.spike_multiplier == 3.0);
         STUTTO_ASSERT(config.min_spike_delta_ms == 4.0);
@@ -248,7 +251,7 @@ static void test_precedence_explicit_override() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.pacing_profile == PacingProfile::CUSTOM);
         STUTTO_ASSERT(config.spike_multiplier == 3.0);
         STUTTO_ASSERT(config.min_spike_delta_ms == 4.0);
@@ -266,7 +269,7 @@ static void test_version_and_self_check() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_OK);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_HANDLED);
         std::string expected_banner = "Stuttometer v" + std::string(stuttometer::TOOL_VERSION);
         STUTTO_ASSERT(out.str().find(expected_banner) != std::string::npos);
     }
@@ -277,7 +280,7 @@ static void test_version_and_self_check() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(4, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
         STUTTO_ASSERT(err.str().find("--dump-events - cannot be combined with --version") != std::string::npos);
     }
 
@@ -287,7 +290,7 @@ static void test_version_and_self_check() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(4, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.run_self_check == true);
         STUTTO_ASSERT(config.dump_events_path == "-");
         STUTTO_ASSERT(out.str().empty());
@@ -304,8 +307,8 @@ static void test_range_validations() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
-        STUTTO_ASSERT(err.str().find("--window-ms must be between") != std::string::npos);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("--window-ms") != std::string::npos);
     }
 
     {
@@ -313,8 +316,8 @@ static void test_range_validations() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
-        STUTTO_ASSERT(err.str().find("--present-threshold-ms must be between") != std::string::npos);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("--present-threshold-ms") != std::string::npos);
     }
 
     {
@@ -322,8 +325,8 @@ static void test_range_validations() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
-        STUTTO_ASSERT(err.str().find("--spike-multiplier must be between") != std::string::npos);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("--spike-multiplier") != std::string::npos);
     }
 
     std::cout << "  -> Range validations verified.\n";
@@ -339,7 +342,8 @@ static bool is_integer_option(std::string_view name) {
            name == "--mem-alloc-threshold-mb" ||
            name == "--mem-trim-threshold-mb" ||
            name == "--mem-physical-latency-us" ||
-           name == "--buffer-slots";
+           name == "--buffer-slots" ||
+           name == "--judder-min-alternations";
 }
 
 static std::string format_cli_val(double val, bool is_int) {
@@ -359,40 +363,42 @@ static double get_cli_eps(std::string_view name) {
     return 1.0;
 }
 
-static void test_cli_ranges_table() {
-    std::cout << "[TEST] Testing CLI_RANGES comprehensive boundary and range validation...\n";
+struct CliTestRange {
+    const char* name;
+    double min_val;
+    double max_val;
+    double (*getter)(const CliConfig&);
+};
 
-    for (const auto& r : CLI_RANGES) {
+static const CliTestRange CLI_TEST_RANGES[] = {
+    {"--window-ms",               50.0,    1000.0,   [](const CliConfig& c) { return c.window_pre_ms; }},
+    {"--post-trigger-ms",         0.0,     200.0,    [](const CliConfig& c) { return c.window_post_ms; }},
+    {"--present-threshold-ms",    2.0,     200.0,    [](const CliConfig& c) { return c.present_threshold_ms; }},
+    {"--cooldown-ms",             100.0,   10000.0,  [](const CliConfig& c) { return c.cooldown_ms; }},
+    {"--dpc-threshold-us",        100.0,   50000.0,  [](const CliConfig& c) { return static_cast<double>(c.dpc_threshold_us); }},
+    {"--isr-threshold-us",        50.0,    50000.0,  [](const CliConfig& c) { return static_cast<double>(c.isr_threshold_us); }},
+    {"--disk-threshold-ms",       1.0,     1000.0,   [](const CliConfig& c) { return static_cast<double>(c.disk_threshold_ms); }},
+    {"--cswitch-threshold-ms",    1.0,     500.0,    [](const CliConfig& c) { return static_cast<double>(c.cswitch_preempt_ms); }},
+    {"--smi-threshold-ms",        10.0,    100.0,    [](const CliConfig& c) { return c.smi_severity_threshold_ms; }},
+    {"--d3d12-pso-threshold-ms",  1.0,     500.0,    [](const CliConfig& c) { return static_cast<double>(c.d3d12_pso_threshold_ms); }},
+    {"--vram-threshold-mb",       1.0,     1024.0,   [](const CliConfig& c) { return static_cast<double>(c.vram_demoted_threshold_mb); }},
+    {"--mem-alloc-threshold-mb",  1.0,     1024.0,   [](const CliConfig& c) { return static_cast<double>(c.mem_alloc_threshold_mb); }},
+    {"--mem-trim-threshold-mb",   1.0,     1024.0,   [](const CliConfig& c) { return static_cast<double>(c.mem_trim_threshold_mb); }},
+    {"--mem-physical-latency-us", 50.0,    50000.0,  [](const CliConfig& c) { return static_cast<double>(c.mem_physical_latency_us); }},
+    {"--buffer-slots",            static_cast<double>(MIN_BUFFER_SLOTS), static_cast<double>(MAX_BUFFER_SLOTS), [](const CliConfig& c) { return static_cast<double>(c.buffer_slots); }},
+    {"--spike-multiplier",        1.2,     10.0,     [](const CliConfig& c) { return c.spike_multiplier; }},
+    {"--min-spike-delta-ms",      1.0,     50.0,     [](const CliConfig& c) { return c.min_spike_delta_ms; }},
+    {"--judder-swing-ratio",      0.1,     1.0,      [](const CliConfig& c) { return c.judder_swing_ratio; }},
+    {"--judder-min-alternations", 1.0,     50.0,     [](const CliConfig& c) { return static_cast<double>(c.judder_min_alternations); }}
+};
+
+static void test_cli_ranges_table() {
+    std::cout << "[TEST] Testing CLI option boundary and range validation...\n";
+
+    for (const auto& r : CLI_TEST_RANGES) {
         const bool is_int = is_integer_option(r.name);
         const double eps = get_cli_eps(r.name);
 
-        // 1. Direct unit checks on validate_option_range
-        {
-            std::ostringstream err;
-            STUTTO_ASSERT(validate_option_range(err, r.name, r.min_val, r.min_val, r.max_val, r.unit));
-            STUTTO_ASSERT(err.str().empty());
-        }
-        {
-            std::ostringstream err;
-            STUTTO_ASSERT(validate_option_range(err, r.name, r.max_val, r.min_val, r.max_val, r.unit));
-            STUTTO_ASSERT(err.str().empty());
-        }
-        {
-            std::ostringstream err;
-            STUTTO_ASSERT(!validate_option_range(err, r.name, r.min_val - eps, r.min_val, r.max_val, r.unit));
-            std::string err_str = err.str();
-            STUTTO_ASSERT(err_str.find(r.name) != std::string::npos);
-            STUTTO_ASSERT(err_str.find("must be between") != std::string::npos);
-        }
-        {
-            std::ostringstream err;
-            STUTTO_ASSERT(!validate_option_range(err, r.name, r.max_val + eps, r.min_val, r.max_val, r.unit));
-            std::string err_str = err.str();
-            STUTTO_ASSERT(err_str.find(r.name) != std::string::npos);
-            STUTTO_ASSERT(err_str.find("must be between") != std::string::npos);
-        }
-
-        // 2. Integration via parse_cli_args
         const std::string min_str = format_cli_val(r.min_val, is_int);
         const std::string max_str = format_cli_val(r.max_val, is_int);
         const std::string below_str = format_cli_val(r.min_val - eps, is_int);
@@ -404,7 +410,7 @@ static void test_cli_ranges_table() {
             CliConfig config;
             std::ostringstream out, err;
             auto res = parse_cli_args(3, argv, config, out, err);
-            STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+            STUTTO_ASSERT(res == CliParseResult::OK);
             STUTTO_ASSERT(std::abs(r.getter(config) - r.min_val) < 0.001);
         }
 
@@ -414,7 +420,7 @@ static void test_cli_ranges_table() {
             CliConfig config;
             std::ostringstream out, err;
             auto res = parse_cli_args(3, argv, config, out, err);
-            STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+            STUTTO_ASSERT(res == CliParseResult::OK);
             STUTTO_ASSERT(std::abs(r.getter(config) - r.max_val) < 0.001);
         }
 
@@ -424,8 +430,8 @@ static void test_cli_ranges_table() {
             CliConfig config;
             std::ostringstream out, err;
             auto res = parse_cli_args(3, argv, config, out, err);
-            STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
-            STUTTO_ASSERT(err.str().find(r.name) != std::string::npos || err.str().find("must be between") != std::string::npos);
+            STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+            STUTTO_ASSERT(err.str().find(r.name) != std::string::npos);
         }
 
         // Above max CLI test
@@ -434,13 +440,12 @@ static void test_cli_ranges_table() {
             CliConfig config;
             std::ostringstream out, err;
             auto res = parse_cli_args(3, argv, config, out, err);
-            STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+            STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
             STUTTO_ASSERT(err.str().find(r.name) != std::string::npos);
-            STUTTO_ASSERT(err.str().find("must be between") != std::string::npos);
         }
     }
 
-    std::cout << "  -> All 18 CLI_RANGES bounds and boundary violations verified successfully.\n";
+    std::cout << "  -> All 19 CLI range boundaries and violations verified successfully.\n";
 }
 
 static void test_help_flags() {
@@ -451,7 +456,7 @@ static void test_help_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(2, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_OK);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_HANDLED);
         STUTTO_ASSERT(out.str().find("Stuttometer") != std::string::npos);
         STUTTO_ASSERT(out.str().find("--pacing-profile") != std::string::npos);
     }
@@ -461,7 +466,7 @@ static void test_help_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(2, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_OK);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_HANDLED);
         STUTTO_ASSERT(out.str().find("Stuttometer") != std::string::npos);
         STUTTO_ASSERT(out.str().find("--pacing-profile") != std::string::npos);
     }
@@ -478,7 +483,7 @@ static void test_manual_threshold_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(1, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(!config.present_threshold_manual);
         STUTTO_ASSERT(!config.smi_threshold_manual);
         STUTTO_ASSERT(config.present_threshold_ms == 16.67);
@@ -491,7 +496,7 @@ static void test_manual_threshold_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.present_threshold_manual);
         STUTTO_ASSERT(!config.smi_threshold_manual);
         STUTTO_ASSERT(config.present_threshold_ms == 20.0);
@@ -503,7 +508,7 @@ static void test_manual_threshold_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(!config.present_threshold_manual);
         STUTTO_ASSERT(config.smi_threshold_manual);
         STUTTO_ASSERT(config.smi_severity_threshold_ms == 45.0);
@@ -515,7 +520,7 @@ static void test_manual_threshold_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(5, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.present_threshold_manual);
         STUTTO_ASSERT(config.smi_threshold_manual);
         STUTTO_ASSERT(config.present_threshold_ms == 8.33);
@@ -534,7 +539,7 @@ static void test_min_report_severity_flag() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(1, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(!config.min_report_severity_manual);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
     }
@@ -545,7 +550,7 @@ static void test_min_report_severity_flag() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.min_report_severity_manual);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::ALL);
     }
@@ -556,7 +561,7 @@ static void test_min_report_severity_flag() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.min_report_severity_manual);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
     }
@@ -567,7 +572,7 @@ static void test_min_report_severity_flag() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.min_report_severity_manual);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::DANGER);
     }
@@ -578,7 +583,7 @@ static void test_min_report_severity_flag() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
     }
 
     std::cout << "  -> --min-report-severity flag parsing verified.\n";
@@ -593,7 +598,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(1, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(!config.preset_manual);
         STUTTO_ASSERT(config.preset == DetectionPreset::BALANCED);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
@@ -608,7 +613,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.preset_manual);
         STUTTO_ASSERT(config.preset == DetectionPreset::COMPETITIVE);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::WARNING);
@@ -622,7 +627,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.preset_manual);
         STUTTO_ASSERT(config.preset == DetectionPreset::CONSERVATIVE);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::DANGER);
@@ -636,7 +641,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.preset_manual);
         STUTTO_ASSERT(config.preset == DetectionPreset::FORENSIC);
         STUTTO_ASSERT(config.min_report_severity == ReportSeverity::ALL);
@@ -650,7 +655,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
     }
 
     // 6. --osd-min-severity
@@ -659,7 +664,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.osd_min_severity_manual);
         STUTTO_ASSERT(config.osd_min_severity == ReportSeverity::WARNING);
     }
@@ -668,7 +673,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
     }
 
     // 7. --judder-min-alternations
@@ -677,7 +682,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.judder_min_alternations_manual);
         STUTTO_ASSERT(config.judder_min_alternations == 10);
     }
@@ -686,14 +691,14 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
     }
     {
         const char* argv[] = { "stuttometer.exe", "--judder-min-alternations", "51" };
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::EXIT_ERROR);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
     }
 
     // 8. Override flips preset to CUSTOM
@@ -702,7 +707,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(5, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.preset == DetectionPreset::CUSTOM);
         STUTTO_ASSERT(config.spike_multiplier == 3.0);
         STUTTO_ASSERT(err.str().find("CUSTOM preset") != std::string::npos);
@@ -714,7 +719,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(5, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.preset == DetectionPreset::CUSTOM);
         STUTTO_ASSERT(config.judder_swing_ratio == 0.45);
         STUTTO_ASSERT(err.str().find("CUSTOM preset") != std::string::npos);
@@ -726,7 +731,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.preset == DetectionPreset::CONSERVATIVE);
         STUTTO_ASSERT(config.dwm_min_missed_vblanks == 3);
         STUTTO_ASSERT(config.kernel_frame_stall_min_missed_vblanks == 3);
@@ -736,7 +741,7 @@ static void test_presets_and_cli_flags() {
         CliConfig config;
         std::ostringstream out, err;
         auto res = parse_cli_args(3, argv, config, out, err);
-        STUTTO_ASSERT(res == CliParseResult::SUCCESS);
+        STUTTO_ASSERT(res == CliParseResult::OK);
         STUTTO_ASSERT(config.preset == DetectionPreset::BALANCED);
         STUTTO_ASSERT(config.dwm_min_missed_vblanks == 2);
         STUTTO_ASSERT(config.kernel_frame_stall_min_missed_vblanks == 2);
@@ -999,6 +1004,245 @@ static void test_process_watcher_zero_allocation() {
     std::cout << "  -> ProcessWatcher find_target_pid_snapshot zero dynamic allocation verified across all matching passes and full table scans.\n";
 }
 
+struct TempConfigFile {
+    std::filesystem::path path;
+    std::string str_path;
+
+    explicit TempConfigFile(const std::string& content) {
+        static std::atomic<uint64_t> s_counter{0};
+        const auto temp_dir = std::filesystem::temp_directory_path();
+        const auto filename = "stutto_test_config_" + std::to_string(++s_counter) + "_" +
+                              std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json";
+        path = temp_dir / filename;
+        str_path = path.string();
+
+        std::ofstream ofs(path);
+        STUTTO_ASSERT(ofs.is_open());
+        ofs << content;
+        ofs.close();
+    }
+
+    ~TempConfigFile() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+
+    const std::string& string() const {
+        return str_path;
+    }
+
+    const char* c_str() const {
+        return str_path.c_str();
+    }
+};
+
+static void test_config_file_support() {
+    std::cout << "[TEST] Testing JSON configuration file support (--config / -c)...\n";
+
+    // 1. File-sourced pacing parameters preservation
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "spike_multiplier": 3.5,
+            "min_spike_delta_ms": 6.0,
+            "judder_swing_ratio": 0.45,
+            "judder_min_alternations": 8
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::OK);
+        STUTTO_ASSERT(config.spike_multiplier == 3.5);
+        STUTTO_ASSERT(config.min_spike_delta_ms == 6.0);
+        STUTTO_ASSERT(config.judder_swing_ratio == 0.45);
+        STUTTO_ASSERT(config.judder_min_alternations == 8);
+    }
+
+    // 2. File-sourced pacing_profile: "custom" -> CUSTOM without error
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "pacing_profile": "custom"
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::OK);
+        STUTTO_ASSERT(config.pacing_profile == PacingProfile::CUSTOM);
+    }
+
+    // 3. Preset preserved as BALANCED when no parameters diverge
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "detection_preset": "balanced"
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::OK);
+        STUTTO_ASSERT(config.preset == DetectionPreset::BALANCED);
+        STUTTO_ASSERT(err.str().find("demoting to CUSTOM") == std::string::npos);
+    }
+
+    // 4. Divergent judder_min_alternations: 10 -> preset_intact demotion note and demotes to CUSTOM
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "detection_preset": "balanced",
+            "judder_min_alternations": 10
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::OK);
+        STUTTO_ASSERT(config.preset == DetectionPreset::CUSTOM);
+        STUTTO_ASSERT(err.str().find("[Config] Note: Config file values diverge from preset 'balanced'; demoting to CUSTOM.") != std::string::npos);
+    }
+
+    // 5. Out-of-range numerical rejection
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "window_pre_ms": 10000.0
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("Config value for 'window_pre_ms' (--window-ms) out of range") != std::string::npos);
+    }
+
+    // 6. Invalid enum rejection
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "detection_preset": "typo"
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("Invalid detection preset 'typo'") != std::string::npos);
+    }
+
+    // 7. CLI override precedence over config file values
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "spike_multiplier": 3.5,
+            "window_pre_ms": 400.0
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str(), "--spike-multiplier", "5.0" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(5, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::OK);
+        STUTTO_ASSERT(config.spike_multiplier == 5.0);
+        STUTTO_ASSERT(config.window_pre_ms == 400.0);
+    }
+
+    // 8. CLI --pacing-profile custom continues to be rejected
+    {
+        const char* argv[] = { "stuttometer.exe", "--pacing-profile", "custom" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("Invalid --pacing-profile 'custom'") != std::string::npos);
+    }
+
+    // 9. --dump-effective-config JSON output
+    {
+        const char* argv[] = { "stuttometer.exe", "--spike-multiplier", "3.0", "--dump-effective-config" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(4, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_HANDLED);
+        auto j = nlohmann::json::parse(out.str());
+        STUTTO_ASSERT(j.is_object());
+        STUTTO_ASSERT(j["spike_multiplier"].get<double>() == 3.0);
+    }
+
+    // 10. Matching-value spike_multiplier still demotes (presence, not divergence rule)
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "detection_preset": "balanced",
+            "spike_multiplier": 2.0
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::OK);
+        STUTTO_ASSERT(config.preset == DetectionPreset::CUSTOM);
+        STUTTO_ASSERT(config.spike_multiplier == 2.0);
+    }
+
+    // 11. Legacy schema warning (settings_version: 1)
+    {
+        TempConfigFile f(R"({
+            "settings_version": 1,
+            "spike_multiplier": 3.5
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::OK);
+        STUTTO_ASSERT(config.spike_multiplier == 3.5);
+        STUTTO_ASSERT(err.str().find("[Config] Warning: Config file uses legacy schema v1") != std::string::npos);
+    }
+
+    // 12. Malformed JSON rejection
+    {
+        TempConfigFile f(R"({ "settings_version": )");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("Failed to parse config JSON") != std::string::npos);
+    }
+
+    // 13. Missing config file rejection
+    {
+        const char* argv[] = { "stuttometer.exe", "-c", "./nonexistent_path_xyz_123456.json" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(3, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::ERROR_USAGE);
+        STUTTO_ASSERT(err.str().find("File does not exist") != std::string::npos);
+    }
+
+    // 14. --config + --dump-effective-config combined round-trip
+    {
+        TempConfigFile f(R"({
+            "settings_version": 2,
+            "spike_multiplier": 3.5,
+            "window_pre_ms": 400.0
+        })");
+        const char* argv[] = { "stuttometer.exe", "-c", f.string().c_str(), "--dump-effective-config" };
+        CliConfig config;
+        std::ostringstream out, err;
+        auto res = parse_cli_args(4, argv, config, out, err);
+        STUTTO_ASSERT(res == CliParseResult::EXIT_HANDLED);
+        auto j = nlohmann::json::parse(out.str());
+        STUTTO_ASSERT(j.is_object());
+        STUTTO_ASSERT(j["spike_multiplier"].get<double>() == 3.5);
+        STUTTO_ASSERT(j["window_pre_ms"].get<double>() == 400.0);
+    }
+
+    std::cout << "  -> All 14 configuration file support cases passed.\n";
+}
+
 int main() {
     try {
         test_pacing_profile_parsing();
@@ -1013,6 +1257,7 @@ int main() {
         test_manual_threshold_flags();
         test_min_report_severity_flag();
         test_presets_and_cli_flags();
+        test_config_file_support();
         test_process_watcher_lifecycle();
         test_process_watcher_parity();
         test_process_watcher_cadence();

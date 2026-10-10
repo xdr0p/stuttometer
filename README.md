@@ -179,54 +179,73 @@ Live capture requires an elevated terminal (`Run as Administrator`):
 
 ```text
 Capture Window:
-  --window-ms FLOAT               Pre-trigger window duration in ms (50.0-1000.0, default: 250.0)
-  --post-trigger-ms FLOAT         Post-trigger capture duration in ms (0.0-200.0, default: 30.0)
-  --cooldown-ms FLOAT             Minimum cooldown between reports in ms (100.0-10000.0, default: 1000.0)
-  --buffer-slots INT              Ring buffer capacity in slots (65536-1048576, default: 262144)
+  --window-ms FLOAT               Pre-trigger window duration in ms (default: 250) [50 - 1000]
+  --post-trigger-ms FLOAT         Post-trigger capture duration in ms (default: 30) [0 - 200]
+  --cooldown-ms FLOAT             Minimum cooldown between reports in ms (default: 1000) [100 - 10000]
+  --buffer-slots INT              Ring buffer capacity in slots (default: 262144) [65536 - 1048576]
 
-Detection Presets & Trigger Configuration:
-  --preset TEXT                   Detection preset: balanced, competitive, conservative, forensic, custom (default: balanced)
-  --min-report-severity TEXT      Minimum severity to trigger a correlated report: all, warning, danger (preset-dependent — balanced/competitive: warning, conservative: danger, forensic: all; default: warning)
+Detection:
+  -p, --preset TEXT               Detection preset: balanced, competitive, conservative, forensic, custom (default: balanced)
+  --min-report-severity TEXT      Minimum severity to trigger a correlated report: all, warning, danger (preset-dependent, balanced: warning)
   --osd-min-severity TEXT         Minimum severity for in-game OSD toast: all, warning, danger (default: danger)
-  --judder-min-alternations INT   Minimum alternations to trigger judder episode (1-50; preset-dependent — balanced: 5, competitive/forensic: 3, conservative: 8; default: 5)
+  --judder-min-alternations INT   Minimum alternations to trigger judder episode (preset-dependent, balanced: 5) [1 - 50]
   --trigger-mode TEXT             Frame trigger mode: hybrid, dynamic, static (default: hybrid)
   --pacing-profile TEXT           Pacing sensitivity profile: auto, high-refresh, conservative (default: auto)
   --high-refresh                  Alias for --pacing-profile high-refresh
-  --present-threshold-ms FLOAT    Static Present stutter threshold in ms (2.0-200.0, default: auto-detected vblank, e.g. 16.67 at 60Hz)
-  --spike-multiplier FLOAT        Relative stutter spike multiplier (1.2-10.0, default: 2.0; dynamically scaled under AUTO_ADAPTIVE presets)
-  --min-spike-delta-ms FLOAT      Minimum absolute spike delta in ms (1.0-50.0, default: 4.0; dynamically scaled under AUTO_ADAPTIVE presets)
-  --judder-detection / --no-judder Enable/disable cadence judder detection (default: enabled)
-  --judder-swing-ratio FLOAT      Judder cadence swing threshold ratio (0.1-0.9; preset-dependent — balanced: 0.50, competitive/forensic: 0.35, conservative: 0.60; raw default: 0.35)
-  --audio-trigger / --no-audio    Enable/disable AudioGlitch Event ID 11 trigger (default: enabled)
+  --present-threshold-ms FLOAT    DXGI Present stutter threshold in ms (default: auto-detected vblank, e.g. 16.67 at 60Hz) [2 - 200]
+  --spike-multiplier FLOAT        Relative stutter spike multiplier (default: 2.0) [1.2 - 10]
+  --min-spike-delta-ms FLOAT      Minimum absolute spike delta in ms (default: 4.0) [1 - 50]
+  --judder-detection, --no-judder Enable/disable cadence judder detection (default: enabled)
+  --judder-swing-ratio FLOAT      Judder cadence swing threshold ratio (preset-dependent, balanced: 0.50) [0.1 - 1]
+  --audio-trigger, --no-audio     Enable/disable AudioGlitch Event ID 11 trigger (default: enabled)
 
-Subsystem Anomaly Thresholds:
-  --dpc-threshold-us INT          DPC anomaly threshold in microseconds (100-50000, default: 1000)
-  --isr-threshold-us INT          ISR anomaly threshold in microseconds (50-50000, default: 500)
-  --disk-threshold-ms INT         Disk latency anomaly threshold in ms (1-1000, default: 20)
-  --cswitch-threshold-ms INT      Context switch preemption threshold in ms (1-500, default: 5)
-  --smi-threshold-ms FLOAT        Hardware SMI stall threshold in ms (10.0-100.0, default: 33.3; auto-scales to 2× observed baseline cadence, falling back to hardware vblank before a baseline exists, with a 16.67 ms floor)
-  --d3d12-pso-threshold-ms INT    D3D12 PSO compilation threshold in ms (1-500, default: 5)
-  --vram-threshold-mb INT         GPU VRAM demotion anomaly threshold in MB (1-1024, default: 8)
-  --mem-alloc-threshold-mb INT    VirtualAlloc commit stall threshold in MB (1-1024, default: 16)
-  --mem-trim-threshold-mb INT     Working set out-swap trim threshold in MB (1-1024, default: 4)
-  --mem-physical-latency-us INT   Physical memory allocation latency in microseconds (50-50000, default: 1000)
+Thresholds:
+  --dpc-threshold-us INT          DPC anomaly threshold in microseconds (default: 1000) [100 - 50000]
+  --isr-threshold-us INT          ISR anomaly threshold in microseconds (default: 500) [50 - 50000]
+  --disk-threshold-ms INT         Disk latency anomaly threshold in ms (default: 20) [1 - 1000]
+  --cswitch-threshold-ms INT      Context switch preemption threshold in ms (default: 5) [1 - 500]
+  --smi-threshold-ms FLOAT        Hardware SMI stall threshold in ms (default: 33.3) [10 - 100]
+  --d3d12-pso-threshold-ms INT    D3D12 PSO compilation threshold in ms (default: 5) [1 - 500]
+  --vram-threshold-mb INT         GPU VRAM demotion anomaly threshold in MB (default: 8) [1 - 1024]
+  --mem-alloc-threshold-mb INT    VirtualAlloc commit stall threshold in MB (default: 16) [1 - 1024]
+  --mem-trim-threshold-mb INT     Working set out-swap trim threshold in MB (default: 4) [1 - 1024]
+  --mem-physical-latency-us INT   Physical memory allocation latency in microseconds (default: 1000) [50 - 50000]
 
-Targeting, Output & General:
-  --target-pid INT                Target Process ID to monitor (default: 0 = monitor all)
-  --target-process TEXT           Target process name substring (e.g. Game.exe; attaches to first matching instance)
-  --output PATH                   Output file path for single JSON report
+Targeting:
+  --target-pid INT                Target Process ID to monitor (default: 0 = monitor all; mutually exclusive with -t)
+  -t, --target-process TEXT       Target process name substring (e.g. Game.exe; attaches to first matching instance; mutually exclusive with --target-pid)
+
+Output:
+  -o, --output PATH               Output file path for JSON reports (overwritten on each trigger if max-reports != 1; use --output-dir to save all reports)
   --output-dir PATH               Directory to save individual trigger reports (auto-saves paired JSON and CSV capped to 100 latest)
-  --export-csv PATH               Export frame pacing timeline to CSV (overwritten on each trigger; use --output-dir for per-trigger files)
-  --dump-events PATH              Stream real-time ETW events to NDJSON file (or - for stdout; can be combined with --output-dir)
-  --dump-max-mb INT               Maximum size per NDJSON file before rotation in MB (10-1024, default: 100; ignored when --dump-events is -)
-  --dump-max-files INT            Maximum number of rotated NDJSON files to retain (1-10, default: 3; ignored when --dump-events is -)
   --max-reports INT               Maximum number of reports before exiting (default: 0 = continuous)
+  --dump-events PATH              Stream real-time ETW events to NDJSON file (or - for stdout; can be combined with --output-dir)
+  --dump-max-mb INT               Maximum size per NDJSON file before rotation in MB (default: 100) [10 - 1024]
+  --dump-max-files INT            Maximum number of rotated NDJSON files to retain (default: 3) [1 - 10]
+  --export-csv PATH               Export frame pacing timeline to CSV (overwritten on each trigger; use --output-dir for per-trigger files)
+
+General:
+  -c, --config PATH               Load settings from a JSON config file (CLI options override file values)
   --tier TEXT                     Provider tier: minimal, standard, full (default: standard)
-  --redact                        Redact process names, file paths, and user identifiers (conservative unquoted delimiter scan; quote exotic paths)
-  --verbose                       Print detailed event stream metrics to console
-  --version                       Print version information and exit
+  -r, --redact                    Redact process names, file paths, and user identifiers
+  -v, --verbose                   Print detailed event stream metrics to console (mutually exclusive with -q)
+  -q, --quiet                     Suppress stdout startup banners and progress notices (errors still print to stderr; mutually exclusive with -v)
+  -V, --version                   Print version information and exit
+  --dump-effective-config         Print the resolved configuration after applying CLI args and --config, then exit
   --self-check                    Run non-destructive environment diagnostics & ETW provider checks, then exit
 ```
+
+### Configuration File (`--config`)
+
+Settings can be loaded from a JSON configuration file using `-c, --config <path>`:
+
+```powershell
+.\build\Release\stuttometer.exe -c settings.json --output-dir reports
+```
+
+- **Precedence:** CLI command-line arguments strictly override values defined in the configuration file, which in turn override default settings (`CLI > file > defaults`).
+- **GUI Schema Compatibility:** Directly loads `settings.json` files generated by the Stuttometer GUI.
+- **Demotion on Divergence:** If a named preset (e.g., `balanced`) is specified in the file but thresholds diverge from preset definitions, the preset is demoted to `custom`.
 
 ### Real-Time Event Streaming (NDJSON)
 
@@ -258,6 +277,16 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 
 - `--export-csv <path>` writes the retained frame pacing timeline in RFC 4180 CRLF format.
 - When `--output-dir <dir>` is specified, Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (Diagnostic Report JSON Schema v1.3) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix. DiagnosticReport (Schema 1.3) and BenchmarkSummary (Schema 1.4) version their schemas independently.
+- When `--output <path>` or `--export-csv <path>` is specified without `--output-dir` (and `--max-reports` is not 1), Stuttometer emits an overwrite notice to `stderr`, warning that the file will be overwritten with the latest report or timeline on each subsequent trigger.
+
+### Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success (normal exit, `--help`, `--version`, `--dump-effective-config`, passing `--self-check`) |
+| `1` | Runtime failure (ETW session start failed, privilege error, I/O error) |
+| `2` | CLI usage error (parse failure, bad argument, range violation, `--output -`) |
+| `3` | `--self-check` critical failure |
 
 ---
 

@@ -147,12 +147,13 @@ inline PacingProfile pacing_profile_from_string(std::string_view s) noexcept {
     return PacingProfile::AUTO_ADAPTIVE;
 }
 
-// Strictly used by CLI parser
+// Accepts CLI-canonical and GUI-serialized aliases; returns nullopt on unrecognized input.
+// Note: "custom" is deliberately rejected on CLI/cli_string (users specify overrides or --preset custom).
 inline std::optional<PacingProfile> pacing_profile_from_cli_string(std::string_view s) noexcept {
-    if (s == "auto") {
+    if (s == "auto" || s == "auto_adaptive" || s == "auto-adaptive") {
         return PacingProfile::AUTO_ADAPTIVE;
     }
-    if (s == "high-refresh") {
+    if (s == "high-refresh" || s == "high_refresh") {
         return PacingProfile::HIGH_REFRESH;
     }
     if (s == "conservative") {

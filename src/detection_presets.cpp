@@ -3,6 +3,10 @@
 
 namespace stuttometer {
 
+// INVARIANT: All values emitted here must fall within the corresponding
+// CLI bounds (enforced via CLI11 ->check()). Since CLI11 validators fire
+// during parsing, preset-emitted values are not runtime-validated by CLI11.
+// Keep this function's outputs in sync with the CLI option bounds.
 void apply_detection_preset(DetectionPreset p, TriggerConfig& trig, GuiConfig& gui) noexcept {
     gui.detection_preset = p;
     switch (p) {

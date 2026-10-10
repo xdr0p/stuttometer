@@ -48,24 +48,34 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
     return FALSE;
 }
 
+namespace {
+// Thread-safety note: s_null_stream is used only from main() thread.
+class NullStreambuf : public std::streambuf {
+    int overflow(int c) override { return c; }
+};
+NullStreambuf s_null_buf;
+std::ostream  s_null_stream(&s_null_buf);
+std::ostream* g_info_stream = &std::cout;
+}
+
 int main(int argc, char** argv) {
     stuttometer::CliConfig config;
     auto parse_res = stuttometer::parse_cli_args(argc, argv, config, std::cout, std::cerr);
-    if (parse_res == stuttometer::CliParseResult::EXIT_OK) {
+    if (parse_res == stuttometer::CliParseResult::EXIT_HANDLED) {
         return 0;
     }
-    if (parse_res == stuttometer::CliParseResult::EXIT_ERROR) {
-        return 1;
+    if (parse_res == stuttometer::CliParseResult::ERROR_USAGE) {
+        return 2;
     }
 
     if (config.run_self_check) {
         if (config.dump_events_path == "-") {
-            std::cerr << "[STUTTOMETER] Self-check output redirected to stderr because --dump-events - is active\n";
+            std::cerr << "info: [STUTTOMETER] Self-check output redirected to stderr because --dump-events - is active\n";
             bool ok = stuttometer::run_environment_self_check(std::cerr);
-            return ok ? 0 : 1;
+            return ok ? 0 : 3;
         } else {
             bool ok = stuttometer::run_environment_self_check(std::cout);
-            return ok ? 0 : 1;
+            return ok ? 0 : 3;
         }
     }
 
@@ -93,6 +103,9 @@ int main(int argc, char** argv) {
     std::string provider_tier = config.provider_tier;
     bool redact = config.redact;
     bool verbose = config.verbose;
+    bool quiet = config.quiet;
+    std::ostream& info = quiet ? s_null_stream : std::cout;
+    g_info_stream = &info;
     std::string trigger_mode_str = config.trigger_mode_str;
     stuttometer::PacingProfile pacing_profile = config.pacing_profile;
     double spike_multiplier = config.spike_multiplier;
@@ -110,7 +123,7 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(output_dir, ec);
         if (ec) {
-            std::cerr << "[STUTTOMETER] Error: Failed to create output directory '" << output_dir << "': " << ec.message() << "\n";
+            std::cerr << "error: [STUTTOMETER] Failed to create output directory '" << output_dir << "': " << ec.message() << "\n";
             return 1;
         }
     }
@@ -151,7 +164,7 @@ int main(int argc, char** argv) {
                 dump_max_files
             );
             if (!ndjson_writer) {
-                std::cerr << "[STUTTOMETER] Error: Failed to create NDJSON output file: " << dump_events_path << "\n";
+                std::cerr << "error: [STUTTOMETER] Failed to create NDJSON output file: " << dump_events_path << "\n";
                 return 1;
             }
         }
@@ -159,7 +172,7 @@ int main(int argc, char** argv) {
 
     const bool is_admin = stuttometer::is_running_as_admin();
     if (!is_admin) {
-        std::cerr << "\n[STUTTOMETER] Error: Running in Standard (Non-Elevated) Mode.\n";
+        std::cerr << "\nerror: [STUTTOMETER] Running in Standard (Non-Elevated) Mode.\n";
         std::cerr << "Kernel ETW providers (DPC, ISR, Disk I/O, Context Switches) require Administrator privileges.\n\n";
         std::cerr << "To verify your system ETW providers and environment before elevating, run:\n";
         std::cerr << "  .\\stuttometer.exe --self-check\n\n";
@@ -171,17 +184,17 @@ int main(int argc, char** argv) {
     if (!target_pid_manual && !target_process_name.empty()) {
         target_pid = stuttometer::resolve_process_name_to_pid(target_process_name);
         if (target_pid != 0) {
-            std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' matched PID " << target_pid << "\n";
+            info << "info: [STUTTOMETER] Target process '" << target_process_name << "' matched PID " << target_pid << "\n";
         } else {
-            std::cout << "[STUTTOMETER] Target process '" << target_process_name << "' not currently running. Waiting for process to launch...\n";
+            info << "info: [STUTTOMETER] Target process '" << target_process_name << "' not currently running. Waiting for process to launch...\n";
         }
     }
 
     if (!stuttometer::enable_system_profile_privilege()) {
-        std::cerr << "[STUTTOMETER] Warning: Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
+        std::cerr << "warn: [STUTTOMETER] Failed to enable SeSystemprofilePrivilege. Kernel trace session may fail or be degraded.\n";
     }
 
-    std::cout << "[STUTTOMETER] Initializing Stuttometer v" << stuttometer::TOOL_VERSION << " (Elevated Mode)...\n";
+    info << "info: [STUTTOMETER] Initializing Stuttometer v" << stuttometer::TOOL_VERSION << " (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
     stuttometer::EtwSessionConfig etw_config;
@@ -201,12 +214,12 @@ int main(int argc, char** argv) {
     const uint32_t requested_slots = buffer_slots;
     buffer_slots = stuttometer::compute_recommended_buffer_slots(etw_config, requested_slots);
     if (buffer_slots > requested_slots) {
-        std::cout << "[STUTTOMETER] Buffer capacity automatically bumped to " << buffer_slots << " slots for active providers\n";
+        info << "info: [STUTTOMETER] Buffer capacity automatically bumped to " << buffer_slots << " slots for active providers\n";
     }
 
     stuttometer::FlightRecorder flight_recorder(buffer_slots);
     if (flight_recorder.capacity() != buffer_slots) {
-        std::cout << "[STUTTOMETER] Buffer capacity rounded up to " << flight_recorder.capacity() << " slots\n";
+        info << "info: [STUTTOMETER] Buffer capacity rounded up to " << flight_recorder.capacity() << " slots\n";
     }
 
     stuttometer::FrameTriggerMode frame_trig_mode = stuttometer::FrameTriggerMode::HYBRID;
@@ -239,21 +252,21 @@ int main(int argc, char** argv) {
         trig_config.present_threshold_ms = present_threshold_ms;
     }
     if (disp_info.query_succeeded) {
-        std::cout << "[STUTTOMETER] Auto-detected display refresh: " 
-                  << disp_info.refresh_rate_hz << " Hz (vblank: " 
-                  << std::fixed << std::setprecision(2) << disp_info.vblank_interval_ms << " ms)\n";
+        info << "info: [STUTTOMETER] Auto-detected display refresh: " 
+             << disp_info.refresh_rate_hz << " Hz (vblank: " 
+             << std::fixed << std::setprecision(2) << disp_info.vblank_interval_ms << " ms)\n";
     } else {
-        std::cout << "[STUTTOMETER] Notice: Display refresh detection unavailable; defaulting to 60.0 Hz ("
-                  << stuttometer::DEFAULT_60HZ_VBLANK_MS << " ms).\n";
+        info << "info: [STUTTOMETER] Notice: Display refresh detection unavailable; defaulting to 60.0 Hz ("
+             << stuttometer::DEFAULT_60HZ_VBLANK_MS << " ms).\n";
     }
     if (config.present_threshold_manual && (present_threshold_ms > stuttometer::VBLANK_WARNING_FACTOR * disp_info.vblank_interval_ms)) {
-        std::cout << "[STUTTOMETER] Notice: Configured stutter threshold (" 
-                  << std::fixed << std::setprecision(1) << present_threshold_ms << " ms) is >"
-                  << std::setprecision(1) << stuttometer::VBLANK_WARNING_FACTOR << "x "
-                  << "the detected display refresh interval ("
-                  << disp_info.vblank_interval_ms << " ms, "
-                  << std::setprecision(0) << disp_info.refresh_rate_hz << " Hz). "
-                  << "Stutters under " << std::setprecision(1) << present_threshold_ms << " ms will not be reported.\n";
+        info << "info: [STUTTOMETER] Notice: Configured stutter threshold (" 
+             << std::fixed << std::setprecision(1) << present_threshold_ms << " ms) is >"
+             << std::setprecision(1) << stuttometer::VBLANK_WARNING_FACTOR << "x "
+             << "the detected display refresh interval ("
+             << disp_info.vblank_interval_ms << " ms, "
+             << std::setprecision(0) << disp_info.refresh_rate_hz << " Hz). "
+             << "Stutters under " << std::setprecision(1) << present_threshold_ms << " ms will not be reported.\n";
     }
 
     stuttometer::TriggerEngine trigger_engine(trig_config, qpc_freq);
@@ -264,18 +277,18 @@ int main(int argc, char** argv) {
 
     const auto start_result = session_mgr.start();
     if (start_result == stuttometer::SessionStartResult::FAILED) {
-        std::cerr << "[STUTTOMETER] Error: Failed to start ETW sessions.\n";
+        std::cerr << "error: [STUTTOMETER] Failed to start ETW sessions.\n";
         return 1;
     } else if (start_result == stuttometer::SessionStartResult::DEGRADED_USER_ONLY) {
-        std::cout << "[STUTTOMETER] Notice: Running in DEGRADED USER-ONLY mode (Kernel trace session unavailable).\n";
+        info << "info: [STUTTOMETER] Notice: Running in DEGRADED USER-ONLY mode (Kernel trace session unavailable).\n";
     } else if (start_result == stuttometer::SessionStartResult::DEGRADED_KERNEL_ONLY) {
-        std::cout << "[STUTTOMETER] Notice: Running in DEGRADED KERNEL-ONLY mode (User DXGI/Audio session unavailable).\n";
+        info << "info: [STUTTOMETER] Notice: Running in DEGRADED KERNEL-ONLY mode (User DXGI/Audio session unavailable).\n";
     }
 
     const auto ps = session_mgr.provider_status();
-    auto warn_provider = [](bool active, bool requested, const char* name) {
+    auto warn_provider = [&info](bool active, bool requested, const char* name) {
         if (requested && !active) {
-            std::cout << "[STUTTOMETER] Notice: " << name << " provider failed to enable.\n";
+            info << "warn: [STUTTOMETER] Notice: " << name << " provider failed to enable.\n";
         }
     };
     warn_provider(ps.dxgi_enabled, etw_config.enable_dxgi, "DXGI");
@@ -292,12 +305,9 @@ int main(int argc, char** argv) {
     warn_provider(ps.kernel_memory_enabled, etw_config.enable_kernel_memory, "Kernel Memory");
     warn_provider(ps.kernel_process_enabled, etw_config.enable_kernel_process_events, "Kernel Process");
 
-    std::cout << "[STUTTOMETER] Active. Monitoring frame delivery (Mode: " << stuttometer::frame_trigger_mode_to_string(frame_trig_mode)
-              << ", Spike: " << spike_multiplier << "x, Static Threshold: " << present_threshold_ms << "ms)...\n";
-    if (!output_file.empty() && max_reports != 1) {
-        std::cout << "[STUTTOMETER] Notice: --output specified for multiple reports. The file will be overwritten with the latest report on each trigger (use --output-dir to save all reports).\n";
-    }
-    std::cout << "Press Ctrl+C to stop.\n\n";
+    info << "info: [STUTTOMETER] Active. Monitoring frame delivery (Mode: " << stuttometer::frame_trigger_mode_to_string(frame_trig_mode)
+         << ", Spike: " << spike_multiplier << "x, Static Threshold: " << present_threshold_ms << "ms)...\n";
+    info << "Press Ctrl+C to stop.\n\n";
 
     stuttometer::DriverSymbolResolver driver_resolver;
     stuttometer::CorrelatorThresholds thresholds;
@@ -338,10 +348,10 @@ int main(int argc, char** argv) {
             return static_cast<stuttometer::TriggerEngine*>(ud)->active_target_pid();
         };
         callbacks.on_attach_success = [](uint32_t pid, std::string_view name, void*) {
-            std::cout << "[STUTTOMETER] Target process '" << name << "' active (PID " << pid << ")\n";
+            (*g_info_stream) << "info: [STUTTOMETER] Target process '" << name << "' active (PID " << pid << ")\n";
         };
         callbacks.on_detach_success = [](uint32_t, std::string_view name, void*) {
-            std::cout << "[STUTTOMETER] Target process '" << name << "' closed. Waiting for restart...\n";
+            (*g_info_stream) << "info: [STUTTOMETER] Target process '" << name << "' closed. Waiting for restart...\n";
         };
         g_watcher.start(target_process_name, callbacks);
     }
@@ -355,12 +365,12 @@ int main(int argc, char** argv) {
         ++loop_counter;
 
         if (verbose && loop_counter % stuttometer::gui_constants::VERBOSE_LOG_INTERVAL_LOOPS == 0) {
-            std::cout << "[VERBOSE] Head: " << flight_recorder.current_head() 
-                      << " | Upstream Lost Events: " << session_mgr.events_lost()
-                      << " | Lost Buffers: " << session_mgr.buffers_lost()
-                      << " | Unpaired Evictions: " << session_mgr.unpaired_evictions()
-                      << " | Insertion Failures: " << session_mgr.insertion_failures()
-                      << " | Suppressed Triggers: " << trigger_engine.suppressed_trigger_count() << "\n";
+            info << "[VERBOSE] Head: " << flight_recorder.current_head() 
+                 << " | Upstream Lost Events: " << session_mgr.events_lost()
+                 << " | Lost Buffers: " << session_mgr.buffers_lost()
+                 << " | Unpaired Evictions: " << session_mgr.unpaired_evictions()
+                 << " | Insertion Failures: " << session_mgr.insertion_failures()
+                 << " | Suppressed Triggers: " << trigger_engine.suppressed_trigger_count() << "\n";
         }
 
         if (ndjson_writer) {
@@ -434,16 +444,16 @@ int main(int argc, char** argv) {
 
                 auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
 
-                reporter.print_console_summary(report, std::cout, redact);
+                reporter.print_console_summary(report, info, redact);
 
                 if (!output_file.empty()) {
                     if (!reporter.save_to_file(report, std::filesystem::path(output_file), redact)) {
-                        std::cerr << "[STUTTOMETER] Error: Failed to write report to '" << output_file << "'\n";
+                        std::cerr << "error: [STUTTOMETER] Failed to write report to '" << output_file << "'\n";
                     }
                 }
                 if (!export_csv_path.empty()) {
                     if (!stuttometer::csv::export_to_file(report, std::filesystem::path(export_csv_path))) {
-                        std::cerr << "[STUTTOMETER] Error: Failed to export CSV to '" << export_csv_path << "'\n";
+                        std::cerr << "error: [STUTTOMETER] Failed to export CSV to '" << export_csv_path << "'\n";
                     }
                 }
                 if (!output_dir.empty()) {
@@ -452,7 +462,7 @@ int main(int argc, char** argv) {
                     if (reporter.save_to_file(report, dir / json_name, redact)) {
                         stuttometer::rotate_directory_by_prefix(dir, "stutto_report_", ".json", 100);
                     } else {
-                        std::cerr << "[STUTTOMETER] Error: Failed to write report to '" << (dir / json_name).string() << "'\n";
+                        std::cerr << "error: [STUTTOMETER] Failed to write report to '" << (dir / json_name).string() << "'\n";
                     }
                     const std::string csv_name = "stutto_pacing_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".csv";
                     if (stuttometer::csv::export_to_file(report, dir / csv_name)) {
@@ -466,7 +476,7 @@ int main(int argc, char** argv) {
                     break;
                 }
             } catch (const std::exception& ex) {
-                std::cerr << "[STUTTOMETER] Exception during report processing: " << ex.what() << "\n";
+                std::cerr << "error: [STUTTOMETER] Exception during report processing: " << ex.what() << "\n";
             }
         }
 
@@ -475,7 +485,7 @@ int main(int argc, char** argv) {
 
     g_watcher.stop();
 
-    std::cout << "\n[STUTTOMETER] Stopping trace sessions and cleaning up...\n";
+    info << "\ninfo: [STUTTOMETER] Stopping trace sessions and cleaning up...\n";
     session_mgr.stop();
     if (ndjson_writer) {
         stuttometer::FilteredEvent fe;
@@ -494,7 +504,7 @@ int main(int argc, char** argv) {
         }
         ndjson_writer->stop();
     }
-    std::cout << "[STUTTOMETER] Done. Total reports generated: " << report_count << "\n";
+    info << "info: [STUTTOMETER] Done. Total reports generated: " << report_count << "\n";
 
     {
         std::lock_guard<std::mutex> lock(g_shutdown_mutex);

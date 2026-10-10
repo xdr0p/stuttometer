@@ -11,9 +11,9 @@
 namespace stuttometer {
 
 enum class CliParseResult {
-    SUCCESS,
-    EXIT_OK,
-    EXIT_ERROR
+    OK,             // Parsing succeeded; continue into main() body
+    EXIT_HANDLED,   // Handled non-monitoring execution (--help, --version, --dump-effective-config); return 0
+    ERROR_USAGE     // CLI usage error / parse failure / bad argument; return 2
 };
 
 struct CliConfig {
@@ -41,6 +41,7 @@ struct CliConfig {
     std::string provider_tier{"standard"};
     bool redact{false};
     bool verbose{false};
+    bool quiet{false};
     bool print_version{false};
     bool run_self_check{false};
     std::string trigger_mode_str{"hybrid"};
@@ -67,57 +68,6 @@ struct CliConfig {
     uint8_t dwm_min_missed_vblanks{1};
     uint8_t kernel_frame_stall_min_missed_vblanks{1};
 };
-
-struct CliRangeDef {
-    const char* name;
-    double min_val;
-    double max_val;
-    const char* unit;
-    double (*getter)(const CliConfig&);
-};
-
-inline constexpr CliRangeDef CLI_RANGES[] = {
-    {"--window-ms",               50.0,    1000.0,   "ms",  [](const CliConfig& c) { return c.window_pre_ms; }},
-    {"--post-trigger-ms",         0.0,     200.0,    "ms",  [](const CliConfig& c) { return c.window_post_ms; }},
-    {"--present-threshold-ms",    2.0,     200.0,    "ms",  [](const CliConfig& c) { return c.present_threshold_ms; }},
-    {"--cooldown-ms",             100.0,   10000.0,  "ms",  [](const CliConfig& c) { return c.cooldown_ms; }},
-    {"--dpc-threshold-us",        100.0,   50000.0,  "us",  [](const CliConfig& c) { return static_cast<double>(c.dpc_threshold_us); }},
-    {"--isr-threshold-us",        50.0,    50000.0,  "us",  [](const CliConfig& c) { return static_cast<double>(c.isr_threshold_us); }},
-    {"--disk-threshold-ms",       1.0,     1000.0,   "ms",  [](const CliConfig& c) { return static_cast<double>(c.disk_threshold_ms); }},
-    {"--cswitch-threshold-ms",    1.0,     500.0,    "ms",  [](const CliConfig& c) { return static_cast<double>(c.cswitch_preempt_ms); }},
-    {"--smi-threshold-ms",        10.0,    100.0,    "ms",  [](const CliConfig& c) { return c.smi_severity_threshold_ms; }},
-    {"--d3d12-pso-threshold-ms",  1.0,     500.0,    "ms",  [](const CliConfig& c) { return static_cast<double>(c.d3d12_pso_threshold_ms); }},
-    {"--vram-threshold-mb",       1.0,     1024.0,   "MB",  [](const CliConfig& c) { return static_cast<double>(c.vram_demoted_threshold_mb); }},
-    {"--mem-alloc-threshold-mb",  1.0,     1024.0,   "MB",  [](const CliConfig& c) { return static_cast<double>(c.mem_alloc_threshold_mb); }},
-    {"--mem-trim-threshold-mb",   1.0,     1024.0,   "MB",  [](const CliConfig& c) { return static_cast<double>(c.mem_trim_threshold_mb); }},
-    {"--mem-physical-latency-us", 50.0,    50000.0,  "us",  [](const CliConfig& c) { return static_cast<double>(c.mem_physical_latency_us); }},
-    {"--buffer-slots",            static_cast<double>(MIN_BUFFER_SLOTS), static_cast<double>(MAX_BUFFER_SLOTS), "",   [](const CliConfig& c) { return static_cast<double>(c.buffer_slots); }},
-    {"--spike-multiplier",        1.2,     10.0,     "",    [](const CliConfig& c) { return c.spike_multiplier; }},
-    {"--min-spike-delta-ms",      1.0,     50.0,     "ms",  [](const CliConfig& c) { return c.min_spike_delta_ms; }},
-    {"--judder-swing-ratio",      0.1,     0.9,      "",    [](const CliConfig& c) { return c.judder_swing_ratio; }},
-    {"--judder-min-alternations", 1.0,     50.0,     "",    [](const CliConfig& c) { return static_cast<double>(c.judder_min_alternations); }}
-};
-
-template <typename T>
-inline bool validate_option_range(std::ostream& err, const char* name, T val, double min_val, double max_val, const char* unit = "") {
-    if (static_cast<double>(val) < min_val || static_cast<double>(val) > max_val) {
-        err << "[STUTTOMETER] Error: " << name << " must be between " << min_val << " and " << max_val;
-        if (unit && unit[0] != '\0') err << " " << unit;
-        err << ".\n";
-        return false;
-    }
-    return true;
-}
-
-inline bool validate_all_cli_ranges(std::ostream& err, const CliConfig& config) {
-    for (const auto& r : CLI_RANGES) {
-        const double val = r.getter(config);
-        if (!validate_option_range(err, r.name, val, r.min_val, r.max_val, r.unit)) {
-            return false;
-        }
-    }
-    return true;
-}
 
 CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_config, std::ostream& out, std::ostream& err);
 
