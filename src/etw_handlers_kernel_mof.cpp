@@ -30,6 +30,35 @@ namespace {
 
 // 100ns intervals per second for QPC -> FILETIME conversion (NOT a duration cap).
 constexpr uint64_t FILETIME_TICKS_PER_SEC = 10'000'000ULL;
+
+// Minimum valid FILETIME timestamp (Jan 1, 2000 00:00:00 UTC = 125911584000000000 100ns ticks).
+// Used to distinguish live NT Kernel Logger FILETIME timestamps (~1.34e17) from direct
+// QPC ticks. QPC values scale with uptime: at 10 MHz, 10 years yields ~3.15e15;
+// at 100 MHz, 10 years yields ~3.15e16 — both well below MIN_VALID_FILETIME.
+// Misclassification would require a QPC frequency/uptime product exceeding ~1.26e17
+// (~400 years at 10 MHz, ~40 years at 100 MHz), which is outside the operational envelope.
+constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL;
+
+// Translates a FILETIME timestamp (100ns units since 1601 UTC) into QPC ticks using a periodic
+// sync pair (sync_utc, sync_qpc). Returns 0 on underflow or when sync data is uninitialized.
+[[nodiscard]] inline uint64_t filetime_to_qpc(
+    uint64_t event_ft, uint64_t sync_utc, uint64_t sync_qpc, uint64_t qpc_freq
+) noexcept {
+    if (sync_utc == 0 || sync_qpc == 0 || qpc_freq == 0) return 0;
+    if (event_ft >= sync_utc) {
+        const uint64_t delta_ft = event_ft - sync_utc;
+        const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
+        const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
+        const uint64_t delta_qpc = (q * qpc_freq) + ((r * qpc_freq) / FILETIME_TICKS_PER_SEC);
+        return sync_qpc + delta_qpc;
+    } else {
+        const uint64_t delta_ft = sync_utc - event_ft;
+        const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
+        const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
+        const uint64_t delta_qpc = (q * qpc_freq) + ((r * qpc_freq) / FILETIME_TICKS_PER_SEC);
+        return (sync_qpc >= delta_qpc) ? (sync_qpc - delta_qpc) : 0;
+    }
+}
 } // namespace
 
 void EtwSessionManager::handle_nt_dpc_isr_event(
@@ -60,7 +89,6 @@ void EtwSessionManager::handle_nt_dpc_isr_event(
             rec.payload.routine_addr = routine;
             rec.auxiliary_data = routine;
 
-            constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL; // Jan 1, 2000 00:00:00 UTC
             if (ctx.timestamp >= MIN_VALID_FILETIME) {
                 // NT Kernel Logger emits EventHeader.TimeStamp in FILETIME (100ns since 1601)
                 // regardless of Wnode.ClientContext=1, while the MOF payload's InitialTime is
@@ -68,28 +96,11 @@ void EtwSessionManager::handle_nt_dpc_isr_event(
                 // pair before subtracting.
                 uint64_t sync_utc = 0, sync_qpc = 0;
                 read_sync_time(sync_utc, sync_qpc);
-                if (sync_utc > 0 && sync_qpc > 0) {
-                    uint64_t event_qpc = 0;
-                    if (ctx.timestamp >= sync_utc) {
-                        const uint64_t delta_ft = ctx.timestamp - sync_utc;
-                        const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
-                        const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
-                        const uint64_t delta_qpc = (q * qpc_freq_) + ((r * qpc_freq_) / FILETIME_TICKS_PER_SEC);
-                        event_qpc = sync_qpc + delta_qpc;
-                    } else {
-                        const uint64_t delta_ft = sync_utc - ctx.timestamp;
-                        const uint64_t q = delta_ft / FILETIME_TICKS_PER_SEC;
-                        const uint64_t r = delta_ft % FILETIME_TICKS_PER_SEC;
-                        const uint64_t delta_qpc = (q * qpc_freq_) + ((r * qpc_freq_) / FILETIME_TICKS_PER_SEC);
-                        event_qpc = (sync_qpc >= delta_qpc) ? (sync_qpc - delta_qpc) : 0;
-                    }
-                    if (event_qpc > 0) {
-                        // rec.qpc_timestamp stays as ctx.timestamp (FILETIME domain, matching all other events)
-                        rec.duration_us = clamped_qpc_delta_us(
-                            event_qpc, initial_time, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
-                    } else {
-                        rec.duration_us = 0;
-                    }
+                const uint64_t event_qpc = filetime_to_qpc(ctx.timestamp, sync_utc, sync_qpc, qpc_freq_);
+                if (event_qpc > 0) {
+                    // rec.qpc_timestamp stays as ctx.timestamp (FILETIME domain, matching all other events)
+                    rec.duration_us = clamped_qpc_delta_us(
+                        event_qpc, initial_time, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
                 } else {
                     rec.duration_us = 0;
                 }
@@ -249,26 +260,45 @@ void EtwSessionManager::handle_nt_fault_event(PEVENT_RECORD p_event, EtwEventRec
             rec.payload.file_key = file_object;
             rec.auxiliary_data = byte_count;
 
-            uint64_t initial_time_ft = static_cast<uint64_t>(initial_time);
-            constexpr uint64_t MIN_VALID_FILETIME = 125911584000000000ULL; // Jan 1, 2000 00:00:00 UTC
-            uint64_t sync_utc = 0, sync_qpc = 0;
-            read_sync_time(sync_utc, sync_qpc);
+            const uint64_t initial_time_ft = static_cast<uint64_t>(initial_time);
+            const bool ctx_is_ft = (ctx.timestamp >= MIN_VALID_FILETIME);
+            const bool init_is_ft = (initial_time_ft >= MIN_VALID_FILETIME);
 
-            if (initial_time_ft >= MIN_VALID_FILETIME && sync_utc > 0 && sync_qpc > 0 && ctx.timestamp >= sync_qpc) {
-                const uint64_t delta_qpc = ctx.timestamp - sync_qpc;
-                const uint64_t q = delta_qpc / qpc_freq_;
-                const uint64_t r = delta_qpc % qpc_freq_;
-                const uint64_t delta_100ns = (q * FILETIME_TICKS_PER_SEC) + ((r * FILETIME_TICKS_PER_SEC) / qpc_freq_);
-                const uint64_t end_ft = sync_utc + delta_100ns;
-                if (end_ft >= initial_time_ft) {
-                    uint64_t dur_100ns = end_ft - initial_time_ft;
-                    uint64_t dur_us = dur_100ns / 10;
+            if (ctx_is_ft && init_is_ft) {
+                // Domain 1: Both timestamps are in FILETIME (100ns units since 1601 UTC).
+                // Standard MOF PageFault_HardFault schema where InitialTime is wmi:DateTime.
+                if (ctx.timestamp >= initial_time_ft) {
+                    const uint64_t dur_100ns = ctx.timestamp - initial_time_ft;
+                    const uint64_t dur_us = dur_100ns / 10;
                     if (dur_us <= KERNEL_SINGLE_EVENT_CAP_US) {
                         rec.duration_us = static_cast<uint32_t>(dur_us);
+                    } else {
+                        rec.duration_us = 0;
                     }
+                } else {
+                    rec.duration_us = 0;
+                }
+            } else if (ctx_is_ft && !init_is_ft) {
+                // Domain 2: Header timestamp is FILETIME, but InitialTime is in QPC ticks
+                // (analogous to DPC/ISR MOF payload behavior on certain kernel builds).
+                // Translate ctx.timestamp into QPC domain via the periodic sync pair.
+                uint64_t sync_utc = 0, sync_qpc = 0;
+                read_sync_time(sync_utc, sync_qpc);
+                const uint64_t event_qpc = filetime_to_qpc(ctx.timestamp, sync_utc, sync_qpc, qpc_freq_);
+                if (event_qpc > 0) {
+                    rec.duration_us = clamped_qpc_delta_us(
+                        event_qpc, initial_time_ft, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
+                } else {
+                    rec.duration_us = 0;
                 }
             } else {
-                rec.duration_us = 0;
+                // Domain 3: Both timestamps are in QPC domain (synthetic unit test traces,
+                // ClientContext=1 user providers, or custom mock feeds).
+                // Note: The theoretical 4th combination (!ctx_is_ft && init_is_ft: QPC header with
+                // FILETIME payload) also lands here; clamped_qpc_delta_us safely sees end < start
+                // and fails closed by returning 0.
+                rec.duration_us = clamped_qpc_delta_us(
+                    ctx.timestamp, initial_time_ft, qpc_freq_, KERNEL_SINGLE_EVENT_CAP_US);
             }
             data_ok = true;
         }

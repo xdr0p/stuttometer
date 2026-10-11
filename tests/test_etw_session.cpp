@@ -2109,6 +2109,8 @@ static void test_kernel_mof_guid_routing() {
         if (r.category == static_cast<uint16_t>(EventCategory::PAGE_FAULT)) {
             found_pf = true;
             STUTTO_ASSERT(r.auxiliary_data == 4096);
+            const uint64_t expected_pf_dur_us = (300ULL * 1000000ULL) / qpc_freq;
+            STUTTO_ASSERT(r.duration_us == expected_pf_dur_us);
         }
     }
     STUTTO_ASSERT(found_dpc);
@@ -2255,6 +2257,154 @@ static void test_dpc_pre_sync_underflow_guard() {
     std::cout << "  -> Pre-sync DPC underflow guard PASSED.\n";
 }
 
+static void test_page_fault_all_domain_translations() {
+    std::cout << "[TEST] Validating PageFault_HardFault multi-domain duration translations...\n";
+
+    const uint64_t qpc_freq = get_qpc_frequency();
+    FlightRecorder recorder(1024);
+    TriggerConfig trig_cfg;
+    TriggerEngine engine(trig_cfg, qpc_freq);
+    EtwSessionConfig cfg;
+    cfg.enable_kernel_pagefault = true;
+
+    EtwSessionManager mgr(recorder, engine, cfg);
+    mgr.set_running_for_test(true);
+
+    const uint64_t initial_unpaired = mgr.unpaired_evictions();
+    const uint64_t initial_ins_fail = mgr.insertion_failures();
+
+    // Setup reference sync pair: FILETIME (~1.34e17) and QPC (~3.3e11)
+    constexpr uint64_t sync_utc = 134358865120687882ULL;
+    const uint64_t sync_qpc = 339191978391ULL;
+    mgr.update_sync_time_for_test(sync_utc, sync_qpc);
+
+    constexpr uint64_t FILETIME_TICKS_PER_SEC = 10000000ULL;
+
+    #pragma pack(push, 1)
+    struct PageFaultPayload {
+        int64_t initial_time{0};
+        uint8_t dummy[16]{};
+        uint64_t file_obj{0xCAFEBABEU};
+        uint32_t pad{0};
+        uint32_t byte_count{8192};
+    };
+    #pragma pack(pop)
+
+    auto emit_fault_event = [&](uint64_t event_ts, int64_t init_time) {
+        PageFaultPayload pf;
+        pf.initial_time = init_time;
+        EVENT_RECORD ev{};
+        ev.UserContext = &mgr;
+        ev.EventHeader.ProviderId = PAGE_FAULT_GUID;
+        ev.EventHeader.EventDescriptor.Opcode = 32; // KERNEL_OPCODE_HARDFAULT
+        ev.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(event_ts);
+        ev.UserData = &pf;
+        ev.UserDataLength = sizeof(pf);
+        EtwSessionManager::on_event_record(&ev);
+    };
+
+    // --- Sub-case 1: Domain 1 (FILETIME header + FILETIME payload) ---
+    // Delta = 50,000 100ns ticks = 5,000 us = 5 ms
+    const uint64_t d1_init_ft = sync_utc + 10000ULL;
+    const uint64_t d1_end_ft  = d1_init_ft + 50000ULL;
+    emit_fault_event(d1_end_ft, static_cast<int64_t>(d1_init_ft));
+
+    uint64_t drops = 0;
+    auto snap1 = recorder.snapshot(d1_end_ft - 10, d1_end_ft + 10, &drops);
+    STUTTO_ASSERT(snap1.size() == 1);
+    STUTTO_ASSERT(snap1[0].category == static_cast<uint16_t>(EventCategory::PAGE_FAULT));
+    STUTTO_ASSERT(snap1[0].qpc_timestamp == d1_end_ft);
+    STUTTO_ASSERT(snap1[0].duration_us == 5000);
+    STUTTO_ASSERT(snap1[0].auxiliary_data == 8192);
+
+    // --- Sub-case 2: Domain 2 (FILETIME header + QPC payload via sync translation) ---
+    // Event is 70,000 FT ticks (7 ms) after sync. Expected fault duration = 400 us.
+    const uint64_t d2_delta_ft = 70000ULL;
+    const uint64_t d2_end_ft = sync_utc + d2_delta_ft;
+    const uint64_t q2 = d2_delta_ft / FILETIME_TICKS_PER_SEC;
+    const uint64_t r2 = d2_delta_ft % FILETIME_TICKS_PER_SEC;
+    const uint64_t d2_event_qpc = sync_qpc + (q2 * qpc_freq) + ((r2 * qpc_freq) / FILETIME_TICKS_PER_SEC);
+    const uint64_t d2_dur_ticks = (400ULL * qpc_freq) / 1000000ULL;
+    const uint64_t d2_init_qpc = d2_event_qpc - d2_dur_ticks;
+    emit_fault_event(d2_end_ft, static_cast<int64_t>(d2_init_qpc));
+
+    auto snap2 = recorder.snapshot(d2_end_ft - 10, d2_end_ft + 10, &drops);
+    STUTTO_ASSERT(snap2.size() == 1);
+    STUTTO_ASSERT(snap2[0].category == static_cast<uint16_t>(EventCategory::PAGE_FAULT));
+    STUTTO_ASSERT(snap2[0].qpc_timestamp == d2_end_ft);
+    const uint64_t expected_d2_dur = static_cast<uint64_t>(qpc_delta_to_us(d2_dur_ticks, qpc_freq));
+    STUTTO_ASSERT(snap2[0].duration_us == expected_d2_dur);
+
+    // --- Sub-case 3: Timestamp Inversion Protection (end < start -> 0) in FILETIME domain ---
+    const uint64_t d3_init_ft = sync_utc + 120000ULL;
+    const uint64_t d3_end_ft  = sync_utc + 90000ULL; // Inverted: initial_time > event_ts
+    emit_fault_event(d3_end_ft, static_cast<int64_t>(d3_init_ft));
+
+    auto snap3 = recorder.snapshot(d3_end_ft - 10, d3_end_ft + 10, &drops);
+    STUTTO_ASSERT(snap3.size() == 1);
+    STUTTO_ASSERT(snap3[0].duration_us == 0);
+
+    // --- Sub-case 4: Duration Cap Protection (> 10s ceiling -> 0) in FILETIME domain ---
+    const uint64_t d4_init_ft = sync_utc + 100000ULL;
+    const uint64_t d4_end_ft  = d4_init_ft + 105000000ULL; // 10.5 seconds in 100ns ticks
+    emit_fault_event(d4_end_ft, static_cast<int64_t>(d4_init_ft));
+
+    auto snap4 = recorder.snapshot(d4_end_ft - 10, d4_end_ft + 10, &drops);
+    STUTTO_ASSERT(snap4.size() == 1);
+    STUTTO_ASSERT(snap4[0].duration_us == 0);
+
+    // --- Sub-case 5: Domain 3 (QPC header + QPC payload, synthetic/test path) ---
+    // Use fresh recorder/session instance to test QPC domain without FILETIME contamination
+    {
+        FlightRecorder rec_qpc(1024);
+        TriggerEngine eng_qpc(trig_cfg, qpc_freq);
+        EtwSessionManager mgr_qpc(rec_qpc, eng_qpc, cfg);
+        mgr_qpc.set_running_for_test(true);
+
+        const uint64_t d5_init_qpc = 500000000ULL;
+        const uint64_t d5_dur_ticks = (150ULL * qpc_freq) / 1000000ULL;
+        const uint64_t d5_end_qpc = d5_init_qpc + d5_dur_ticks;
+
+        PageFaultPayload pf_qpc;
+        pf_qpc.initial_time = static_cast<int64_t>(d5_init_qpc);
+        EVENT_RECORD ev_qpc{};
+        ev_qpc.UserContext = &mgr_qpc;
+        ev_qpc.EventHeader.ProviderId = PAGE_FAULT_GUID;
+        ev_qpc.EventHeader.EventDescriptor.Opcode = 32;
+        ev_qpc.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(d5_end_qpc);
+        ev_qpc.UserData = &pf_qpc;
+        ev_qpc.UserDataLength = sizeof(pf_qpc);
+        EtwSessionManager::on_event_record(&ev_qpc);
+
+        auto snap_qpc = rec_qpc.snapshot(d5_end_qpc - 10, d5_end_qpc + 10, &drops);
+        STUTTO_ASSERT(snap_qpc.size() == 1);
+        STUTTO_ASSERT(snap_qpc[0].category == static_cast<uint16_t>(EventCategory::PAGE_FAULT));
+        STUTTO_ASSERT(snap_qpc[0].qpc_timestamp == d5_end_qpc);
+        const uint64_t expected_d5_dur = static_cast<uint64_t>(qpc_delta_to_us(d5_dur_ticks, qpc_freq));
+        STUTTO_ASSERT(snap_qpc[0].duration_us == expected_d5_dur);
+
+        // --- Sub-case 6: Domain 4 Fallthrough (QPC header + FILETIME payload -> fails closed to 0) ---
+        const uint64_t d6_end_qpc = 600000000ULL;
+        const uint64_t d6_init_ft = sync_utc + 10000ULL; // FILETIME >> QPC
+        pf_qpc.initial_time = static_cast<int64_t>(d6_init_ft);
+        ev_qpc.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(d6_end_qpc);
+        EtwSessionManager::on_event_record(&ev_qpc);
+
+        auto snap_fall = rec_qpc.snapshot(d6_end_qpc - 10, d6_end_qpc + 10, &drops);
+        STUTTO_ASSERT(snap_fall.size() == 1);
+        STUTTO_ASSERT(snap_fall[0].duration_us == 0); // Safely clamped to 0
+
+        mgr_qpc.set_running_for_test(false);
+    }
+
+    // Assert internal state invariants unchanged
+    STUTTO_ASSERT(mgr.unpaired_evictions() == initial_unpaired);
+    STUTTO_ASSERT(mgr.insertion_failures() == initial_ins_fail);
+
+    mgr.set_running_for_test(false);
+    std::cout << "  -> Multi-domain PageFault_HardFault translations PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer ETW Session Manager Tests ===\n";
     try {
@@ -2292,6 +2442,7 @@ int main() {
         test_kernel_mof_guid_routing();
         test_dpc_cross_domain_timestamp_translation();
         test_dpc_pre_sync_underflow_guard();
+        test_page_fault_all_domain_translations();
         std::cout << ">>> All ETW Session Manager tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {
