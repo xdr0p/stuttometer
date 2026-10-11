@@ -535,6 +535,183 @@ static void test_flight_recorder_capacity_extremes() {
               << stuttometer::MAX_BUFFER_SLOTS << " slots) PASSED.\n";
 }
 
+static void test_flight_recorder_in_place_capacity_retention() {
+    std::cout << "[TEST] Running FlightRecorder in-place capacity retention test...\n";
+    stuttometer::FlightRecorder recorder(4096);
+    for (uint64_t i = 0; i < 600; ++i) {
+        stuttometer::EtwEventRecord rec{};
+        rec.qpc_timestamp = 1000 + i;
+        rec.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+        rec.pid = 1000;
+        rec.tid = static_cast<uint32_t>(i);
+        recorder.push(rec);
+    }
+
+    std::vector<stuttometer::EtwEventRecord> buffer;
+    buffer.reserve(8192);
+    const size_t initial_cap = buffer.capacity();
+    STUTTO_ASSERT(initial_cap >= 8192);
+
+    for (int call = 0; call < 3; ++call) {
+        uint64_t drops = 0;
+        const uint64_t from = 1000 + (call * 150);
+        const uint64_t to = from + 199;
+        recorder.snapshot(from, to, buffer, &drops);
+        STUTTO_ASSERT(drops == 0);
+        STUTTO_ASSERT(buffer.size() == 200);
+        STUTTO_ASSERT(buffer.capacity() == initial_cap);
+        STUTTO_ASSERT(buffer.front().qpc_timestamp == from);
+        STUTTO_ASSERT(buffer.back().qpc_timestamp == to);
+    }
+    std::cout << "  -> In-place capacity retention across 3 snapshot calls PASSED.\n";
+}
+
+static void test_flight_recorder_in_place_prepopulated_reset() {
+    std::cout << "[TEST] Running FlightRecorder in-place prepopulated reset test...\n";
+    stuttometer::FlightRecorder recorder(1024);
+    for (uint64_t i = 0; i < 50; ++i) {
+        stuttometer::EtwEventRecord rec{};
+        rec.qpc_timestamp = 2000 + i;
+        rec.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+        rec.pid = 2000;
+        rec.tid = static_cast<uint32_t>(i);
+        recorder.push(rec);
+    }
+
+    // Pre-populate buffer with 100 dummy elements
+    std::vector<stuttometer::EtwEventRecord> buffer(100);
+    for (auto& item : buffer) {
+        item.qpc_timestamp = 999999;
+        item.pid = 0xDEAD;
+    }
+    STUTTO_ASSERT(buffer.size() == 100);
+
+    uint64_t drops = 0;
+    recorder.snapshot(2000, 2049, buffer, &drops);
+    STUTTO_ASSERT(drops == 0);
+    STUTTO_ASSERT(buffer.size() == 50); // Exactly 50 elements from window, no stale elements leaked
+    for (size_t i = 0; i < buffer.size(); ++i) {
+        STUTTO_ASSERT(buffer[i].qpc_timestamp == 2000 + i);
+        STUTTO_ASSERT(buffer[i].pid == 2000);
+    }
+    std::cout << "  -> In-place pre-populated buffer reset PASSED.\n";
+}
+
+static void test_flight_recorder_hybrid_cushion_early_break() {
+    std::cout << "[TEST] Running FlightRecorder hybrid cushion early-break test...\n";
+
+    // 1. Time-skew break at MIN_OUT_OF_WINDOW_SLOTS (64)
+    // qpc_freq = 1000 Hz -> 150 ms = 150 ticks. Window [2000, 3000].
+    {
+        stuttometer::FlightRecorder recorder(1024, 1000);
+        for (uint64_t i = 0; i < 500; ++i) {
+            stuttometer::EtwEventRecord rec{};
+            rec.qpc_timestamp = 1000 + i; // All <= 1499, delta to 2000 is >= 501 ticks (> 150 skew)
+            recorder.push(rec);
+        }
+
+        std::vector<stuttometer::EtwEventRecord> buffer;
+        uint64_t drops = 0;
+        recorder.snapshot(2000, 3000, buffer, &drops);
+        STUTTO_ASSERT(buffer.empty());
+        STUTTO_ASSERT(drops == 0);
+        // Traversal terminates exactly after MIN_OUT_OF_WINDOW_SLOTS (64) slots
+        STUTTO_ASSERT(recorder.last_snapshot_scanned_count_for_test() == 64);
+    }
+
+    // 2. Fallback break at MAX_OUT_OF_WINDOW_SLOTS (2048) — the time-based skew
+    //    threshold cannot fire because the synthetic ts delta (1000 ticks) is far
+    //    below ms_to_qpc_delta(150.0, get_qpc_frequency()) on real hardware.
+    {
+        stuttometer::FlightRecorder recorder_fallback(4096, 0);
+        for (uint64_t i = 0; i < 3000; ++i) {
+            stuttometer::EtwEventRecord rec{};
+            rec.qpc_timestamp = 1000; // Outside window [2000, 3000]
+            recorder_fallback.push(rec);
+        }
+
+        std::vector<stuttometer::EtwEventRecord> buffer;
+        uint64_t drops = 0;
+        recorder_fallback.snapshot(2000, 3000, buffer, &drops);
+        STUTTO_ASSERT(buffer.empty());
+        STUTTO_ASSERT(drops == 0);
+        // Traversal terminates exactly at MAX_OUT_OF_WINDOW_SLOTS (2048) slots
+        STUTTO_ASSERT(recorder_fallback.last_snapshot_scanned_count_for_test() == 2048);
+    }
+
+    std::cout << "  -> Hybrid cushion early-break thresholds (64 and 2048) PASSED.\n";
+}
+
+static void test_flight_recorder_stable_sort_ticket_ordering() {
+    std::cout << "[TEST] Running FlightRecorder ticket-arrival tie-breaking order test...\n";
+    stuttometer::FlightRecorder recorder(1024);
+    const uint64_t same_ts = 1000000;
+    for (uint64_t i = 0; i < 10; ++i) {
+        stuttometer::EtwEventRecord rec{};
+        rec.qpc_timestamp = same_ts;
+        rec.event_id = static_cast<uint16_t>(i); // ticket-arrival ID
+        rec.pid = static_cast<uint32_t>(1000 + i);
+        recorder.push(rec);
+    }
+
+    std::vector<stuttometer::EtwEventRecord> buffer;
+    uint64_t drops = 0;
+    recorder.snapshot(same_ts - 100, same_ts + 100, buffer, &drops);
+    STUTTO_ASSERT(drops == 0);
+    STUTTO_ASSERT(buffer.size() == 10);
+    for (size_t i = 0; i < buffer.size(); ++i) {
+        STUTTO_ASSERT(buffer[i].event_id == static_cast<uint16_t>(i)); // earlier ticket first
+    }
+    std::cout << "  -> Stable sort ticket-arrival tie-breaking order PASSED.\n";
+}
+
+static void test_flight_recorder_lapped_slot_drop_count() {
+    std::cout << "[TEST] Running FlightRecorder lapped-slot drop count test...\n";
+    constexpr size_t CAPACITY = 64;
+    stuttometer::FlightRecorder recorder(CAPACITY);
+
+    for (uint64_t i = 0; i < CAPACITY; ++i) {
+        stuttometer::EtwEventRecord rec{};
+        rec.qpc_timestamp = 1000 + i;
+        recorder.push(rec);
+    }
+
+    std::atomic<bool> stop_writer{false};
+    std::atomic<bool> reader_ready{false};
+    uint64_t total_drops_observed = 0;
+
+    std::thread writer([&recorder, &stop_writer, &reader_ready]() {
+        while (!reader_ready.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        uint64_t counter = 2000;
+        while (!stop_writer.load(std::memory_order_relaxed)) {
+            stuttometer::EtwEventRecord rec{};
+            rec.qpc_timestamp = counter++;
+            recorder.push(rec);
+        }
+    });
+
+    std::vector<stuttometer::EtwEventRecord> buffer;
+    reader_ready.store(true, std::memory_order_release);
+
+    for (int iter = 0; iter < 5000; ++iter) {
+        uint64_t drops = 0;
+        recorder.snapshot(1000, 1000000, buffer, &drops);
+        if (drops > 0) {
+            total_drops_observed += drops;
+            STUTTO_ASSERT(recorder.last_snapshot_dropped_for_test() == drops);
+            break;
+        }
+    }
+    stop_writer.store(true, std::memory_order_relaxed);
+    writer.join();
+
+    STUTTO_ASSERT(total_drops_observed > 0);
+    std::cout << "  -> Lapped slot drop accounting PASSED (detected " 
+              << total_drops_observed << " drops, accessor verified).\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Flight Recorder & Concurrency Tests ===\n";
     try {
@@ -548,6 +725,11 @@ int main() {
         test_flight_recorder_wraparound();
         test_flight_recorder_reverse_snapshot_bounds();
         test_flight_recorder_capacity_extremes();
+        test_flight_recorder_in_place_capacity_retention();
+        test_flight_recorder_in_place_prepopulated_reset();
+        test_flight_recorder_hybrid_cushion_early_break();
+        test_flight_recorder_stable_sort_ticket_ordering();
+        test_flight_recorder_lapped_slot_drop_count();
         test_multithreaded_flight_recorder();
         test_driver_symbol_resolver_thread_safety();
         std::cout << ">>> All Flight Recorder tests PASSED! <<<\n\n";

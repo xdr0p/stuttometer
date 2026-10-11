@@ -439,6 +439,8 @@ void GuiController::session_worker_loop(GuiConfig config) {
     JsonReporter reporter;
     uint32_t report_count = 0;
     uint32_t loop_counter = 0;
+    std::vector<EtwEventRecord> snapshot_buffer;
+    snapshot_buffer.reserve(4096);
 
     while (!stop_worker_requested_.load(std::memory_order_relaxed)) {
         const uint64_t current_qpc = get_current_qpc();
@@ -527,7 +529,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(POST_TRIGGER_DRAIN_STEP_MS));
 
                 uint64_t drops = 0;
-                auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);
+                flight_recorder.snapshot(from_qpc, to_qpc, snapshot_buffer, &drops);
 
                 ProviderContext p_ctx;
                 p_ctx.kernel_dpc_active = session_mgr->is_kernel_session_active() && etw_config.enable_kernel_dpc;
@@ -560,7 +562,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
                     .judder_swing_ratio = config.judder_swing_ratio
                 };
 
-                auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
+                auto report = correlator.correlate(snapshot_buffer, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
 
                 // Auto-save JSON report and CSV to disk if configured (with 100-file rotation cap)
                 if (!config.output_dir.empty()) {

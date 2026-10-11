@@ -356,6 +356,9 @@ int main(int argc, char** argv) {
         g_watcher.start(target_process_name, callbacks);
     }
 
+    std::vector<stuttometer::EtwEventRecord> snapshot_buffer;
+    snapshot_buffer.reserve(4096);
+
     while (!g_stop_requested.load(std::memory_order_relaxed)) {
         const uint64_t current_qpc = stuttometer::get_current_qpc();
         stuttometer::TriggerInfo trigger_info;
@@ -410,7 +413,7 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_STEP_MS));
 
                 uint64_t drops = 0;
-                auto snapshot = flight_recorder.snapshot(from_qpc, to_qpc, &drops);
+                flight_recorder.snapshot(from_qpc, to_qpc, snapshot_buffer, &drops);
 
                 stuttometer::ProviderContext p_ctx;
                 p_ctx.kernel_dpc_active = session_mgr.is_kernel_session_active() && etw_config.enable_kernel_dpc;
@@ -442,7 +445,7 @@ int main(int argc, char** argv) {
                     .judder_swing_ratio = judder_swing_ratio
                 };
 
-                auto report = correlator.correlate(snapshot, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
+                auto report = correlator.correlate(snapshot_buffer, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
 
                 reporter.print_console_summary(report, info, redact);
 
