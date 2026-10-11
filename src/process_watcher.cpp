@@ -57,7 +57,7 @@ bool ProcessWatcher::prepare_target(std::string_view target_process) {
     return true;
 }
 
-void ProcessWatcher::start(std::string target_process, WatcherCallbacks callbacks) {
+void ProcessWatcher::start(std::string target_process, WatcherCallbacks callbacks, bool exact_match_only) {
     std::lock_guard<std::mutex> lock(watcher_mutex_);
     stop_locked();
     if (!prepare_target(target_process)) {
@@ -65,6 +65,8 @@ void ProcessWatcher::start(std::string target_process, WatcherCallbacks callback
     }
 
     target_process_ = std::move(target_process);
+    exact_match_only_ = exact_match_only;
+    attached_pid_.store(0, std::memory_order_release);
     stop_flag_.store(false, std::memory_order_release);
     is_running_.store(true, std::memory_order_release);
     worker_thread_ = std::thread(&ProcessWatcher::worker_loop, this, callbacks);
@@ -88,6 +90,7 @@ void ProcessWatcher::stop_locked() {
     if (worker_thread_.joinable()) {
         worker_thread_.join();
     }
+    attached_pid_.store(0, std::memory_order_release);
     is_running_.store(false, std::memory_order_release);
 }
 
@@ -141,6 +144,10 @@ uint32_t ProcessWatcher::find_target_pid_snapshot() const noexcept {
             break;
         }
 
+        if (exact_match_only_) {
+            continue; // Skip prefix (Pass 2) and expensive towlower scan (Pass 3)
+        }
+
         // Pass 2: Prefix match (only when !target_has_exe_)
         if (!target_has_exe_) {
             if (_wcsnicmp(pe.szExeFile, target_wide_.c_str(), target_wide_.length()) == 0) {
@@ -175,6 +182,7 @@ uint32_t ProcessWatcher::find_target_pid_snapshot() const noexcept {
     } while (Process32NextW(raw_snapshot, &pe));
 
     if (exact_pid != 0) return exact_pid;
+    if (exact_match_only_) return 0;
     if (best_prefix_pid != 0) return best_prefix_pid;
     if (best_substr_pid != 0) return best_substr_pid;
     return 0;
@@ -183,36 +191,54 @@ uint32_t ProcessWatcher::find_target_pid_snapshot() const noexcept {
 void ProcessWatcher::worker_loop(WatcherCallbacks callbacks) {
     const std::string_view name_view{target_process_};
 
+    // Subtlety note: If ETW wins the attach race (on_process_launched -> try_attach_pid),
+    // TriggerEngine state is already attached. On the next watcher poll (up to 250ms later),
+    // idempotent try_attach(found_pid) returns true, allowing the watcher to record attached_pid_,
+    // fire on_attach_success, and notify the GUI within the 250ms window.
+    // Edge case note: If a target launches and terminates within a single 250ms watcher interval,
+    // ETW handles both transitions in the engine, but the GUI never sees the transient process.
     while (!stop_flag_.load(std::memory_order_relaxed)) {
         poll_count_for_test_.fetch_add(1, std::memory_order_relaxed);
         const uint32_t found_pid = find_target_pid_snapshot();
-        const uint32_t active = callbacks.get_active_pid ? callbacks.get_active_pid(callbacks.user_data) : 0;
+        const uint32_t current_attached = attached_pid_.load(std::memory_order_relaxed);
 
         if (found_pid != 0) {
-            if (active != 0 && active != found_pid) {
-                // The process restarted with a different PID; detach old PID first
-                if (callbacks.try_detach && callbacks.try_detach(active, callbacks.user_data)) {
+            // Case 2c: Process restarted with a different PID; detach old PID first
+            if (current_attached != 0 && current_attached != found_pid) {
+                if (callbacks.try_detach && callbacks.try_detach(current_attached, callbacks.user_data)) {
                     if (callbacks.on_detach_success) {
-                        callbacks.on_detach_success(active, name_view, callbacks.user_data);
+                        callbacks.on_detach_success(current_attached, name_view, callbacks.user_data);
+                    }
+                }
+                attached_pid_.store(0, std::memory_order_release);
+            }
+
+            // Case 2a: Initial attach or re-attach after restart
+            if (attached_pid_.load(std::memory_order_relaxed) == 0) {
+                if (callbacks.try_attach && callbacks.try_attach(found_pid, callbacks.user_data)) {
+                    attached_pid_.store(found_pid, std::memory_order_release);
+                    if (callbacks.on_attach_success) {
+                        callbacks.on_attach_success(found_pid, name_view, callbacks.user_data);
                     }
                 }
             }
-            if (callbacks.try_attach && callbacks.try_attach(found_pid, callbacks.user_data)) {
-                if (callbacks.on_attach_success) {
-                    callbacks.on_attach_success(found_pid, name_view, callbacks.user_data);
-                }
-            }
+            // Case 2b: Steady state (current_attached == found_pid) -> no-op
         } else {
-            if (active != 0 && callbacks.try_detach && callbacks.try_detach(active, callbacks.user_data)) {
-                if (callbacks.on_detach_success) {
-                    callbacks.on_detach_success(active, name_view, callbacks.user_data);
+            // Case 3a: Target just exited (found_pid == 0 but was attached)
+            if (current_attached != 0) {
+                if (callbacks.try_detach && callbacks.try_detach(current_attached, callbacks.user_data)) {
+                    if (callbacks.on_detach_success) {
+                        callbacks.on_detach_success(current_attached, name_view, callbacks.user_data);
+                    }
                 }
+                attached_pid_.store(0, std::memory_order_release);
             }
+            // Case 3b: Steady state waiting (found_pid == 0 and attached_pid_ == 0) -> no-op
         }
 
-        // Poll responsive 50ms while waiting for target to launch; poll ~2s once attached
+        // Poll 250ms (5 * 50ms) while waiting for target to launch; poll ~2s once attached
         const bool is_waiting = callbacks.is_waiting ? callbacks.is_waiting(callbacks.user_data) : false;
-        const int sleep_steps = is_waiting ? 1 : 40;
+        const int sleep_steps = is_waiting ? 5 : 40;
         for (int i = 0; i < sleep_steps && !stop_flag_.load(std::memory_order_relaxed); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }

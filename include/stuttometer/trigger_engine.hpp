@@ -311,6 +311,8 @@ private:
     std::atomic<uint64_t> last_dxgi_timestamp_qpc_{0};
     std::atomic<uint64_t> target_attach_qpc_{0};
     std::atomic<uint32_t> last_target_pid_{0};
+    // Idempotent detach token: stores the PID that transitioned to waiting; only meaningful while target_state_ is in waiting state.
+    std::atomic<uint32_t> last_detached_pid_{0};
 
     // Indivisible 64-bit atomic target state: High 32-bits = target_pid, Low 32-bits = waiting_for_process flag
     std::atomic<uint64_t> target_state_{0};

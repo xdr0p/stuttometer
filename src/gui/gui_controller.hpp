@@ -28,6 +28,8 @@ constexpr UINT WM_STUTTO_TRIGGER             = WM_USER + 102; // LPARAM: Diagnos
 constexpr UINT WM_STUTTO_METRICS             = WM_USER + 103; // LPARAM: GuiMetrics* (caller takes ownership)
 constexpr UINT WM_STUTTO_PROCESSES_UPDATED   = WM_USER + 104; // LPARAM: ProcessList* (caller takes ownership)
 constexpr UINT WM_STUTTO_LOG                 = WM_USER + 105; // LPARAM: std::string* (caller takes ownership)
+constexpr UINT WM_STUTTO_TARGET_ATTACHED     = WM_USER + 106; // WPARAM: uint32_t pid
+constexpr UINT WM_STUTTO_TARGET_DETACHED     = WM_USER + 107; // WPARAM: uint32_t pid
 
 enum class GuiSessionState : uint32_t {
     IDLE = 0,

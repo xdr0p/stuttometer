@@ -985,6 +985,34 @@ static void test_trigger_engine_cas_process_attachment() {
                   << ", detach wins: " << detach_wins.load() << "\n";
     }
 
+    // 5. Idempotent Target Attach and Detach (Race Invariant Validation)
+    {
+        stuttometer::TriggerConfig idemp_cfg;
+        idemp_cfg.target_pid = 0;
+        idemp_cfg.target_process_name = "test_target.exe";
+        stuttometer::TriggerEngine idemp_engine(idemp_cfg, 10000000);
+
+        // 1. First attach transitions waiting -> attached
+        STUTTO_ASSERT(idemp_engine.try_attach_pid(1234));
+        STUTTO_ASSERT(idemp_engine.active_target_pid() == 1234);
+
+        // 2. Duplicate attach to same PID succeeds idempotently
+        STUTTO_ASSERT(idemp_engine.try_attach_pid(1234));
+
+        // 3. Attach to different PID fails while attached
+        STUTTO_ASSERT(!idemp_engine.try_attach_pid(5678));
+
+        // 4. First detach transitions attached -> waiting
+        STUTTO_ASSERT(idemp_engine.try_detach_pid(1234));
+        STUTTO_ASSERT(idemp_engine.is_target_waiting());
+
+        // 5. Duplicate detach for same PID succeeds idempotently
+        STUTTO_ASSERT(idemp_engine.try_detach_pid(1234));
+
+        // 6. Detach for different PID fails while waiting
+        STUTTO_ASSERT(!idemp_engine.try_detach_pid(5678));
+    }
+
     std::cout << "  -> TriggerEngine CAS process attachment & concurrency tests PASSED.\n";
 }
 

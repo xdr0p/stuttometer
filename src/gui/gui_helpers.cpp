@@ -87,4 +87,76 @@ HWND create_numeric_edit(HWND parent, const NumericEditDef& def,
     });
 }
 
+namespace {
+    thread_local HHOOK t_cbt_hook = nullptr;
+    thread_local HWND t_target_owner = nullptr;
+
+    LRESULT CALLBACK CenterMessageBoxCbtProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode == HCBT_ACTIVATE) {
+            HWND hDlg = reinterpret_cast<HWND>(wParam);
+            if (hDlg && t_target_owner && IsWindow(t_target_owner)) {
+                // Ensure this is actually a dialog window (standard Win32 dialog class #32770)
+                wchar_t class_name[32]{};
+                if (GetClassNameW(hDlg, class_name, 32) > 0 && wcscmp(class_name, L"#32770") == 0) {
+                    RECT rc_owner{}, rc_dlg{};
+                    GetWindowRect(t_target_owner, &rc_owner);
+                    GetWindowRect(hDlg, &rc_dlg);
+
+                    int dlg_w = rc_dlg.right - rc_dlg.left;
+                    int dlg_h = rc_dlg.bottom - rc_dlg.top;
+                    if (dlg_w > 0 && dlg_h > 0) {
+                        int x = rc_owner.left + ((rc_owner.right - rc_owner.left) - dlg_w) / 2;
+                        int y = rc_owner.top + ((rc_owner.bottom - rc_owner.top) - dlg_h) / 2;
+
+                        // Ensure within work area of the monitor containing owner
+                        HMONITOR hMon = MonitorFromWindow(t_target_owner, MONITOR_DEFAULTTONEAREST);
+                        MONITORINFO mi{ sizeof(MONITORINFO) };
+                        if (GetMonitorInfoW(hMon, &mi)) {
+                            if (x < mi.rcWork.left) x = mi.rcWork.left;
+                            if (y < mi.rcWork.top) y = mi.rcWork.top;
+                            if (x + dlg_w > mi.rcWork.right) x = mi.rcWork.right - dlg_w;
+                            if (y + dlg_h > mi.rcWork.bottom) y = mi.rcWork.bottom - dlg_h;
+                        }
+
+                        SetWindowPos(hDlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+                        // Once centered, unhook immediately so subsequent activations within the modal loop have zero overhead
+                        if (t_cbt_hook) {
+                            UnhookWindowsHookEx(t_cbt_hook);
+                            t_cbt_hook = nullptr;
+                        }
+                    }
+                }
+            }
+        }
+        return CallNextHookEx(t_cbt_hook, nCode, wParam, lParam);
+    }
+} // namespace
+
+int show_centered_message_box(HWND hOwner, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType) noexcept {
+    if (!hOwner || !IsWindow(hOwner)) {
+        return MessageBoxW(hOwner, lpText, lpCaption, uType);
+    }
+
+    t_target_owner = hOwner;
+    t_cbt_hook = SetWindowsHookExW(
+        WH_CBT,
+        CenterMessageBoxCbtProc,
+        NULL,
+        GetCurrentThreadId()
+    );
+
+    int result = MessageBoxW(hOwner, lpText, lpCaption, uType);
+
+    // RAII safety cleanup in case the hook wasn't unhooked during activation
+    if (t_cbt_hook) {
+        UnhookWindowsHookEx(t_cbt_hook);
+        t_cbt_hook = nullptr;
+    }
+    t_target_owner = nullptr;
+
+    return result;
+}
+
 } // namespace stuttometer::gui
+

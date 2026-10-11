@@ -146,4 +146,6 @@ struct NumericEditDef {
 [[nodiscard]] HWND create_numeric_edit(HWND parent, const NumericEditDef& def,
                                        HFONT font) noexcept;
 
+int show_centered_message_box(HWND hOwner, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType) noexcept;
+
 } // namespace stuttometer::gui

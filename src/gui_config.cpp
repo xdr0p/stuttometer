@@ -43,10 +43,11 @@ nlohmann::json serialize_gui_settings_to_json(
     uint32_t hotkey_mods,
     bool sound_cues,
     bool advanced_unlocked,
-    const std::string& last_target_process
+    const std::string& last_target_process,
+    const std::string& browsed_target_process_name
 ) {
     nlohmann::json j;
-    j["settings_version"] = 3;
+    j["settings_version"] = 4;
     j["hotkey_vk"] = hotkey_vk;
     j["hotkey_modifiers"] = hotkey_mods;
     j["sound_cues_enabled"] = sound_cues;
@@ -107,6 +108,7 @@ nlohmann::json serialize_gui_settings_to_json(
 
     j["auto_save_dir"] = wstring_to_utf8_helper(config.output_dir);
     j["last_target_process"] = last_target_process;
+    j["browsed_target_process_name"] = browsed_target_process_name;
 
     return j;
 }
@@ -118,7 +120,8 @@ void deserialize_gui_settings_from_json(
     uint32_t& out_hotkey_mods,
     bool& out_sound_cues,
     bool& out_advanced_unlocked,
-    std::string& out_last_target_process
+    std::string& out_last_target_process,
+    std::string& out_browsed_target_process_name
 ) {
     try {
         if (j.contains("hotkey_vk") && j["hotkey_vk"].is_number_unsigned()) {
@@ -385,6 +388,15 @@ void deserialize_gui_settings_from_json(
         if (j.contains("last_target_process") && j["last_target_process"].is_string()) {
             out_last_target_process = j["last_target_process"].get<std::string>();
         }
+
+        out_browsed_target_process_name.clear();
+        if (j.contains("browsed_target_process_name") && j["browsed_target_process_name"].is_string()) {
+            std::string name = j["browsed_target_process_name"].get<std::string>();
+            if (name.length() <= 260) {
+                out_browsed_target_process_name = std::move(name);
+            }
+        }
+        out_config.browsed_target_process_name = out_browsed_target_process_name;
     } catch (...) {
         // Non-fatal, retain defaults
     }

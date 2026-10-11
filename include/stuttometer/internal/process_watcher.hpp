@@ -10,7 +10,13 @@
 namespace stuttometer {
 
 struct WatcherCallbacks {
-    // Query interface (allows ProcessWatcher to interact with TriggerEngine or GUI state without allocations)
+    // Query & state transition interface (allows ProcessWatcher to interact with TriggerEngine or GUI state)
+    // - try_attach: Idempotent attach request. Returns true if target is attached to `pid` (either transitioning
+    //   from waiting state or confirming engine is already attached to `pid`).
+    // - try_detach: Idempotent detach request. Returns true if target is detached (either transitioning
+    //   from attached to waiting or confirming engine is already waiting for `pid`).
+    // - is_waiting: Returns true if target engine is waiting for process launch.
+    // - get_active_pid: Retained for signature compatibility; ProcessWatcher uses local attached_pid_ tracking.
     bool     (*try_attach)(uint32_t pid, void* user_data) = nullptr;
     bool     (*try_detach)(uint32_t pid, void* user_data) = nullptr;
     bool     (*is_waiting)(void* user_data) = nullptr;
@@ -34,7 +40,7 @@ public:
     ProcessWatcher(ProcessWatcher&&) = delete;
     ProcessWatcher& operator=(ProcessWatcher&&) = delete;
 
-    void start(std::string target_process, WatcherCallbacks callbacks);
+    void start(std::string target_process, WatcherCallbacks callbacks, bool exact_match_only = false);
     void stop();
     bool is_running() const noexcept { return is_running_.load(std::memory_order_acquire); }
 
@@ -42,6 +48,8 @@ public:
     // noexcept: all Win32 calls + stack math, no dynamic allocation-capable operations
     uint32_t find_target_pid_snapshot() const noexcept;
     uint64_t get_poll_count_for_test() const noexcept { return poll_count_for_test_.load(std::memory_order_relaxed); }
+    bool is_exact_match_mode_for_test() const noexcept { return exact_match_only_; }
+    uint32_t attached_pid_for_test() const noexcept { return attached_pid_.load(std::memory_order_relaxed); }
     bool set_target_for_test(std::string_view target_process);
 
 private:
@@ -55,6 +63,8 @@ private:
     std::wstring target_wide_exe_;
     std::wstring target_wide_lower_;
     bool target_has_exe_{false};
+    bool exact_match_only_{false};
+    std::atomic<uint32_t> attached_pid_{0};
     std::atomic<uint64_t> poll_count_for_test_{0};
     std::thread worker_thread_;
     std::atomic<bool> stop_flag_{false};

@@ -234,6 +234,18 @@ static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM 
                 int cl_right = cl_left + (rc_client.right - rc_client.left);
                 int cl_bottom = cl_top + (rc_client.bottom - rc_client.top);
 
+                // Mask and fill only the 4 outer corner regions outside the rounded border
+                // with the parent card brush, preventing any rectangular inner-border artifact.
+                HRGN hrgn_total = CreateRectRgn(rc.left, rc.top, rc.right, rc.bottom);
+                HRGN hrgn_round = CreateRoundRectRgn(rc.left, rc.top, rc.right + 1, rc.bottom + 1, scale_dpi(6), scale_dpi(6));
+                HRGN hrgn_corners = CreateRectRgn(0, 0, 0, 0);
+                CombineRgn(hrgn_corners, hrgn_total, hrgn_round, RGN_DIFF);
+                FillRgn(hdc, hrgn_corners, g_theme.br_card);
+                DeleteObject(hrgn_corners);
+                DeleteObject(hrgn_round);
+                DeleteObject(hrgn_total);
+
+                // Fill the non-client padding area between the rounded border and the client area with input background
                 ExcludeClipRect(hdc, cl_left, cl_top, cl_right, cl_bottom);
                 FillRect(hdc, &rc, g_theme.br_input);
                 SelectClipRgn(hdc, NULL);
@@ -433,7 +445,7 @@ static void update_settings_dependencies(SettingsDialogState* state) {
 static void toggle_advanced_settings(HWND hwnd, SettingsDialogState* state) {
     if (!state) return;
     if (!state->advanced_unlocked) {
-        int res = MessageBoxW(hwnd,
+        int res = show_centered_message_box(hwnd,
             L"Modifying ETW provider tiers, buffer capacities, frame pacing triggers, or anomaly thresholds can impact diagnostic accuracy, memory consumption, or ETW tracing overhead.\n\nAre you sure you want to unlock advanced settings?",
             L"Advanced Settings Safeguard",
             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
@@ -1526,7 +1538,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     state->current_preset = DetectionPreset::CUSTOM;
                     SendMessageW(state->h_combo_preset, CB_SETCURSEL, 4, 0);
                     if (!state->advanced_unlocked) {
-                        int res = MessageBoxW(hwnd,
+                        int res = show_centered_message_box(hwnd,
                             L"Custom profile allows modifying frame pacing multipliers and minimum spike deltas, which directly affect stutter detection sensitivity.\n\nAre you sure you want to unlock advanced settings?",
                             L"Advanced Settings Safeguard",
                             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
@@ -1751,7 +1763,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     double v_fps = _wcstod_l(w_fps_input.c_str(), &end_ptr, c_locale);
                     _free_locale(c_locale);
                     if (end_ptr == w_fps_input.c_str() || *end_ptr != L'\0' || std::isnan(v_fps) || std::isinf(v_fps) || v_fps < 10.0 || v_fps > 500.0) {
-                        MessageBoxW(hwnd, L"Please enter a valid Target FPS Floor between 10 and 500, or 'Auto'.", L"Invalid Setting", MB_OK | MB_ICONWARNING);
+                        show_centered_message_box(hwnd, L"Please enter a valid Target FPS Floor between 10 and 500, or 'Auto'.", L"Invalid Setting", MB_OK | MB_ICONWARNING);
                         return 0;
                     }
                     new_present_manual = true;
@@ -1867,7 +1879,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     UnregisterHotKey(g_hwnd_main, ID_HOTKEY_TOGGLE_CAPTURE);
                     if (!RegisterHotKey(g_hwnd_main, ID_HOTKEY_TOGGLE_CAPTURE, g_hotkey_mods | MOD_NOREPEAT, g_hotkey_vk)) {
                         append_engine_log(L"[WARN] Hotkey " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is in use by another application.");
-                        MessageBoxW(hwnd, (L"Warning: The shortcut " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is currently in use by another application. Shortcut toggle capture will not be active until a different key is selected.").c_str(), L"Hotkey Conflict", MB_OK | MB_ICONWARNING);
+                        show_centered_message_box(hwnd, (L"Warning: The shortcut " + format_hotkey_display(g_hotkey_mods, g_hotkey_vk) + L" is currently in use by another application. Shortcut toggle capture will not be active until a different key is selected.").c_str(), L"Hotkey Conflict", MB_OK | MB_ICONWARNING);
                     }
                     update_metrics_text();
                     relayout_main_window();

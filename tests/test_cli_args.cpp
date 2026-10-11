@@ -904,18 +904,19 @@ static void test_process_watcher_cadence() {
     stuttometer::ProcessWatcher watcher;
     watcher.start("stutto_cadence_test_proc_987654321.exe", cb);
     STUTTO_ASSERT(watcher.is_running());
+    STUTTO_ASSERT(!watcher.is_exact_match_mode_for_test());
 
     // Verify set_target_for_test rejects modification while running to prevent data races
     STUTTO_ASSERT(!watcher.set_target_for_test("other.exe"));
 
-    // 1. Waiting mode (~50ms cadence)
+    // 1. Waiting mode (~250ms cadence)
     is_waiting_flag.store(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     uint64_t c0 = watcher.get_poll_count_for_test();
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
     uint64_t c1 = watcher.get_poll_count_for_test();
     uint64_t delta_waiting = c1 - c0;
-    STUTTO_ASSERT(delta_waiting >= 1 && delta_waiting <= 5);
+    STUTTO_ASSERT(delta_waiting >= 1 && delta_waiting <= 4);
 
     // 2. Attached mode (~2000ms cadence)
     is_waiting_flag.store(false);
@@ -928,6 +929,11 @@ static void test_process_watcher_cadence() {
 
     watcher.stop();
     STUTTO_ASSERT(!watcher.is_running());
+
+    // Verify exact match mode flag
+    watcher.start("stutto_cadence_test_proc_987654321.exe", cb, /* exact_match_only= */ true);
+    STUTTO_ASSERT(watcher.is_exact_match_mode_for_test());
+    watcher.stop();
 
     std::cout << "  -> ProcessWatcher adaptive cadence verified (waiting delta: " 
               << delta_waiting << ", attached delta: " << delta_attached << ").\n";

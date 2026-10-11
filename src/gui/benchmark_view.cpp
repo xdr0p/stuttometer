@@ -1,5 +1,6 @@
 #include "benchmark_view.hpp"
 #include "theme.hpp"
+#include "gui_helpers.hpp"
 #include "gui_string_utils.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
 #include "stuttometer/internal/display_strings.hpp"
@@ -442,7 +443,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 dismiss_benchmark_view(hwnd);
                 return 0;
             } else if (id == IDC_BENCH_RESET_SESSION) {
-                int res = MessageBoxW(hwnd,
+                int res = show_centered_message_box(hwnd,
                     L"This will permanently clear all session benchmark data, including frame pacing statistics and cumulative root-cause attribution.\n\nContinue?",
                     L"Reset Session Benchmark",
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);

@@ -682,7 +682,7 @@ static void test_schema_3_settings() {
     {
         GuiConfig cfg;
         nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, true, "Game.exe");
-        STUTTO_ASSERT(j["settings_version"] == 3);
+        STUTTO_ASSERT(j["settings_version"] == 4);
         STUTTO_ASSERT(j["advanced_unlocked"] == true);
 
         GuiConfig out_cfg;
@@ -785,9 +785,52 @@ static void test_schema_3_settings() {
     std::cout << "  -> PASSED\n";
 }
 
+// 14. Schema 4 & Browsed Target Process Features
+static void test_schema_4_settings() {
+    std::cout << "[TEST] 14. Schema 4 & Browsed Target Process Features...\n";
+
+    // 14a. browsed_target_process_name round-trip
+    {
+        GuiConfig cfg;
+        nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, true, "Game.exe", "CustomGame.exe");
+        STUTTO_ASSERT(j["settings_version"] == 4);
+        STUTTO_ASSERT(j["browsed_target_process_name"] == "CustomGame.exe");
+
+        GuiConfig out_cfg;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false, adv = false;
+        std::string proc;
+        std::string browsed;
+        deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc, browsed);
+        STUTTO_ASSERT(proc == "Game.exe");
+        STUTTO_ASSERT(browsed == "CustomGame.exe");
+        STUTTO_ASSERT(out_cfg.browsed_target_process_name == "CustomGame.exe");
+    }
+
+    // 14b. Absent browsed_target_process_name in older schemas (e.g. v3) defaults to empty
+    {
+        nlohmann::json j;
+        j["settings_version"] = 3;
+        j["detection_preset"] = "balanced";
+        j["last_target_process"] = "Game.exe";
+
+        GuiConfig out_cfg;
+        uint32_t vk = 0, mods = 0;
+        bool snd = false, adv = false;
+        std::string proc;
+        std::string browsed = "dirty_initial_state";
+        deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc, browsed);
+        STUTTO_ASSERT(proc == "Game.exe");
+        STUTTO_ASSERT(browsed.empty());
+        STUTTO_ASSERT(out_cfg.browsed_target_process_name.empty());
+    }
+
+    std::cout << "  -> PASSED\n";
+}
+
 int main() {
     std::cout << "========================================\n";
-    std::cout << "Running test_gui_settings (13 scenarios)\n";
+    std::cout << "Running test_gui_settings (14 scenarios)\n";
     std::cout << "========================================\n";
 
     try {
@@ -804,11 +847,12 @@ int main() {
         test_v1_settings_migration();
         test_deserialization_demotion();
         test_schema_3_settings();
+        test_schema_4_settings();
     } catch (const std::exception& e) {
         std::cerr << "Test failed with exception: " << e.what() << "\n";
         return 1;
     }
 
-    std::cout << "All 13 GUI settings test scenarios PASSED!\n";
+    std::cout << "All 14 GUI settings test scenarios PASSED!\n";
     return 0;
 }

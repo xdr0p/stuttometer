@@ -643,11 +643,21 @@ void TriggerEngine::on_report_completed(uint64_t current_qpc) noexcept {
 bool TriggerEngine::try_attach_pid(uint32_t pid) noexcept {
     uint64_t expected = target_state_.load(std::memory_order_acquire);
     while (true) {
-        if ((expected & 1ULL) == 0) return false; // Already attached or monitor-all
+        const uint32_t cur_pid = static_cast<uint32_t>(expected >> 32);
+        const bool waiting = (expected & 1ULL) != 0;
+
+        // Idempotent success: already attached to this exact PID
+        if (!waiting && cur_pid == pid) {
+            return true;
+        }
+        if (!waiting) return false; // Attached to a different PID
+        if (cur_pid != 0) return false; // Monitor-all (should not happen in waiting state)
+
         const uint64_t desired = (static_cast<uint64_t>(pid) << 32) | 0ULL;
         if (target_state_.compare_exchange_weak(expected, desired,
                                                 std::memory_order_acq_rel,
                                                 std::memory_order_acquire)) {
+            last_detached_pid_.store(0, std::memory_order_release);
             on_target_changed(pid);
             return true;
         }
@@ -660,11 +670,16 @@ bool TriggerEngine::try_detach_pid(uint32_t pid) noexcept {
     while (true) {
         const uint32_t cur_pid = static_cast<uint32_t>(expected >> 32);
         const bool waiting = (expected & 1ULL) != 0;
-        if (waiting || cur_pid != pid) return false;
+        if (waiting) {
+            // Idempotent success: already waiting and matches the PID that was detached
+            return (last_detached_pid_.load(std::memory_order_acquire) == pid);
+        }
+        if (cur_pid != pid) return false;
         const uint64_t desired = (0ULL << 32) | 1ULL;
         if (target_state_.compare_exchange_weak(expected, desired,
                                                 std::memory_order_acq_rel,
                                                 std::memory_order_acquire)) {
+            last_detached_pid_.store(pid, std::memory_order_release);
             on_target_changed(0);
             return true;
         }

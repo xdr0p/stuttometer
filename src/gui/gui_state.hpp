@@ -33,6 +33,7 @@ constexpr int IDC_EDIT_INSPECTOR     = 1015;
 constexpr int IDC_BTN_COPY_CARD      = 1016;
 constexpr int IDC_BTN_EXPORT_CARD    = 1017;
 constexpr int IDC_BTN_SESSION_SUMMARY = 1018;
+constexpr int IDC_BTN_BROWSE_TARGET  = 1019;
 
 // Global Hotkeys
 constexpr int ID_HOTKEY_TOGGLE_CAPTURE = 9001;
@@ -61,6 +62,7 @@ extern int g_selected_stutter_index;
 
 extern HWND g_h_lbl_target;
 extern HWND g_h_combo_process;
+extern HWND g_h_btn_browse_target;
 extern HWND g_h_lbl_sev_filter;
 extern HWND g_h_combo_sev_filter;
 
@@ -87,12 +89,16 @@ extern uint32_t g_hotkey_vk;
 extern uint32_t g_hotkey_mods;
 extern std::wstring g_settings_file_path;
 extern std::string g_settings_last_target_process;
+extern std::string g_browsed_target_process_name;
 extern ProcessList g_cached_processes;
 extern std::wstring g_status_text;
 
 extern GuiSessionState g_current_session_state;
 extern uint64_t g_capture_start_tick;
 extern uint64_t g_capture_elapsed_seconds;
+extern bool g_is_target_waiting;
+extern uint64_t g_target_attach_tick;
+extern std::string g_armed_target_name;
 extern bool g_has_received_data;
 extern uint32_t g_session_stutter_count;
 extern uint32_t g_session_audio_count;
@@ -110,6 +116,8 @@ std::wstring format_duration(uint64_t total_seconds);
 void init_settings_path();
 void load_user_settings();
 void save_user_settings();
+void clear_browsed_target();
+std::string get_running_combo_target_name();
 void update_metrics_text();
 GuiConfig read_gui_config();
 void apply_fonts_to_main_controls();

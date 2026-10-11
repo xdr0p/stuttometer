@@ -17,7 +17,9 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <locale.h>
+#include <filesystem>
 
 #include <vector>
 #include <deque>
@@ -417,6 +419,9 @@ static void clear_stutter_history() {
     g_session_audio_count = 0;
     g_capture_start_tick = 0;
     g_capture_elapsed_seconds = 0;
+    if (g_current_session_state == GuiSessionState::IDLE) {
+        g_status_text = L"IDLE (Ready to monitor)";
+    }
     if (g_controller) {
         auto bench = g_controller->get_session_benchmark();
         if (bench) {
@@ -434,7 +439,11 @@ static void clear_stutter_history() {
 static void handle_processes_updated(std::unique_ptr<ProcessList> procs) {
     if (!procs) return;
 
-    if (*procs == g_cached_processes) {
+    static std::string s_last_browsed_seen;
+    bool browsed_changed = (g_browsed_target_process_name != s_last_browsed_seen);
+    s_last_browsed_seen = g_browsed_target_process_name;
+
+    if (*procs == g_cached_processes && !browsed_changed) {
         return; // List is identical, zero UI churn or listbox flicker
     }
 
@@ -448,7 +457,7 @@ static void handle_processes_updated(std::unique_ptr<ProcessList> procs) {
         }
     }
 
-    if (same_identities) {
+    if (same_identities && !browsed_changed) {
         int cur_sel = static_cast<int>(SendMessageW(g_h_combo_process, CB_GETCURSEL, 0, 0));
         for (size_t i = 0; i < procs->size(); ++i) {
             const auto& p = (*procs)[i];
@@ -482,7 +491,26 @@ static void handle_processes_updated(std::unique_ptr<ProcessList> procs) {
     int all_idx = static_cast<int>(SendMessageW(g_h_combo_process, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"All Processes (System-Wide)")));
     SendMessageW(g_h_combo_process, CB_SETITEMDATA, all_idx, static_cast<LPARAM>(-1));
 
+    // Synthetic entry insertion if browsed target is set and not currently running
+    int synth_idx = CB_ERR;
+    if (!g_browsed_target_process_name.empty()) {
+        std::wstring browsed_w = utf8_to_wstring(g_browsed_target_process_name);
+        bool match_exists = false;
+        for (const auto& p : g_cached_processes) {
+            if (_wcsicmp(p.name.c_str(), browsed_w.c_str()) == 0) {
+                match_exists = true;
+                break;
+            }
+        }
+        if (!match_exists) {
+            synth_idx = static_cast<int>(SendMessageW(g_h_combo_process, CB_ADDSTRING, 0,
+                                         reinterpret_cast<LPARAM>(browsed_w.c_str())));
+            SendMessageW(g_h_combo_process, CB_SETITEMDATA, synth_idx, static_cast<LPARAM>(-2));
+        }
+    }
+
     std::wstring last_target_w = utf8_to_wstring(g_settings_last_target_process);
+    std::wstring browsed_w = utf8_to_wstring(g_browsed_target_process_name);
     int found_idx = CB_ERR;
     for (size_t i = 0; i < g_cached_processes.size(); ++i) {
         const auto& p = g_cached_processes[i];
@@ -493,9 +521,11 @@ static void handle_processes_updated(std::unique_ptr<ProcessList> procs) {
         int item_idx = static_cast<int>(SendMessageW(g_h_combo_process, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str())));
         SendMessageW(g_h_combo_process, CB_SETITEMDATA, item_idx, static_cast<LPARAM>(i));
 
-        if (!selected_proc_name.empty() && _wcsicmp(p.name.c_str(), selected_proc_name.c_str()) == 0) {
+        if (!browsed_w.empty() && _wcsicmp(p.name.c_str(), browsed_w.c_str()) == 0) {
             found_idx = item_idx;
-        } else if (found_idx == CB_ERR && !last_target_w.empty() && _wcsicmp(p.name.c_str(), last_target_w.c_str()) == 0) {
+        } else if (browsed_w.empty() && found_idx == CB_ERR && !selected_proc_name.empty() && _wcsicmp(p.name.c_str(), selected_proc_name.c_str()) == 0) {
+            found_idx = item_idx;
+        } else if (browsed_w.empty() && found_idx == CB_ERR && !last_target_w.empty() && _wcsicmp(p.name.c_str(), last_target_w.c_str()) == 0) {
             found_idx = item_idx;
         }
     }
@@ -506,6 +536,8 @@ static void handle_processes_updated(std::unique_ptr<ProcessList> procs) {
             auto cfg = read_gui_config();
             g_controller->update_target_filter(cfg.target_pid, cfg.target_process_name);
         }
+    } else if (synth_idx != CB_ERR) {
+        SendMessageW(g_h_combo_process, CB_SETCURSEL, static_cast<WPARAM>(synth_idx), 0);
     } else {
         SendMessageW(g_h_combo_process, CB_SETCURSEL, 0, 0);
     }
@@ -556,15 +588,26 @@ static void update_session_ui_state(GuiSessionState state) {
             update_metrics_text();
         }
     } else if (state == GuiSessionState::IDLE || state == GuiSessionState::STOPPING) {
-        if (g_capture_start_tick != 0) {
+        // If capture was manually stopped while actively attached, latch playtime
+        if (g_target_attach_tick != 0) {
+            g_capture_elapsed_seconds = (GetTickCount64() - g_target_attach_tick) / 1000;
+            g_target_attach_tick = 0;
+        } else if (g_capture_start_tick != 0 && g_capture_elapsed_seconds == 0 && g_armed_target_name.empty()) {
+            // System-wide ("All Processes") manual stop: latch from session start
             g_capture_elapsed_seconds = (GetTickCount64() - g_capture_start_tick) / 1000;
-            g_capture_start_tick = 0;
-            update_metrics_text();
         }
+        g_capture_start_tick = 0;
+        update_metrics_text();
     }
 
     if (g_h_btn_session_summary) {
         EnableWindow(g_h_btn_session_summary, TRUE);
+    }
+
+    if (state == GuiSessionState::IDLE) {
+        g_is_target_waiting = false;
+        g_target_attach_tick = 0;
+        g_armed_target_name.clear();
     }
 
     switch (state) {
@@ -573,7 +616,10 @@ static void update_session_ui_state(GuiSessionState state) {
             EnableWindow(g_h_btn_stop, FALSE);
             EnableWindow(g_h_btn_settings, TRUE);
             EnableWindow(g_h_combo_process, TRUE);
-            g_status_text = L"IDLE (Ready to monitor)";
+            EnableWindow(g_h_btn_browse_target, TRUE);
+            g_status_text = (!g_stutters.empty() || g_capture_elapsed_seconds > 0)
+                ? L"IDLE (Session Complete)"
+                : L"IDLE (Ready to monitor)";
             break;
 
         case GuiSessionState::STARTING:
@@ -581,6 +627,7 @@ static void update_session_ui_state(GuiSessionState state) {
             EnableWindow(g_h_btn_stop, FALSE);
             EnableWindow(g_h_btn_settings, FALSE);
             EnableWindow(g_h_combo_process, FALSE);
+            EnableWindow(g_h_btn_browse_target, FALSE);
             g_status_text = L"Starting Trace Sessions...";
             break;
 
@@ -589,6 +636,7 @@ static void update_session_ui_state(GuiSessionState state) {
             EnableWindow(g_h_btn_stop, TRUE);
             EnableWindow(g_h_btn_settings, FALSE);
             EnableWindow(g_h_combo_process, FALSE);
+            EnableWindow(g_h_btn_browse_target, FALSE);
             g_status_text = L"CAPTURING (Kernel + User Active)";
             break;
 
@@ -597,6 +645,7 @@ static void update_session_ui_state(GuiSessionState state) {
             EnableWindow(g_h_btn_stop, TRUE);
             EnableWindow(g_h_btn_settings, FALSE);
             EnableWindow(g_h_combo_process, FALSE);
+            EnableWindow(g_h_btn_browse_target, FALSE);
             g_status_text = L"DEGRADED (User-Only DXGI/Audio)";
             break;
 
@@ -605,6 +654,7 @@ static void update_session_ui_state(GuiSessionState state) {
             EnableWindow(g_h_btn_stop, TRUE);
             EnableWindow(g_h_btn_settings, FALSE);
             EnableWindow(g_h_combo_process, FALSE);
+            EnableWindow(g_h_btn_browse_target, FALSE);
             g_status_text = L"DEGRADED (Kernel-Only DPC/CSwitch)";
             break;
 
@@ -613,14 +663,29 @@ static void update_session_ui_state(GuiSessionState state) {
             EnableWindow(g_h_btn_stop, FALSE);
             EnableWindow(g_h_btn_settings, FALSE);
             EnableWindow(g_h_combo_process, FALSE);
+            EnableWindow(g_h_btn_browse_target, FALSE);
             g_status_text = L"Stopping Trace Sessions...";
             break;
     }
+
+    if (g_is_target_waiting && state != GuiSessionState::STOPPING) {
+        std::wstring armed_w = !g_armed_target_name.empty()
+            ? utf8_to_wstring(g_armed_target_name)
+            : (!g_browsed_target_process_name.empty() ? utf8_to_wstring(g_browsed_target_process_name) : L"target");
+        g_status_text = L"WAITING (Armed for " + armed_w + L")";
+    }
+
     update_clear_button_state();
     if (g_h_list_stutters && ListView_GetItemCount(g_h_list_stutters) == 0) {
         InvalidateRect(g_h_list_stutters, NULL, TRUE);
     }
     InvalidateRect(g_hwnd_main, NULL, FALSE);
+}
+
+static void latch_armed_target(const GuiConfig& cfg) {
+    g_armed_target_name = cfg.target_process_name;
+    g_is_target_waiting = (cfg.target_pid == 0 && !cfg.target_process_name.empty());
+    g_target_attach_tick = (cfg.target_pid != 0) ? GetTickCount64() : 0;
 }
 
 // Auto-fit ListView Column Widths
@@ -676,13 +741,17 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     const int lbl_h = ctrl_h;
     const int gap_lbl_box = scale_dpi(8);
 
-    // Target Process controls (Balanced dropdown width)
+    // Target Process controls (Balanced dropdown width + Browse button)
     const int col1_x = margin + scale_dpi(12);
     const int lbl_target_w = scale_dpi(48);
-    const int combo_proc_w = scale_dpi(235);
+    const int combo_proc_w = scale_dpi(175);
+    const int btn_browse_w = scale_dpi(72);
+    const int gap_combo_btn = scale_dpi(6);
 
     MoveWindow(g_h_lbl_target, col1_x, lbl_y, lbl_target_w, lbl_h, TRUE);
-    MoveWindow(g_h_combo_process, col1_x + lbl_target_w + gap_lbl_box, ctrl_y + scale_dpi(2), combo_proc_w, scale_dpi(250), TRUE);
+    const int combo_x = col1_x + lbl_target_w + gap_lbl_box;
+    MoveWindow(g_h_combo_process, combo_x, ctrl_y + scale_dpi(2), combo_proc_w, scale_dpi(250), TRUE);
+    MoveWindow(g_h_btn_browse_target, combo_x + combo_proc_w + gap_combo_btn, ctrl_y + scale_dpi(2), btn_browse_w, scale_dpi(22), TRUE);
 
     // Preset chip badge anchors the far right of the card with fixed reservation
     const int badge_reserved_w = scale_dpi(220);
@@ -825,13 +894,20 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SendMessageW(g_h_lbl_target, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
             apply_control_dark_theme(g_h_lbl_target);
 
-            g_h_combo_process = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, scale_dpi(235), scale_dpi(250), hwnd, (HMENU)(INT_PTR)IDC_COMBO_PROCESS, NULL, NULL);
+            g_h_combo_process = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, scale_dpi(175), scale_dpi(250), hwnd, (HMENU)(INT_PTR)IDC_COMBO_PROCESS, NULL, NULL);
             SendMessageW(g_h_combo_process, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             SendMessageW(g_h_combo_process, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
             SendMessageW(g_h_combo_process, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
             SendMessageW(g_h_combo_process, CB_SETMINVISIBLE, 10, 0);
             apply_control_dark_theme(g_h_combo_process);
             SetWindowSubclass(g_h_combo_process, DarkComboSubclassProc, 0, 0);
+
+            // Browse Target Button
+            g_h_btn_browse_target = CreateWindowExW(0, L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_BROWSE_TARGET, NULL, NULL);
+            SetPropW(g_h_btn_browse_target, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
+            SetPropW(g_h_btn_browse_target, L"OnCard", reinterpret_cast<HANDLE>(1));
+            SendMessageW(g_h_btn_browse_target, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
+            SetWindowSubclass(g_h_btn_browse_target, DarkButtonSubclassProc, IDC_BTN_BROWSE_TARGET, 0);
 
             // Action Buttons
             g_h_btn_start = CreateWindowExW(0, L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_START, NULL, NULL);
@@ -1036,7 +1112,9 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
                 // Status Dot: Universal Unicode Filled Circle via ClearType
                 COLORREF dot_color = COLOR_TEXT_MUTED;
-                if (g_current_session_state == GuiSessionState::RUNNING) {
+                if (g_is_target_waiting) {
+                    dot_color = RGB(245, 158, 11); // Amber / yellow for armed waiting
+                } else if (g_current_session_state == GuiSessionState::RUNNING) {
                     dot_color = COLOR_ACCENT_EMERALD;
                 } else if (g_current_session_state == GuiSessionState::DEGRADED_USER_ONLY || g_current_session_state == GuiSessionState::DEGRADED_KERNEL_ONLY || g_current_session_state == GuiSessionState::STARTING || g_current_session_state == GuiSessionState::STOPPING) {
                     dot_color = COLOR_ACCENT_AMB;
@@ -1251,6 +1329,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
                 case IDC_BTN_START: {
                     auto cfg = read_gui_config();
+                    latch_armed_target(cfg);
                     if (!g_controller->start_session_async(cfg)) {
                         MessageBoxW(hwnd, L"Capture session is already active or starting.", L"Capture Notice", MB_OK | MB_ICONINFORMATION);
                     }
@@ -1287,8 +1366,100 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     break;
                 }
 
+                case IDC_BTN_BROWSE_TARGET: {
+                    IFileOpenDialog* pDlg = nullptr;
+                    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                                  IID_PPV_ARGS(&pDlg));
+                    if (SUCCEEDED(hr)) {
+                        DWORD opts = 0;
+                        if (SUCCEEDED(pDlg->GetOptions(&opts))) {
+                            pDlg->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+                        }
+                        COMDLG_FILTERSPEC filters[] = {
+                            { L"Executable files (*.exe)", L"*.exe" },
+                            { L"All files (*.*)", L"*.*" }
+                        };
+                        pDlg->SetFileTypes(ARRAYSIZE(filters), filters);
+                        pDlg->SetTitle(L"Select Target Executable");
+
+                        if (SUCCEEDED(pDlg->Show(hwnd))) {
+                            IShellItem* pItem = nullptr;
+                            if (SUCCEEDED(pDlg->GetResult(&pItem))) {
+                                PWSTR pszPath = nullptr;
+                                if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
+                                    std::filesystem::path p(pszPath);
+                                    g_browsed_target_process_name = p.filename().string();
+                                    CoTaskMemFree(pszPath);
+
+                                    // Persist immediately on explicit browse action so the armed target survives
+                                    // even if the user exits before starting or changing other settings.
+                                    save_user_settings();
+
+                                    // Re-run process enumeration so the combo picks up the browsed target
+                                    // (either matching an already-running instance or inserting the synthetic entry).
+                                    if (g_controller && !g_controller->is_capturing()) {
+                                        g_controller->enumerate_graphical_processes_async();
+                                    }
+
+                                    // Synchronously update combo selection immediately so the user sees it selected
+                                    std::wstring browsed_w = utf8_to_wstring(g_browsed_target_process_name);
+                                    int match_idx = CB_ERR;
+                                    int count = static_cast<int>(SendMessageW(g_h_combo_process, CB_GETCOUNT, 0, 0));
+                                    for (int i = 0; i < count; ++i) {
+                                        LPARAM data = SendMessageW(g_h_combo_process, CB_GETITEMDATA, i, 0);
+                                        if (data >= 0 && data < static_cast<LPARAM>(g_cached_processes.size())) {
+                                            if (_wcsicmp(g_cached_processes[data].name.c_str(), browsed_w.c_str()) == 0) {
+                                                match_idx = i;
+                                                break;
+                                            }
+                                        } else if (data == -2) {
+                                            // Existing synthetic entry
+                                            SendMessageW(g_h_combo_process, CB_DELETESTRING, i, 0);
+                                            --count;
+                                            --i;
+                                        }
+                                    }
+                                    if (match_idx != CB_ERR) {
+                                        SendMessageW(g_h_combo_process, CB_SETCURSEL, match_idx, 0);
+                                    } else {
+                                        // Insert synthetic entry right after "All Processes" (index 1)
+                                        int ins_idx = static_cast<int>(SendMessageW(g_h_combo_process, CB_INSERTSTRING, 1,
+                                            reinterpret_cast<LPARAM>(browsed_w.c_str())));
+                                        SendMessageW(g_h_combo_process, CB_SETITEMDATA, ins_idx, static_cast<LPARAM>(-2));
+                                        SendMessageW(g_h_combo_process, CB_SETCURSEL, ins_idx, 0);
+                                    }
+                                    InvalidateRect(g_h_combo_process, NULL, TRUE);
+
+                                    auto cfg = read_gui_config();
+                                    if (g_controller) {
+                                        g_controller->update_target_filter(cfg.target_pid, cfg.target_process_name);
+                                    }
+                                }
+                                pItem->Release();
+                            }
+                        }
+                        pDlg->Release();
+                    }
+                    break;
+                }
+
                 case IDC_COMBO_PROCESS: {
                     if (wmEvent == CBN_SELCHANGE) {
+                        int sel = static_cast<int>(SendMessageW(g_h_combo_process, CB_GETCURSEL, 0, 0));
+                        LPARAM data = (sel != CB_ERR)
+                            ? SendMessageW(g_h_combo_process, CB_GETITEMDATA, sel, 0)
+                            : -1;
+
+                        // Synthetic item selection (-2): target didn't change (still armed for browsed target).
+                        // If already waiting, don't restart watcher unnecessarily.
+                        if (data != -2) {
+                            // User picked a real process or All Processes: clear browsed target
+                            clear_browsed_target();
+                            if (g_controller && !g_controller->is_capturing()) {
+                                g_controller->enumerate_graphical_processes_async();
+                            }
+                        }
+
                         auto cfg = read_gui_config();
                         g_controller->update_target_filter(cfg.target_pid, cfg.target_process_name);
                     } else if (wmEvent == CBN_DROPDOWN) {
@@ -1424,6 +1595,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 auto cur_state = g_controller->current_state();
                 if (cur_state == GuiSessionState::IDLE) {
                     auto cfg = read_gui_config();
+                    latch_armed_target(cfg);
                     g_controller->start_session_async(cfg);
                 } else if (g_controller->is_capturing()) {
                     g_controller->stop_session_async();
@@ -1485,6 +1657,45 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     update_inspector(-1);
                 }
                 update_clear_button_state();
+            }
+            return 0;
+        }
+
+        case WM_STUTTO_TARGET_ATTACHED: {
+            g_is_target_waiting = false;
+            g_target_attach_tick = GetTickCount64();
+            update_session_ui_state(g_current_session_state);
+            update_metrics_text();
+
+            RECT client_rc;
+            GetClientRect(hwnd, &client_rc);
+            RECT rc_pill_base = get_status_pill_rect(client_rc.right - client_rc.left);
+            RECT rc_pill = { rc_pill_base.left - scale_dpi(2), rc_pill_base.top - scale_dpi(2),
+                             rc_pill_base.right + scale_dpi(2), rc_pill_base.bottom + scale_dpi(2) };
+            InvalidateRect(hwnd, &rc_pill, FALSE);
+
+            RECT rc_b = get_telemetry_badge_rect(client_rc.right - client_rc.left);
+            RECT rc_inv = { rc_b.left - scale_dpi(2), rc_b.top - scale_dpi(2),
+                            rc_b.right + scale_dpi(2), rc_b.bottom + scale_dpi(2) };
+            InvalidateRect(hwnd, &rc_inv, FALSE);
+            return 0;
+        }
+
+        case WM_STUTTO_TARGET_DETACHED: {
+            // Latch active gameplay duration from attach tick if attached
+            if (g_target_attach_tick > 0) {
+                g_capture_elapsed_seconds = (GetTickCount64() - g_target_attach_tick) / 1000;
+                g_target_attach_tick = 0;
+            }
+            // Zero g_capture_start_tick so subsequent STOPPING/IDLE transitions do not
+            // overwrite active gameplay time with total session time (including pre-launch wait).
+            g_capture_start_tick = 0;
+            g_is_target_waiting = false;
+            update_metrics_text();
+
+            // Auto-finish the capture session on target exit
+            if (g_controller && g_controller->is_capturing()) {
+                g_controller->stop_session_async();
             }
             return 0;
         }
@@ -1564,7 +1775,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             }
 
             MSG msg;
-            while (PeekMessageW(&msg, hwnd, WM_STUTTO_STATE_CHANGE, WM_STUTTO_LOG, PM_REMOVE)) {
+            while (PeekMessageW(&msg, hwnd, WM_STUTTO_STATE_CHANGE, WM_STUTTO_TARGET_DETACHED, PM_REMOVE)) {
                 if (msg.message == WM_STUTTO_TRIGGER && msg.lParam) {
                     delete reinterpret_cast<DiagnosticReport*>(msg.lParam);
                 } else if (msg.message == WM_STUTTO_METRICS && msg.lParam) {

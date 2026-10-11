@@ -115,6 +115,18 @@ LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
                     int cl_right = cl_left + (rc_client.right - rc_client.left);
                     int cl_bottom = cl_top + (rc_client.bottom - rc_client.top);
 
+                    // Mask and fill only the 4 outer corner regions outside the rounded border
+                    // with the parent card brush, preventing any rectangular inner-border artifact.
+                    HRGN hrgn_total = CreateRectRgn(rc.left, rc.top, rc.right, rc.bottom);
+                    HRGN hrgn_round = CreateRoundRectRgn(rc.left, rc.top, rc.right + 1, rc.bottom + 1, scale_dpi(6), scale_dpi(6));
+                    HRGN hrgn_corners = CreateRectRgn(0, 0, 0, 0);
+                    CombineRgn(hrgn_corners, hrgn_total, hrgn_round, RGN_DIFF);
+                    FillRgn(hdc, hrgn_corners, g_theme.br_card);
+                    DeleteObject(hrgn_corners);
+                    DeleteObject(hrgn_round);
+                    DeleteObject(hrgn_total);
+
+                    // Fill the non-client padding area between the rounded border and the client area with input background
                     ExcludeClipRect(hdc, cl_left, cl_top, cl_right, cl_bottom);
                     FillRect(hdc, &rc, g_theme.br_input);
                     SelectClipRgn(hdc, NULL);

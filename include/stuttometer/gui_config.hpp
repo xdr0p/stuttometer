@@ -75,6 +75,7 @@ struct GuiConfig {
     // Session Filters & Redaction & Auto-Save
     uint32_t target_pid{0};
     std::string target_process_name;
+    std::string browsed_target_process_name;
     bool redact{false};
     std::wstring output_dir;
 
@@ -107,7 +108,8 @@ nlohmann::json serialize_gui_settings_to_json(
     uint32_t hotkey_mods,
     bool sound_cues,
     bool advanced_unlocked,
-    const std::string& last_target_process = ""
+    const std::string& last_target_process = "",
+    const std::string& browsed_target_process_name = ""
 );
 
 // 5-parameter overload preserving backwards compatibility with call sites passing last_target_process as 5th argument
@@ -118,7 +120,7 @@ inline nlohmann::json serialize_gui_settings_to_json(
     bool sound_cues,
     const std::string& last_target_process
 ) {
-    return serialize_gui_settings_to_json(config, hotkey_vk, hotkey_mods, sound_cues, false, last_target_process);
+    return serialize_gui_settings_to_json(config, hotkey_vk, hotkey_mods, sound_cues, false, last_target_process, "");
 }
 
 // 4-parameter overload preserving backwards compatibility
@@ -128,7 +130,7 @@ inline nlohmann::json serialize_gui_settings_to_json(
     uint32_t hotkey_mods,
     bool sound_cues
 ) {
-    return serialize_gui_settings_to_json(config, hotkey_vk, hotkey_mods, sound_cues, false, "");
+    return serialize_gui_settings_to_json(config, hotkey_vk, hotkey_mods, sound_cues, false, "", "");
 }
 
 void deserialize_gui_settings_from_json(
@@ -138,8 +140,26 @@ void deserialize_gui_settings_from_json(
     uint32_t& out_hotkey_mods,
     bool& out_sound_cues,
     bool& out_advanced_unlocked,
-    std::string& out_last_target_process
+    std::string& out_last_target_process,
+    std::string& out_browsed_target_process_name
 );
+
+// 7-parameter overload preserving backwards compatibility with call sites passing 7 arguments
+inline void deserialize_gui_settings_from_json(
+    const nlohmann::json& j,
+    GuiConfig& out_config,
+    uint32_t& out_hotkey_vk,
+    uint32_t& out_hotkey_mods,
+    bool& out_sound_cues,
+    bool& out_advanced_unlocked,
+    std::string& out_last_target_process
+) {
+    std::string dummy_browsed;
+    deserialize_gui_settings_from_json(
+        j, out_config, out_hotkey_vk, out_hotkey_mods, out_sound_cues,
+        out_advanced_unlocked, out_last_target_process, dummy_browsed
+    );
+}
 
 // 6-parameter overload preserving backwards compatibility with existing call sites
 inline void deserialize_gui_settings_from_json(
@@ -151,8 +171,10 @@ inline void deserialize_gui_settings_from_json(
     std::string& out_last_target_process
 ) {
     bool dummy_adv = false;
+    std::string dummy_browsed;
     deserialize_gui_settings_from_json(
-        j, out_config, out_hotkey_vk, out_hotkey_mods, out_sound_cues, dummy_adv, out_last_target_process
+        j, out_config, out_hotkey_vk, out_hotkey_mods, out_sound_cues,
+        dummy_adv, out_last_target_process, dummy_browsed
     );
 }
 

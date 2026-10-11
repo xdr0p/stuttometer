@@ -1,5 +1,6 @@
 #include "gui_state.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
+#include "stuttometer/privilege_utils.hpp"
 
 #include <shlobj.h>
 #include <fstream>
@@ -22,6 +23,7 @@ int g_selected_stutter_index = -1;
 
 HWND g_h_lbl_target = nullptr;
 HWND g_h_combo_process = nullptr;
+HWND g_h_btn_browse_target = nullptr;
 HWND g_h_lbl_sev_filter = nullptr;
 HWND g_h_combo_sev_filter = nullptr;
 
@@ -47,12 +49,16 @@ uint32_t g_hotkey_vk = VK_F11;
 uint32_t g_hotkey_mods = MOD_CONTROL;
 std::wstring g_settings_file_path;
 std::string g_settings_last_target_process;
+std::string g_browsed_target_process_name;
 ProcessList g_cached_processes;
 std::wstring g_status_text = L"IDLE (Ready to monitor)";
 
 GuiSessionState g_current_session_state = GuiSessionState::IDLE;
 uint64_t g_capture_start_tick = 0;
 uint64_t g_capture_elapsed_seconds = 0;
+bool g_is_target_waiting = false;
+uint64_t g_target_attach_tick = 0;
+std::string g_armed_target_name;
 bool g_has_received_data = false;
 uint32_t g_session_stutter_count = 0;
 uint32_t g_session_audio_count = 0;
@@ -167,24 +173,39 @@ void load_user_settings() {
             g_hotkey_mods,
             g_sound_cues_enabled,
             g_advanced_unlocked,
-            g_settings_last_target_process
+            g_settings_last_target_process,
+            g_browsed_target_process_name
         );
     } catch (...) {
         // Non-fatal, keep defaults
     }
 }
 
+std::string get_running_combo_target_name() {
+    if (g_h_combo_process && IsWindow(g_h_combo_process)) {
+        int cur_sel = static_cast<int>(SendMessageW(g_h_combo_process, CB_GETCURSEL, 0, 0));
+        if (cur_sel > 0) {
+            LRESULT data = SendMessageW(g_h_combo_process, CB_GETITEMDATA, cur_sel, 0);
+            if (data >= 0 && data < static_cast<LRESULT>(g_cached_processes.size())) {
+                return wstring_to_utf8(g_cached_processes[data].name);
+            }
+        }
+    }
+    return "";
+}
+
 void save_user_settings() {
     if (g_settings_file_path.empty()) return;
     try {
-        GuiConfig active_cfg = read_gui_config();
+        std::string running_target = get_running_combo_target_name();
         nlohmann::json j = serialize_gui_settings_to_json(
             g_settings_config,
             g_hotkey_vk,
             g_hotkey_mods,
             g_sound_cues_enabled,
             g_advanced_unlocked,
-            active_cfg.target_process_name
+            running_target,
+            g_browsed_target_process_name
         );
 
         std::ofstream f(g_settings_file_path);
@@ -196,14 +217,33 @@ void save_user_settings() {
     }
 }
 
+void clear_browsed_target() {
+    if (g_browsed_target_process_name.empty()) return;
+    g_browsed_target_process_name.clear();
+    save_user_settings();
+}
+
 void update_metrics_text() {
-    uint64_t elapsed_secs = (g_capture_start_tick != 0) 
-        ? (GetTickCount64() - g_capture_start_tick) / 1000 
-        : g_capture_elapsed_seconds;
-        
+    uint64_t elapsed_secs = 0;
+    uint32_t stutters = g_session_stutter_count;
+
+    if (g_is_target_waiting) {
+        // While waiting for target process to launch, hold time and stutter count at 0
+        elapsed_secs = 0;
+        stutters = 0;
+    } else if (g_target_attach_tick > 0) {
+        // Target attached: measure time from attachment
+        elapsed_secs = (GetTickCount64() - g_target_attach_tick) / 1000;
+    } else if (g_capture_start_tick != 0) {
+        // System-wide (All Processes): measure time from capture start
+        elapsed_secs = (GetTickCount64() - g_capture_start_tick) / 1000;
+    } else {
+        elapsed_secs = g_capture_elapsed_seconds;
+    }
+
     std::wostringstream oss;
     oss << L"Time: " << format_duration(elapsed_secs)
-        << L"  |  Stutters: " << g_session_stutter_count;
+        << L"  |  Stutters: " << stutters;
     if (g_settings_config.enable_audio) {
         oss << L"  |  Audio: " << g_session_audio_count;
     }
@@ -213,6 +253,24 @@ void update_metrics_text() {
 GuiConfig read_gui_config() {
     GuiConfig cfg = g_settings_config;
 
+    // Browsed target takes precedence when set (CBN_SELCHANGE clears it on
+    // any deliberate non-synthetic combo selection). Prefer this over combo
+    // itemData to remain race-free while an async combo refresh is in flight.
+    if (!g_browsed_target_process_name.empty()) {
+        for (const auto& p : g_cached_processes) {
+            if (matches_process_name(wstring_to_utf8(p.name), g_browsed_target_process_name)) {
+                cfg.target_pid = p.pid;
+                cfg.target_process_name = wstring_to_utf8(p.name);
+                return cfg;
+            }
+        }
+        // Target not currently running — armed waiting mode.
+        cfg.target_pid = 0;
+        cfg.target_process_name = g_browsed_target_process_name;
+        return cfg;
+    }
+
+    // No browsed target — use combo selection.
     if (g_h_combo_process && IsWindow(g_h_combo_process)) {
         int cur_sel = static_cast<int>(SendMessageW(g_h_combo_process, CB_GETCURSEL, 0, 0));
         if (cur_sel > 0) {
@@ -222,10 +280,13 @@ GuiConfig read_gui_config() {
                 cfg.target_process_name = wstring_to_utf8(g_cached_processes[data].name);
             }
         } else if (cur_sel == 0) {
+            // "All Processes (System-Wide)"
             cfg.target_pid = 0;
             cfg.target_process_name.clear();
         }
     }
+    // Fallthrough (C-3): no combo, no browsed target. cfg retains g_settings_config
+    // defaults, which today never include a stale target_process_name.
 
     return cfg;
 }
@@ -238,6 +299,7 @@ void apply_fonts_to_main_controls() {
         SendMessageW(g_h_combo_process, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));
         SendMessageW(g_h_combo_process, CB_SETITEMHEIGHT, (WPARAM)0, (LPARAM)scale_dpi(22));
     }
+    if (g_h_btn_browse_target) SendMessageW(g_h_btn_browse_target, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_combo_sev_filter) {
         SendMessageW(g_h_combo_sev_filter, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
         SendMessageW(g_h_combo_sev_filter, CB_SETITEMHEIGHT, (WPARAM)-1, (LPARAM)scale_dpi(20));

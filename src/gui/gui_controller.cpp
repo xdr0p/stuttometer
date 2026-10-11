@@ -137,15 +137,35 @@ void GuiController::shutdown() {
 WatcherCallbacks GuiController::make_watcher_callbacks() {
     WatcherCallbacks cb;
     cb.user_data = this;
+
+    // Lock ordering invariant: trigger_engine_mutex_ is held here, and
+    // SessionBenchmark::retarget() acquires summary_mutex_ then attribution_mutex_.
+    // The same nesting order is used in GuiController::update_target_filter().
     cb.try_attach = [](uint32_t pid, void* ud) -> bool {
         auto* self = static_cast<GuiController*>(ud);
         std::lock_guard<std::mutex> lock(self->trigger_engine_mutex_);
-        return self->active_trigger_engine_ ? self->active_trigger_engine_->try_attach_pid(pid) : false;
+        if (!self->active_trigger_engine_) return false;
+        if (!self->active_trigger_engine_->try_attach_pid(pid)) return false;
+        if (self->session_benchmark_) {
+            self->session_benchmark_->retarget(pid);
+        }
+        if (self->hwnd_ && IsWindow(self->hwnd_)) {
+            PostMessageW(self->hwnd_, WM_STUTTO_TARGET_ATTACHED, static_cast<WPARAM>(pid), 0);
+        }
+        return true;
     };
     cb.try_detach = [](uint32_t pid, void* ud) -> bool {
         auto* self = static_cast<GuiController*>(ud);
         std::lock_guard<std::mutex> lock(self->trigger_engine_mutex_);
-        return self->active_trigger_engine_ ? self->active_trigger_engine_->try_detach_pid(pid) : false;
+        if (!self->active_trigger_engine_) return false;
+        if (!self->active_trigger_engine_->try_detach_pid(pid)) return false;
+        if (self->session_benchmark_) {
+            self->session_benchmark_->retarget(0);
+        }
+        if (self->hwnd_ && IsWindow(self->hwnd_)) {
+            PostMessageW(self->hwnd_, WM_STUTTO_TARGET_DETACHED, static_cast<WPARAM>(pid), 0);
+        }
+        return true;
     };
     cb.is_waiting = [](void* ud) -> bool {
         auto* self = static_cast<GuiController*>(ud);
@@ -156,6 +176,30 @@ WatcherCallbacks GuiController::make_watcher_callbacks() {
         auto* self = static_cast<GuiController*>(ud);
         std::lock_guard<std::mutex> lock(self->trigger_engine_mutex_);
         return self->active_trigger_engine_ ? self->active_trigger_engine_->active_target_pid() : 0;
+    };
+    cb.on_attach_success = [](uint32_t pid, std::string_view name, void* ud) {
+        auto* self = static_cast<GuiController*>(ud);
+        std::string log_msg = "[WATCHER] Attached to " + std::string(name) + " (PID " + std::to_string(pid) + ")";
+        if (self->hwnd_ && IsWindow(self->hwnd_)) {
+            auto* p_msg = new std::string(std::move(log_msg));
+            if (!PostMessage(self->hwnd_, WM_STUTTO_LOG, 0, reinterpret_cast<LPARAM>(p_msg))) {
+                delete p_msg;
+            }
+        } else {
+            append_engine_log(utf8_to_wstring(log_msg));
+        }
+    };
+    cb.on_detach_success = [](uint32_t /*pid*/, std::string_view name, void* ud) {
+        auto* self = static_cast<GuiController*>(ud);
+        std::string log_msg = "[WATCHER] Target closed — session complete (" + std::string(name) + ")";
+        if (self->hwnd_ && IsWindow(self->hwnd_)) {
+            auto* p_msg = new std::string(std::move(log_msg));
+            if (!PostMessage(self->hwnd_, WM_STUTTO_LOG, 0, reinterpret_cast<LPARAM>(p_msg))) {
+                delete p_msg;
+            }
+        } else {
+            append_engine_log(utf8_to_wstring(log_msg));
+        }
     };
     return cb;
 }
@@ -234,7 +278,7 @@ void GuiController::update_target_filter(uint32_t pid, const std::string& proces
     if (should_stop_watcher) {
         watcher_.stop();
     } else if (should_start_watcher) {
-        watcher_.start(process_name, make_watcher_callbacks());
+        watcher_.start(process_name, make_watcher_callbacks(), /* exact_match_only= */ true);
     }
 }
 
@@ -378,7 +422,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
 
     // Dedicated background thread for asynchronous process name watcher (zero jitter on trigger loop)
     if (!config.target_process_name.empty()) {
-        watcher_.start(config.target_process_name, make_watcher_callbacks());
+        watcher_.start(config.target_process_name, make_watcher_callbacks(), /* exact_match_only= */ true);
     }
 
     if (!config.output_dir.empty()) {
