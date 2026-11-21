@@ -84,3 +84,11 @@ This document defines standing invariants and operational constraints for automa
 
 - **Workspace Tooling Invariant:** `repomix.config.json` and `split_codebase.ps1` in the repository root are permanent, core developer workflow files. Never delete, relocate, or modify them during cleanups or refactorings unless explicitly instructed by the user.
 
+---
+
+## 8. Release & Version Management
+
+- **Canonical Release Tool:** Always use `python scripts/release.py <version> [options]` (or `--bump {patch,minor,major}`) whenever upping the version or creating a release. Never bump versions or create tags manually.
+- The script automatically updates canonical version targets (`include/stuttometer/version.hpp` and `src/gui/stuttometer_gui.manifest`), audits the codebase for stray version literals, compiles Release binaries, runs the test suite, packages the release zip, commits, tags, pushes, and publishes the official GitHub release with binary assets via the GitHub REST API.
+
+
