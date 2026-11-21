@@ -330,6 +330,54 @@ static void test_cli_to_json_profile_string_mapping() {
     std::cout << "  -> CLI String -> Enum -> JSON String Mapping PASSED.\n";
 }
 
+static void test_schema_1_5_report_and_event_context_serialization() {
+    std::cout << "[TEST] Validating Schema 1.5 Default Serialization & Event Context Shape...\n";
+
+    stuttometer::JsonReporter reporter;
+    stuttometer::DiagnosticReport default_report;
+
+    // 1. Default-constructed report must serialize with schema_version 1.5
+    auto root_default = reporter.to_json(default_report, false);
+    STUTTO_ASSERT(root_default["schema_version"] == "1.5");
+    STUTTO_ASSERT(root_default.contains("event_context"));
+    STUTTO_ASSERT(root_default["event_context"]["classification"] == "UNCLASSIFIED");
+    STUTTO_ASSERT(root_default["event_context"]["confidence"] == 0.0);
+    STUTTO_ASSERT(root_default["event_context"]["policy_applied"] == false);
+    STUTTO_ASSERT(root_default["event_context"]["signals"]["post_frame_samples"] == 0);
+    STUTTO_ASSERT(root_default["event_context"]["signals"].contains("disk_post_count"));
+    STUTTO_ASSERT(root_default["event_context"]["signals"].contains("disk_post_bytes"));
+
+    // 2. Report with populated event_context
+    stuttometer::DiagnosticReport populated_report;
+    populated_report.event_context.classification = stuttometer::EventContextClass::LOADING_SCREEN;
+    populated_report.event_context.confidence = 0.85;
+    populated_report.event_context.policy_applied = false;
+    populated_report.event_context.post_frame_samples = 12;
+    populated_report.event_context.post_median_ms = 33.3;
+    populated_report.event_context.post_dispersion = 0.05;
+    populated_report.event_context.pre_baseline_ms = 16.6;
+    populated_report.event_context.disk_event_count = 50;
+    populated_report.event_context.disk_total_bytes = 10485760;
+    populated_report.event_context.disk_post_count = 20;
+    populated_report.event_context.disk_post_bytes = 4194304;
+    populated_report.event_context.voluntary_wait_fraction = 0.88;
+    populated_report.event_context.voluntary_available = true;
+    populated_report.event_context.present_mode_changed = false;
+    populated_report.event_context.impulse_confirmed = false;
+    populated_report.event_context.stutter_evidence_dominant = false;
+
+    auto root_pop = reporter.to_json(populated_report, false);
+    STUTTO_ASSERT(root_pop["schema_version"] == "1.5");
+    STUTTO_ASSERT(root_pop["event_context"]["classification"] == "LOADING_SCREEN");
+    STUTTO_ASSERT(root_pop["event_context"]["confidence"] == 0.85);
+    STUTTO_ASSERT(root_pop["event_context"]["policy_applied"] == false);
+    STUTTO_ASSERT(root_pop["event_context"]["signals"]["disk_post_count"] == 20);
+    STUTTO_ASSERT(root_pop["event_context"]["signals"]["disk_post_bytes"] == 4194304);
+    STUTTO_ASSERT(root_pop["event_context"]["signals"]["voluntary_available"] == true);
+
+    std::cout << "  -> Schema 1.5 Report & Event Context Shape PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Report Serialization Consistency Tests ===\n";
     try {
@@ -338,6 +386,7 @@ int main() {
         test_file_save_and_load();
         test_schema_1_2_benchmark_summary_serialization();
         test_cli_to_json_profile_string_mapping();
+        test_schema_1_5_report_and_event_context_serialization();
         std::cout << ">>> All Report Serialization Consistency tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

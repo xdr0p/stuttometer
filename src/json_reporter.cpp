@@ -17,8 +17,8 @@ namespace stuttometer {
 nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact) const {
     nlohmann::json root;
 
-    // Note: DiagnosticReport and BenchmarkSummary each independently use Schema 1.4.
-    root["schema_version"] = report.schema_version.empty() ? "1.4" : report.schema_version;
+    // Note: DiagnosticReport uses Schema 1.5.
+    root["schema_version"] = report.schema_version.empty() ? "1.5" : report.schema_version;
     root["tool_version"]   = report.tool_version.empty() ? std::string(TOOL_VERSION) : report.tool_version;
     root["timestamp_utc"]  = report.timestamp_utc;
 
@@ -152,6 +152,28 @@ nlohmann::json JsonReporter::to_json(const DiagnosticReport& report, bool redact
         });
     }
     root["frame_timeline"] = std::move(timeline_arr);
+
+    // Event Context Classification (v1.5)
+    root["event_context"] = {
+        {"classification", event_context_class_to_string(report.event_context.classification)},
+        {"confidence", report.event_context.confidence},
+        {"policy_applied", report.event_context.policy_applied},
+        {"signals", {
+            {"post_frame_samples", report.event_context.post_frame_samples},
+            {"post_median_ms", report.event_context.post_median_ms},
+            {"post_dispersion", report.event_context.post_dispersion},
+            {"pre_baseline_ms", report.event_context.pre_baseline_ms},
+            {"disk_event_count", report.event_context.disk_event_count},
+            {"disk_total_bytes", report.event_context.disk_total_bytes},
+            {"disk_post_count", report.event_context.disk_post_count},
+            {"disk_post_bytes", report.event_context.disk_post_bytes},
+            {"voluntary_wait_fraction", report.event_context.voluntary_wait_fraction},
+            {"voluntary_available", report.event_context.voluntary_available},
+            {"present_mode_changed", report.event_context.present_mode_changed},
+            {"impulse_confirmed", report.event_context.impulse_confirmed},
+            {"stutter_evidence_dominant", report.event_context.stutter_evidence_dominant}
+        }}
+    };
 
     // Statistics and telemetry
     root["statistics"] = {

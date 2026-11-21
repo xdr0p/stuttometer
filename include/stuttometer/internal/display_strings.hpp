@@ -16,4 +16,8 @@ namespace stuttometer::display {
 // Unknown keys are returned unchanged.
 [[nodiscard]] std::string_view hypothesis_display(std::string_view raw) noexcept;
 
+// Returns friendly UTF-8 display name for an event context classification string.
+// Unknown keys are returned unchanged.
+[[nodiscard]] std::string_view event_context_display(std::string_view raw) noexcept;
+
 } // namespace stuttometer::display

@@ -1030,6 +1030,12 @@ static void test_rolling_frame_stats_alignment_and_cache_lines() {
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, judder_episode_active) == 320);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, judder_episode_start_qpc) == 328);
     STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, judder_episode_last_alt_qpc) == 336);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, streaming_sigma_us) == 344);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, last_promoted_mean_us) == 348);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, candidate_eval_count) == 352);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, hysteresis_factor_q100) == 354);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, baseline_observed_var_us) == 356);
+    STUTTO_ASSERT(offsetof(stuttometer::RollingFrameStats, _adaptation_reserved) == 360);
 
     std::cout << "  -> RollingFrameStats alignment and cache line verification PASSED.\n";
 }
@@ -2364,6 +2370,14 @@ static void test_hybrid_candidate_1000_sample_reseed_policy() {
             stuttometer::DEFAULT_SPIKE_MULTIPLIER, stuttometer::DEFAULT_MIN_SPIKE_DELTA_MS, true, stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 25.0,
             stuttometer::PacingProfile::CUSTOM
         );
+        if (stats.candidate_count != i) {
+            std::cout << "[DEBUG2] i=" << i << " candidate_count=" << stats.candidate_count 
+                      << " is_stutter=" << res.is_stutter << " reason=" << (int)res.reason 
+                      << " skips=" << (int)stats.candidate_consecutive_skips << "\n";
+        }
+        if (stats.candidate_count != i) {
+            std::cout << "[DEBUG_FAIL] i=" << i << " candidate_count=" << stats.candidate_count << " dur=" << dur << " res.is_stutter=" << res.is_stutter << " res.reason=" << (int)res.reason << "\n";
+        }
         STUTTO_ASSERT(!res.is_stutter);
         STUTTO_ASSERT(stats.candidate_count == i);
     }
@@ -2398,6 +2412,107 @@ static void test_hybrid_candidate_1000_sample_reseed_policy() {
     STUTTO_ASSERT(stats.candidate_count == 2);
 
     std::cout << "  -> D8 1000-sample cap clear-and-reseed policy PASSED.\n";
+}
+
+static void test_variable_framerate_baseline_adaptation_with_hysteresis() {
+    std::cout << "[TEST] Verifying M3 variable-framerate baseline adaptation with hysteresis...\n";
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::RollingFrameStats stats{};
+    stuttometer::reset_frame_stats(stats, 1000);
+
+    // Initial state verification
+    STUTTO_ASSERT(stats.streaming_sigma_us == 0);
+    STUTTO_ASSERT(stats.last_promoted_mean_us == 0);
+    STUTTO_ASSERT(stats.candidate_eval_count == 0);
+    STUTTO_ASSERT(stats.hysteresis_factor_q100 == stuttometer::pacing_tuning::HYSTERESIS_BASE_Q100);
+
+    uint64_t qpc = 1000000ULL;
+    // 1. Establish initial baseline with variable frame rate (~100 FPS, mean 10.0 ms, alternating 8.8 ms / 11.2 ms)
+    for (int i = 0; i < 64; ++i) {
+        const double dur = (i % 2 == 0) ? 8.8 : 11.2;
+        qpc += stuttometer::ms_to_qpc_delta(dur, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, dur, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true,
+            stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 35.0,
+            stuttometer::PacingProfile::HIGH_REFRESH
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+    }
+    STUTTO_ASSERT(stats.sample_count == 64);
+    const double base_mean = stuttometer::calculate_mean_ms(stats);
+    STUTTO_ASSERT(std::abs(base_mean - 10.0) < 0.1);
+    const double base_stddev = stuttometer::calculate_stddev_ms(stats);
+    STUTTO_ASSERT(base_stddev > 1.0); // Baseline has ~1.2 ms standard deviation (~12% CV)
+
+    // 2. Transition to a lower variable framerate (~50 FPS, mean 20.0 ms, fluctuating 17.8 ms / 22.2 ms)
+    // Every frame >= 14.0 ms trips relative spike (>= 1.4x vs 10.0 ms baseline) and routes to candidate.
+    // Frame 1 seeds the candidate at 20.0 ms (20.0 / 10.0 = 2.0x spike)
+    const double dur_seed = 20.0;
+    qpc += stuttometer::ms_to_qpc_delta(dur_seed, qpc_freq);
+    auto res_seed = stuttometer::evaluate_frame_pacing(
+        stats, dur_seed, qpc, qpc_freq,
+        stuttometer::FrameTriggerMode::HYBRID,
+        stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true,
+        stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 35.0,
+        stuttometer::PacingProfile::HIGH_REFRESH
+    );
+    STUTTO_ASSERT(res_seed.is_stutter);
+    STUTTO_ASSERT(res_seed.reason == stuttometer::TriggerReason::RELATIVE_SPIKE);
+    STUTTO_ASSERT(stats.candidate_count == 1);
+
+    // Frames 2..59: candidate accumulates around 20.0 ms (alternating between 17.8 and 22.2 ms)
+    // stddev of candidate is ~2.2 ms (11.0% of 20 ms, which exceeds fixed 0.10 * mean = 2.0 ms)
+    // dev_ms <= 2.2 ms <= 3.0 ms consistency tol -> 100% strict matches (0 skips)
+    for (int i = 2; i <= 59; ++i) {
+        double dur = (i % 2 == 0) ? 21.0 : 19.0;
+        if (i >= 4) {
+            dur = (i % 2 == 0) ? 22.2 : 17.8;
+        }
+        qpc += stuttometer::ms_to_qpc_delta(dur, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, dur, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true,
+            stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 35.0,
+            stuttometer::PacingProfile::HIGH_REFRESH
+        );
+        STUTTO_ASSERT(!res.is_stutter);
+        STUTTO_ASSERT(stats.candidate_count == i);
+    }
+
+    // Feed remaining frames through promotion (frame 60+ evaluates adaptive variance & hysteresis)
+    bool promoted = false;
+    for (int i = 60; i <= 75; ++i) {
+        const double dur = (i % 2 == 0) ? 22.2 : 17.8;
+        qpc += stuttometer::ms_to_qpc_delta(dur, qpc_freq);
+        auto res = stuttometer::evaluate_frame_pacing(
+            stats, dur, qpc, qpc_freq,
+            stuttometer::FrameTriggerMode::HYBRID,
+            stuttometer::HIGH_REFRESH_SPIKE_MULTIPLIER, stuttometer::HIGH_REFRESH_MIN_DELTA_MS, true,
+            stuttometer::pacing_tuning::DEFAULT_JUDDER_SWING_RATIO, 35.0,
+            stuttometer::PacingProfile::HIGH_REFRESH
+        );
+        if (!res.is_stutter && stats.candidate_count == 0) {
+            // Promoted!
+            promoted = true;
+            STUTTO_ASSERT(std::abs(res.baseline_avg_ms - 20.0) < 0.5);
+            break;
+        }
+    }
+    STUTTO_ASSERT(promoted);
+    STUTTO_ASSERT(stats.last_promoted_mean_us > 0);
+    STUTTO_ASSERT(stats.streaming_sigma_us > 0);
+
+    // Verify reset_frame_stats clears M3 state cleanly
+    stuttometer::reset_frame_stats(stats, qpc);
+    STUTTO_ASSERT(stats.streaming_sigma_us == 0);
+    STUTTO_ASSERT(stats.last_promoted_mean_us == 0);
+    STUTTO_ASSERT(stats.candidate_eval_count == 0);
+    STUTTO_ASSERT(stats.hysteresis_factor_q100 == stuttometer::pacing_tuning::HYSTERESIS_BASE_Q100);
+
+    std::cout << "  -> M3 variable-framerate baseline adaptation with hysteresis PASSED.\n";
 }
 
 int main() {
@@ -2449,8 +2564,9 @@ int main() {
         test_hybrid_static_fallback_cadence_routing();
         test_hybrid_candidate_staleness_sweep_10s();
         test_hybrid_candidate_1000_sample_reseed_policy();
+        test_variable_framerate_baseline_adaptation_with_hysteresis();
 
-        std::cout << "\n>>> ALL 43 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
+        std::cout << "\n>>> ALL 44 FRAME PACING UNIT TESTS PASSED SUCCESSFULLY! <<<\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "\n[TEST FAILED] Exception: " << e.what() << "\n";

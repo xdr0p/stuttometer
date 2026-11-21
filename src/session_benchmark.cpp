@@ -256,7 +256,10 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
         }
     }
 
-    const MetricSeverity sev = classify_severity(report.trigger, report.present_threshold_ms);
+    const double vblank_ref = (report.hardware_vblank_ms > 0.0)
+        ? report.hardware_vblank_ms
+        : report.present_threshold_ms;
+    const MetricSeverity sev = classify_severity(report.trigger, vblank_ref);
     const double stall_ms = report.trigger.duration_ms;
     const bool is_judder =
         (report.trigger.source == TriggerSource::FRAME_PACING_JUDDER ||

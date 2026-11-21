@@ -619,6 +619,10 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 : L"\u2014";
             COLORREF low_1_color = (summary.frametimes.low_1pct_fps > 0.0) ? RGB(203, 213, 225) : RGB(148, 163, 184);
 
+            // Architectural note: The static thresholds below (low_01pct_fps < 30/< 60,
+            // net_stall_ms > 100, worst_stutter_ms > 50) are aggregate-level session summary
+            // display heuristics. They operate intentionally outside the per-trigger perceptual
+            // severity model (classify_severity).
             std::wstring low_01_str;
             COLORREF low_01_color;
             if (summary.frametimes.low_01pct_fps <= 0.0) {

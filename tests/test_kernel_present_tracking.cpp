@@ -6,6 +6,7 @@
 #include "stuttometer/privilege_utils.hpp"
 #include "stuttometer/session_benchmark.hpp"
 #include <stuttometer/internal/dxgkrnl_layout.hpp>
+#include "stuttometer/internal/transition_thresholds.hpp"
 #include <iostream>
 #include <unordered_set>
 
@@ -994,12 +995,21 @@ static void test_dxgi_duplicate_not_in_frame_timeline() {
     // Poll to get the trigger
     stuttometer::TriggerInfo trig{};
     uint64_t from_qpc = 0, to_qpc = 0;
-    // poll_state compares against post_target_qpc_, which the trigger engine now stores
+    // poll_state compares against post_target_qpc_, which the trigger engine stores
     // using real get_current_qpc() (QPC domain, post-FileTime-domain fix), NOT the synthetic ETW
-    // timestamp passed to on_dxgi_present(). Use real QPC here so the post-window deadline
-    // is actually reachable.
+    // timestamp passed to on_dxgi_present().
+    //
+    // Probe Extension Invariant (D5):
+    // The 200 ms stall (>= 100 ms, >= 8x baseline, target_pid != 0) is eligible for the adaptive
+    // probe window (PROBE_WINDOW_MS = 350 ms). An intermediate poll at +35 ms must return false because
+    // the engine is still actively in COLLECTING_POST extending the post window.
+    const uint64_t early_poll_qpc = stuttometer::get_current_qpc()
+                                  + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    STUTTO_ASSERT(!engine.poll_state(early_poll_qpc, trig, from_qpc, to_qpc));
+
+    // Advancing past PROBE_WINDOW_MS + margin transitions to FROZEN and yields the trigger.
     const uint64_t poll_qpc = stuttometer::get_current_qpc()
-                            + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+                            + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 50.0, qpc_freq);
     bool triggered = engine.poll_state(poll_qpc, trig, from_qpc, to_qpc);
     STUTTO_ASSERT(triggered);
 
@@ -1271,6 +1281,121 @@ static void test_missed_vblank_floors() {
     std::cout << "  -> DWM and Kernel missed-vblank floors and FilterKind::VBLANK_FLOOR PASSED.\n";
 }
 
+static void test_adaptive_probe_window_coupling() {
+    std::cout << "[TEST] Validating adaptive probe window coupling (D5 invariants)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint32_t target_pid = 7788;
+    const uint32_t tid = 9911;
+
+    // Test 1: Eligible catastrophic spike -> probe extension
+    // duration_ms = 200.0 >= MIN_DURATION_MS (100.0), target_pid != 0, baseline = 16.67 ms (200 >= 8 * 16.67 = 133.36 ms)
+    {
+        stuttometer::TriggerConfig config{};
+        config.target_pid = target_pid;
+        config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
+        config.window_pre_ms = 100.0;
+        config.window_post_ms = 30.0;
+        config.present_threshold_ms = 25.0;
+        config.cooldown_ms = 500.0;
+        config.min_report_severity = stuttometer::ReportSeverity::ALL;
+
+        stuttometer::TriggerEngine engine(config, qpc_freq);
+
+        const uint64_t trig_ts = 1000000ULL;
+        // Catastrophic stall (200 ms >= MIN_DURATION_MS 100.0 ms)
+        bool triggered = engine.on_dxgi_present(target_pid, tid, 200.0, trig_ts, 1);
+        STUTTO_ASSERT(triggered);
+
+        // Before PROBE_WINDOW_MS elapses (e.g. at +35 ms > config.window_post_ms), poll_state must be false (COLLECTING_POST active)
+        stuttometer::TriggerInfo trig{};
+        uint64_t from_qpc = 0, to_qpc = 0;
+        const uint64_t early_poll = stuttometer::get_current_qpc() + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+        STUTTO_ASSERT(!engine.poll_state(early_poll, trig, from_qpc, to_qpc));
+        STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::COLLECTING_POST);
+
+        // After PROBE_WINDOW_MS + margin, poll_state returns true (FROZEN reached)
+        const uint64_t ready_poll = stuttometer::get_current_qpc()
+                                  + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 50.0, qpc_freq);
+        STUTTO_ASSERT(engine.poll_state(ready_poll, trig, from_qpc, to_qpc));
+
+        // Invariant D5: out_to_qpc - trig.trigger_timestamp_qpc equals probe_qpc_
+        const uint64_t expected_probe_delta = stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS, qpc_freq);
+        STUTTO_ASSERT(to_qpc > trig.trigger_timestamp_qpc);
+        STUTTO_ASSERT((to_qpc - trig.trigger_timestamp_qpc) == expected_probe_delta);
+
+        engine.on_report_completed(ready_poll);
+    }
+
+    // Test 2: Ineligible spike (duration 50 ms < MIN_DURATION_MS 100 ms) -> config window used
+    {
+        stuttometer::TriggerConfig config{};
+        config.target_pid = target_pid;
+        config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
+        config.window_pre_ms = 100.0;
+        config.window_post_ms = 40.0;
+        config.present_threshold_ms = 25.0;
+        config.cooldown_ms = 500.0;
+        config.min_report_severity = stuttometer::ReportSeverity::ALL;
+
+        stuttometer::TriggerEngine engine(config, qpc_freq);
+
+        const uint64_t trig_ts = 2000000ULL;
+        // Stall of 50 ms (< 100 ms)
+        bool triggered = engine.on_dxgi_present(target_pid, tid, 50.0, trig_ts, 2);
+        STUTTO_ASSERT(triggered);
+
+        // After configured window_post_ms (40 ms + 10 ms margin), poll_state returns true immediately
+        stuttometer::TriggerInfo trig{};
+        uint64_t from_qpc = 0, to_qpc = 0;
+        const uint64_t ready_poll = stuttometer::get_current_qpc() + stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
+        STUTTO_ASSERT(engine.poll_state(ready_poll, trig, from_qpc, to_qpc));
+
+        // Invariant: out_to_qpc - trig.trigger_timestamp_qpc equals config.window_post_ms delta
+        const uint64_t expected_config_delta = stuttometer::ms_to_qpc_delta(40.0, qpc_freq);
+        STUTTO_ASSERT(to_qpc > trig.trigger_timestamp_qpc);
+        STUTTO_ASSERT((to_qpc - trig.trigger_timestamp_qpc) == expected_config_delta);
+
+        engine.on_report_completed(ready_poll);
+    }
+
+    // Test 3: Config window_post_ms = 0 + eligible spike -> enters COLLECTING_POST, poll_state false before probe elapses
+    {
+        stuttometer::TriggerConfig config{};
+        config.target_pid = target_pid;
+        config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
+        config.window_pre_ms = 100.0;
+        config.window_post_ms = 0.0; // Configured post window is 0
+        config.present_threshold_ms = 25.0;
+        config.cooldown_ms = 500.0;
+        config.min_report_severity = stuttometer::ReportSeverity::ALL;
+
+        stuttometer::TriggerEngine engine(config, qpc_freq);
+
+        const uint64_t trig_ts = 3000000ULL;
+        bool triggered = engine.on_dxgi_present(target_pid, tid, 200.0, trig_ts, 3);
+        STUTTO_ASSERT(triggered);
+
+        // Because spike is eligible, effective_post = probe_qpc_ > 0 -> Phase 4 state is COLLECTING_POST, NOT FROZEN!
+        STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::COLLECTING_POST);
+
+        stuttometer::TriggerInfo trig{};
+        uint64_t from_qpc = 0, to_qpc = 0;
+        const uint64_t early_poll = stuttometer::get_current_qpc() + stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+        STUTTO_ASSERT(!engine.poll_state(early_poll, trig, from_qpc, to_qpc));
+
+        const uint64_t ready_poll = stuttometer::get_current_qpc()
+                                  + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 50.0, qpc_freq);
+        STUTTO_ASSERT(engine.poll_state(ready_poll, trig, from_qpc, to_qpc));
+
+        const uint64_t expected_probe_delta = stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS, qpc_freq);
+        STUTTO_ASSERT((to_qpc - trig.trigger_timestamp_qpc) == expected_probe_delta);
+
+        engine.on_report_completed(ready_poll);
+    }
+
+    std::cout << "  -> Adaptive probe window coupling (D5) PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Kernel Present & GPU Tracking Tests ===\n";
     try {
@@ -1293,6 +1418,7 @@ int main() {
         test_session_benchmark_isolated_from_duplicates();
         test_hybrid_static_floor_adaptive_high_refresh();
         test_missed_vblank_floors();
+        test_adaptive_probe_window_coupling();
         std::cout << ">>> All Kernel Present & GPU Tracking tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

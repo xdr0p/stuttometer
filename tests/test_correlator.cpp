@@ -8,6 +8,7 @@
 #include "stuttometer/correlator.hpp"
 #include "stuttometer/trigger_engine.hpp"
 #include "stuttometer/privilege_utils.hpp"
+#include "stuttometer/internal/transition_thresholds.hpp"
 #include <iostream>
 #include <new>
 #include <cstdlib>
@@ -2000,6 +2001,533 @@ static void test_gpu_pipeline_stall_software_veto_dominance() {
     std::cout << "  -> gpu_pipeline_stall software veto dominance (F3) PASSED.\n";
 }
 
+namespace {
+
+static std::vector<stuttometer::EtwEventRecord> make_synthetic_timeline(
+    uint32_t pid,
+    uint32_t tid,
+    uint64_t trigger_qpc,
+    uint64_t qpc_freq,
+    double baseline_ms,
+    double stall_dur_ms,
+    const std::vector<double>& post_durs_ms
+) {
+    std::vector<stuttometer::EtwEventRecord> records;
+    const uint64_t base_interval_ticks = stuttometer::ms_to_qpc_delta(baseline_ms > 0.0 ? baseline_ms : 16.67, qpc_freq);
+
+    // Pre-frames
+    for (size_t i = 8; i > 0; --i) {
+        stuttometer::EtwEventRecord rec{};
+        rec.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+        rec.event_id = 43;
+        rec.pid = pid;
+        rec.tid = tid;
+        rec.duration_us = static_cast<uint32_t>((baseline_ms > 0.0 ? baseline_ms : 16.67) * 1000.0);
+        rec.qpc_timestamp = trigger_qpc - (i * base_interval_ticks);
+        records.push_back(rec);
+    }
+
+    // Anchor frame at trigger_qpc
+    stuttometer::EtwEventRecord anchor{};
+    anchor.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+    anchor.event_id = 43;
+    anchor.pid = pid;
+    anchor.tid = tid;
+    anchor.duration_us = static_cast<uint32_t>(stall_dur_ms * 1000.0);
+    anchor.qpc_timestamp = trigger_qpc;
+    records.push_back(anchor);
+
+    // Post-frames
+    uint64_t cur_qpc = trigger_qpc;
+    for (double post_ms : post_durs_ms) {
+        const uint64_t post_interval = stuttometer::ms_to_qpc_delta(post_ms, qpc_freq);
+        cur_qpc += post_interval;
+        stuttometer::EtwEventRecord rec{};
+        rec.category = static_cast<uint16_t>(stuttometer::EventCategory::DXGI);
+        rec.event_id = 43;
+        rec.pid = pid;
+        rec.tid = tid;
+        rec.duration_us = static_cast<uint32_t>(post_ms * 1000.0);
+        rec.qpc_timestamp = cur_qpc;
+        records.push_back(rec);
+    }
+
+    return records;
+}
+
+} // namespace
+
+static void test_event_context_eligibility_fallbacks() {
+    std::cout << "[TEST] Validating EventContext eligibility gates & fallbacks...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = 1000000000ULL;
+    const uint32_t pid = 7788;
+    const uint32_t tid = 9911;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    stuttometer::CorrelateOptions opts;
+
+    // Case 1: Non-frame source (DWM_GLITCH)
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DWM_GLITCH;
+        trig.reason = stuttometer::TriggerReason::DWM_COMPOSITOR_GLITCH;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 150.0;
+        trig.baseline_avg_ms = 16.67;
+        trig.target_pid = pid;
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 150.0, {16.67, 16.67, 16.67, 16.67});
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+        STUTTO_ASSERT(rep.event_context.confidence == 0.0);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Case 2: Sub-MIN_DURATION_MS stall (90ms < 100ms)
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = stuttometer::transition_thresholds::MIN_DURATION_MS - 10.0;
+        trig.baseline_avg_ms = 10.0;
+        trig.target_pid = pid;
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 10.0, trig.duration_ms, {10.0, 10.0, 10.0, 10.0});
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+        STUTTO_ASSERT(rep.event_context.confidence == 0.0);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Case 3: Duration < MIN_BASELINE_MULT * baseline (e.g. 120ms with baseline 20ms -> 6x < 8x)
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 120.0;
+        trig.baseline_avg_ms = 20.0;
+        trig.target_pid = pid;
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 20.0, 120.0, {20.0, 20.0, 20.0, 20.0});
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+        STUTTO_ASSERT(rep.event_context.confidence == 0.0);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Case 4: Monitor-all degradation (target_pid == 0)
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 200.0;
+        trig.baseline_avg_ms = 16.67;
+        trig.target_pid = 0;
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0, {16.67, 16.67, 16.67, 16.67});
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+        STUTTO_ASSERT(rep.event_context.confidence == 0.0);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Case 5: Empty timeline (no DXGI frames in snapshot)
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 200.0;
+        trig.baseline_avg_ms = 16.67;
+        trig.target_pid = pid;
+        std::vector<stuttometer::EtwEventRecord> empty_snap;
+        auto rep = correlator.correlate(empty_snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+        STUTTO_ASSERT(rep.event_context.confidence == 0.0);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    std::cout << "  -> EventContext eligibility gates & fallbacks PASSED.\n";
+}
+
+static void test_event_context_rule2_impulse_terminal_override() {
+    std::cout << "[TEST] Validating Rule 2: S1a impulse return confirmed terminal override (with heavy I/O)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = 1000000000ULL;
+    const uint32_t pid = 7788;
+    const uint32_t tid = 9911;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    stuttometer::CorrelateOptions opts;
+
+    stuttometer::TriggerInfo trig{};
+    trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    trig.trigger_timestamp_qpc = base_qpc;
+    trig.duration_ms = 200.0; // >= 100ms, >= 8x 16.67
+    trig.baseline_avg_ms = 16.67;
+    trig.target_pid = pid;
+    trig.target_tid = tid;
+
+    // Post samples cleanly return to baseline (6 samples at 16.67ms)
+    auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0, {16.67, 16.67, 16.67, 16.67, 16.67, 16.67});
+
+    // Add heavy target I/O into snapshot (50 events, 1MB each = 50MB, with 20 post-trigger events = 40% >= 25%)
+    for (size_t i = 0; i < 50; ++i) {
+        stuttometer::EtwEventRecord disk{};
+        disk.category = static_cast<uint16_t>(stuttometer::EventCategory::DISK);
+        disk.pid = pid;
+        disk.tid = tid;
+        disk.auxiliary_data = 1024ULL * 1024ULL; // 1 MB
+        disk.duration_us = 5000;
+        if (i < 30) {
+            disk.qpc_timestamp = base_qpc - ((30 - i) * 10000ULL);
+        } else {
+            disk.qpc_timestamp = base_qpc + ((i - 30 + 1) * 10000ULL);
+        }
+        snap.push_back(disk);
+    }
+
+    auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+    STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::GAMEPLAY);
+    STUTTO_ASSERT(rep.event_context.impulse_confirmed == true);
+    STUTTO_ASSERT(rep.event_context.policy_applied == false);
+
+    std::cout << "  -> Rule 2: S1a impulse return confirmed terminal override PASSED.\n";
+}
+
+static void test_event_context_rule3_d4_branches() {
+    std::cout << "[TEST] Validating Rule 3 / D4 dominant stutter evidence branches (A and B)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = 1000000000ULL;
+    const uint32_t pid = 7788;
+    const uint32_t tid = 9911;
+    const uint8_t cpu_core = 2;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    stuttometer::CorrelateOptions opts;
+
+    stuttometer::TriggerInfo trig{};
+    trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    trig.trigger_timestamp_qpc = base_qpc;
+    trig.duration_ms = 200.0;
+    trig.baseline_avg_ms = 16.67;
+    trig.target_pid = pid;
+    trig.target_tid = tid;
+    trig.cpu_index = cpu_core;
+
+    // Branch A1: Dominant in-gap core-affine DPC evidence (>= 2.0x threshold) + unstable post timeline (dispersion > 0.25)
+    {
+        // Widely varying post samples [10.0, 50.0, 12.0, 65.0, 15.0, 70.0] ensuring dispersion > 0.25
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0, {10.0, 50.0, 12.0, 65.0, 15.0, 70.0});
+
+        // In-gap core-affine dominant DPC: offset -10ms (gap is [-200ms, 0ms])
+        // Boundary: VETO_DOMINANCE_FACTOR (2.0) * min(dpc_threshold_us (1000), isr_threshold_us (1000)) = 2000 us.
+        // Use 2100 us (> 2000 us) to test dominance.
+        stuttometer::EtwEventRecord dpc{};
+        dpc.category = static_cast<uint16_t>(stuttometer::EventCategory::DPC);
+        dpc.cpu_index = cpu_core;
+        dpc.duration_us = 2100;
+        dpc.qpc_timestamp = base_qpc - stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+        snap.push_back(dpc);
+
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.stutter_evidence_dominant == true);
+        STUTTO_ASSERT(rep.event_context.post_dispersion > stuttometer::transition_thresholds::REGIME_MAX_DISPERSION);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::GAMEPLAY);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Branch A2: Non-dominant in-gap ISR contrast (1.5x threshold = 750 us < 2.0x dominance boundary 1000 us)
+    // Default thresholds: dpc_threshold_us = 1000, isr_threshold_us = 500.
+    // min(dpc, isr) = 500 us; dominance boundary = 2.0 * 500 = 1000 us.
+    // An ISR of 750 us exceeds isr_threshold_us (500 us) to form a candidate, but is below 1000 us.
+    {
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0, {10.0, 50.0, 12.0, 65.0, 15.0, 70.0});
+
+        stuttometer::EtwEventRecord isr{};
+        isr.category = static_cast<uint16_t>(stuttometer::EventCategory::ISR);
+        isr.cpu_index = cpu_core;
+        isr.duration_us = 750; // 1.5x isr_threshold_us, below 1000 us dominance boundary
+        isr.qpc_timestamp = base_qpc - stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+        snap.push_back(isr);
+
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.stutter_evidence_dominant == false);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Branch B: Dominant in-gap DPC evidence + confirmed stable regime step (dispersion <= 0.25, no S2)
+    {
+        // 8 post samples all at 33.34ms (2.0x baseline, dispersion == 0.0 <= 0.25)
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+            {33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34});
+
+        stuttometer::EtwEventRecord dpc{};
+        dpc.category = static_cast<uint16_t>(stuttometer::EventCategory::DPC);
+        dpc.cpu_index = cpu_core;
+        dpc.duration_us = 2100;
+        dpc.qpc_timestamp = base_qpc - stuttometer::ms_to_qpc_delta(10.0, qpc_freq);
+        snap.push_back(dpc);
+
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.stutter_evidence_dominant == true);
+        STUTTO_ASSERT(rep.event_context.post_dispersion <= stuttometer::transition_thresholds::REGIME_MAX_DISPERSION);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    std::cout << "  -> Rule 3 / D4 dominant stutter evidence branches (A and B) PASSED.\n";
+}
+
+static void test_event_context_rule4_state_transition_and_loading_screen() {
+    std::cout << "[TEST] Validating Rule 4: State Transition & Loading Screen (with S2 post-fraction contrast)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = 1000000000ULL;
+    const uint32_t pid = 7788;
+    const uint32_t tid = 9911;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    stuttometer::CorrelateOptions opts;
+
+    stuttometer::TriggerInfo trig{};
+    trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    trig.trigger_timestamp_qpc = base_qpc;
+    trig.duration_ms = 200.0;
+    trig.baseline_avg_ms = 16.67;
+    trig.target_pid = pid;
+    trig.target_tid = tid;
+
+    // Case A: Confirmed regime step without I/O burst -> STATE_TRANSITION
+    {
+        // 10 post frames at 33.34ms (dispersion 0.0 <= 0.15, >= 10 samples)
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+            {33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34});
+
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+        STUTTO_ASSERT(rep.event_context.confidence >= stuttometer::transition_thresholds::POLICY_CONFIDENCE_GATE);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Case B: Confirmed regime step + target I/O burst (40 events, 8MB, 12 post = 30% >= 25%) -> LOADING_SCREEN
+    {
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+            {33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34});
+
+        for (size_t i = 0; i < stuttometer::transition_thresholds::DISK_BURST_MIN_EVENTS; ++i) {
+            stuttometer::EtwEventRecord disk{};
+            disk.category = static_cast<uint16_t>(stuttometer::EventCategory::DISK);
+            disk.pid = pid;
+            disk.tid = tid;
+            disk.auxiliary_data = (stuttometer::transition_thresholds::DISK_BURST_MIN_BYTES / stuttometer::transition_thresholds::DISK_BURST_MIN_EVENTS) + 1;
+            disk.duration_us = 5000;
+            if (i < 28) {
+                disk.qpc_timestamp = base_qpc - ((28 - i) * 1000ULL);
+            } else {
+                disk.qpc_timestamp = base_qpc + ((i - 28 + 1) * 1000ULL);
+            }
+            snap.push_back(disk);
+        }
+
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::LOADING_SCREEN);
+        // Moderate I/O (< 32MB) yields raw 0.55 < POLICY_CONFIDENCE_GATE (0.60)
+        STUTTO_ASSERT(rep.event_context.confidence < stuttometer::transition_thresholds::POLICY_CONFIDENCE_GATE);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // Case B2: Confirmed regime step + heavy target I/O burst (>= 32MB) -> LOADING_SCREEN clearing POLICY_CONFIDENCE_GATE
+    {
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+            {33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34});
+
+        for (size_t i = 0; i < 50; ++i) {
+            stuttometer::EtwEventRecord disk{};
+            disk.category = static_cast<uint16_t>(stuttometer::EventCategory::DISK);
+            disk.pid = pid;
+            disk.tid = tid;
+            disk.auxiliary_data = 1024ULL * 1024ULL; // 1 MB each -> 50MB >= DISK_BURST_HEAVY_BYTES
+            disk.duration_us = 5000;
+            if (i < 35) {
+                disk.qpc_timestamp = base_qpc - ((35 - i) * 1000ULL);
+            } else {
+                disk.qpc_timestamp = base_qpc + ((i - 35 + 1) * 1000ULL); // 15 post-trigger events = 30% >= 25%
+            }
+            snap.push_back(disk);
+        }
+
+        auto rep_heavy = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep_heavy.event_context.classification == stuttometer::EventContextClass::LOADING_SCREEN);
+        // Heavy I/O (>= 32MB) raw 0.70 >= POLICY_CONFIDENCE_GATE (0.60)
+        STUTTO_ASSERT(rep_heavy.event_context.confidence >= stuttometer::transition_thresholds::POLICY_CONFIDENCE_GATE);
+        STUTTO_ASSERT(rep_heavy.event_context.policy_applied == false);
+    }
+
+    // Case C: Contrast check: 40 events, 8MB, but only 1 event strictly post-trigger (1/40 = 2.5% < 25%) -> S2 fails -> STATE_TRANSITION
+    {
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+            {33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34});
+
+        for (size_t i = 0; i < stuttometer::transition_thresholds::DISK_BURST_MIN_EVENTS; ++i) {
+            stuttometer::EtwEventRecord disk{};
+            disk.category = static_cast<uint16_t>(stuttometer::EventCategory::DISK);
+            disk.pid = pid;
+            disk.tid = tid;
+            disk.auxiliary_data = (stuttometer::transition_thresholds::DISK_BURST_MIN_BYTES / stuttometer::transition_thresholds::DISK_BURST_MIN_EVENTS) + 1;
+            disk.duration_us = 5000;
+            if (i < 39) {
+                disk.qpc_timestamp = base_qpc - ((39 - i) * 1000ULL);
+            } else {
+                disk.qpc_timestamp = base_qpc + 1000ULL; // Exactly 1 post-trigger event
+            }
+            snap.push_back(disk);
+        }
+
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    std::cout << "  -> Rule 4: State Transition & Loading Screen PASSED.\n";
+}
+
+static void test_event_context_rule5_unstable_loading() {
+    std::cout << "[TEST] Validating Rule 5: Unstable Loading Screen (S2 burst + elevated post frames + dispersion > 0.25)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = 1000000000ULL;
+    const uint32_t pid = 7788;
+    const uint32_t tid = 9911;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    stuttometer::CorrelateOptions opts;
+
+    stuttometer::TriggerInfo trig{};
+    trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    trig.trigger_timestamp_qpc = base_qpc;
+    trig.duration_ms = 200.0;
+    trig.baseline_avg_ms = 16.67;
+    trig.target_pid = pid;
+    trig.target_tid = tid;
+
+    // Post frames: 8 samples all >= 1.5x baseline (25.0ms), but alternating widely so MAD/median > 0.25
+    auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+        {26.0, 55.0, 27.0, 60.0, 28.0, 58.0, 26.0, 62.0});
+
+    // Add S2 disk burst (40 events, 8MB, 12 post = 30% >= 25%)
+    for (size_t i = 0; i < stuttometer::transition_thresholds::DISK_BURST_MIN_EVENTS; ++i) {
+        stuttometer::EtwEventRecord disk{};
+        disk.category = static_cast<uint16_t>(stuttometer::EventCategory::DISK);
+        disk.pid = pid;
+        disk.tid = tid;
+        disk.auxiliary_data = (stuttometer::transition_thresholds::DISK_BURST_MIN_BYTES / stuttometer::transition_thresholds::DISK_BURST_MIN_EVENTS) + 1;
+        disk.duration_us = 5000;
+        if (i < 28) {
+            disk.qpc_timestamp = base_qpc - ((28 - i) * 1000ULL);
+        } else {
+            disk.qpc_timestamp = base_qpc + ((i - 28 + 1) * 1000ULL);
+        }
+        snap.push_back(disk);
+    }
+
+    auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+    STUTTO_ASSERT(rep.event_context.post_dispersion > stuttometer::transition_thresholds::REGIME_MAX_DISPERSION);
+    STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::LOADING_SCREEN);
+    STUTTO_ASSERT(rep.event_context.policy_applied == false);
+
+    std::cout << "  -> Rule 5: Unstable Loading Screen PASSED.\n";
+}
+
+static void test_event_context_rule7_unclassified_fallback() {
+    std::cout << "[TEST] Validating Rule 7: Unclassified fallback for eligible stall with non-regime fluctuations...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = 1000000000ULL;
+    const uint32_t pid = 7788;
+    const uint32_t tid = 9911;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    stuttometer::CorrelateOptions opts;
+
+    stuttometer::TriggerInfo trig{};
+    trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    trig.trigger_timestamp_qpc = base_qpc;
+    trig.duration_ms = 250.0;
+    trig.baseline_avg_ms = 16.67;
+    trig.target_pid = pid;
+    trig.target_tid = tid;
+
+    // Post samples fluctuate between 10ms and 35ms (median 22.5ms):
+    // - Not impulse return: |22.5 - 16.67| = 5.83ms > max(1.5ms, 20% = 3.33ms) -> S1a false
+    // - Not regime step: median 22.5ms < 1.5x baseline (25.0ms) and dispersion > 0.25 -> S1b false
+    // - No I/O burst -> S2 false
+    // Yields Step 7 UNCLASSIFIED fallback
+    auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 250.0,
+        {10.0, 35.0, 12.0, 33.0, 11.0, 34.0});
+
+    auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
+    STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+    STUTTO_ASSERT(rep.event_context.confidence == 0.0);
+    STUTTO_ASSERT(rep.event_context.policy_applied == false);
+
+    std::cout << "  -> Rule 7: Unclassified fallback PASSED.\n";
+}
+
+static void test_event_context_approved_coverage_scaling() {
+    std::cout << "[TEST] Validating approved coverage scaling formula (0.5 + 0.5 * coverage)...\n";
+    const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
+    const uint64_t base_qpc = 1000000000ULL;
+    const uint32_t pid = 7788;
+    const uint32_t tid = 9911;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    stuttometer::CorrelateOptions opts;
+
+    stuttometer::TriggerInfo trig{};
+    trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    trig.trigger_timestamp_qpc = base_qpc;
+    trig.duration_ms = 200.0;
+    trig.baseline_avg_ms = 16.67;
+    trig.target_pid = pid;
+    trig.target_tid = tid;
+
+    // Implementation Note 1: Use STATE_TRANSITION fixture (no S2 disk dependence)
+    auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+        {33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34});
+
+    // 1. Full coverage: all active providers enabled, 0 events lost -> software_coverage() == 1.0
+    stuttometer::ProviderContext p_ctx_full{};
+    auto rep_full = correlator.correlate(snap, trig, qpc_freq, opts, p_ctx_full);
+    STUTTO_ASSERT(rep_full.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+    STUTTO_ASSERT(rep_full.event_context.confidence > 0.0);
+    STUTTO_ASSERT(rep_full.event_context.policy_applied == false);
+
+    // 2. Zero coverage: etw_events_lost > 0 -> software_coverage() == 0.0
+    stuttometer::ProviderContext p_ctx_zero{};
+    p_ctx_zero.etw_events_lost = 5;
+    auto rep_zero = correlator.correlate(snap, trig, qpc_freq, opts, p_ctx_zero);
+    STUTTO_ASSERT(rep_zero.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+    STUTTO_ASSERT(rep_zero.event_context.policy_applied == false);
+
+    // Approved formula: scaled = raw * (0.5 + 0.5 * coverage). At coverage == 0, confidence_zero == 0.5 * confidence_full
+    const double expected_zero_conf = 0.5 * rep_full.event_context.confidence;
+    STUTTO_ASSERT(std::abs(rep_zero.event_context.confidence - expected_zero_conf) < 1e-4);
+
+    std::cout << "  -> Approved coverage scaling formula PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -2042,6 +2570,13 @@ int main() {
         test_software_coverage_etw_loss_gate();
         test_gpu_pipeline_stall_suppression_by_cumulative_cswitch();
         test_gpu_pipeline_stall_software_veto_dominance();
+        test_event_context_eligibility_fallbacks();
+        test_event_context_rule2_impulse_terminal_override();
+        test_event_context_rule3_d4_branches();
+        test_event_context_rule4_state_transition_and_loading_screen();
+        test_event_context_rule5_unstable_loading();
+        test_event_context_rule7_unclassified_fallback();
+        test_event_context_approved_coverage_scaling();
         std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

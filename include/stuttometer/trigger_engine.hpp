@@ -8,6 +8,7 @@
 #include "constants.hpp"
 #include "fixed_table.hpp"
 #include "filtered_event_ring.hpp"
+#include "stuttometer/internal/transition_thresholds.hpp"
 
 namespace stuttometer {
 
@@ -222,11 +223,14 @@ public:
         TriggerReason reason,
         double duration_ms,
         uint32_t pid = 0,
-        uint32_t tid = 0
+        uint32_t tid = 0,
+        uint16_t judder_alternations = 0,
+        uint16_t judder_max_swing_q100 = 0
     ) noexcept {
         record_filtered_event(src, reason, /*timestamp_qpc=*/0, duration_ms,
                               /*baseline_avg_ms=*/0.0, /*spike_ratio=*/1.0,
-                              pid, tid, /*cpu_index=*/0, FilterKind::SEVERITY_GATE);
+                              pid, tid, /*cpu_index=*/0, FilterKind::SEVERITY_GATE,
+                              judder_alternations, judder_max_swing_q100);
     }
 
     // Test-only: returns the current rolling baseline for the specified stream key (or derived pid/tid).
@@ -291,7 +295,9 @@ private:
         uint32_t pid,
         uint32_t tid,
         uint8_t cpu_index,
-        FilterKind kind
+        FilterKind kind,
+        uint16_t judder_alternations = 0,
+        uint16_t judder_max_swing_q100 = 0
     ) noexcept;
 
     void on_target_changed(uint32_t new_pid) noexcept;
@@ -302,6 +308,7 @@ private:
     const uint64_t pre_window_qpc_;
     const uint64_t gpu_pre_window_qpc_;
     const uint64_t post_window_qpc_;
+    const uint64_t probe_qpc_;
     const uint64_t cooldown_qpc_;
     const uint64_t watchdog_qpc_;
 
@@ -335,8 +342,16 @@ private:
     // 0 = no thread pauses; otherwise only the thread whose my_gen matches pause_only_generation_for_test_ pauses
     std::atomic<uint64_t> pause_only_generation_for_test_{0};
 
+    // Time Domain Separation Invariant:
+    // - post_target_qpc_, frozen_timestamp_qpc_, and cooldown_target_qpc_ operate in the real-time
+    //   wall-clock QPC domain (from get_current_qpc()), allowing poll_state() transitions and deadlines
+    //   to function deterministically against live consumer polling.
+    // - active_trigger_.trigger_timestamp_qpc operates in the ETW/event QPC domain (from EventHeader.TimeStamp),
+    //   ensuring snapshot windowing (out_from_qpc, out_to_qpc) and report timestamps preserve the trigger's
+    //   original telemetry time base.
     std::atomic<uint64_t> claimed_timestamp_qpc_{0};
     std::atomic<uint64_t> post_target_qpc_{0};
+    std::atomic<uint64_t> effective_post_window_qpc_{0};
     std::atomic<uint64_t> frozen_timestamp_qpc_{0};
     std::atomic<uint64_t> cooldown_target_qpc_{0};
     std::atomic<bool> report_consumed_{false};

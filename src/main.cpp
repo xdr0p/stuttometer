@@ -435,14 +435,20 @@ int main(int argc, char** argv) {
 
                 uint64_t unpaired_evicts = session_mgr.unpaired_evictions();
                 uint64_t ins_failures = session_mgr.insertion_failures();
+
+                const double effective_post_ms = (to_qpc > trigger_info.trigger_timestamp_qpc)
+                    ? stuttometer::qpc_delta_to_ms(to_qpc - trigger_info.trigger_timestamp_qpc, qpc_freq)
+                    : window_post_ms;
+
                 stuttometer::CorrelateOptions correlate_opts{
                     .window_pre_ms = window_pre_ms,
-                    .window_post_ms = window_post_ms,
+                    .window_post_ms = effective_post_ms,
                     .present_threshold_ms = present_threshold_ms,
                     .hardware_vblank_ms = trig_config.vblank_interval_ms,
                     .provider_tier = provider_tier,
                     .redact = redact,
-                    .judder_swing_ratio = judder_swing_ratio
+                    .judder_swing_ratio = judder_swing_ratio,
+                    .enable_transition_salience = false
                 };
 
                 auto report = correlator.correlate(snapshot_buffer, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
@@ -506,6 +512,8 @@ int main(int argc, char** argv) {
             ndjson_writer->push(rec);
         }
         ndjson_writer->stop();
+        info << "info: [STUTTOMETER] NDJSON writer: " << ndjson_writer->written_records()
+             << " written, " << ndjson_writer->dropped_records() << " dropped.\n";
     }
     info << "info: [STUTTOMETER] Done. Total reports generated: " << report_count << "\n";
 

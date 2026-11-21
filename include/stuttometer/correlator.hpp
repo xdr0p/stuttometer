@@ -21,6 +21,7 @@ struct CorrelateOptions {
     std::string provider_tier{"standard"};
     bool redact{false};
     double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
+    bool enable_transition_salience{false};
 };
 
 struct CorrelatorThresholds {
@@ -172,8 +173,50 @@ struct AttributionResult {
     bool redacted{false};
 };
 
+enum class EventContextClass : uint8_t {
+    UNCLASSIFIED     = 0,
+    GAMEPLAY         = 1,
+    STATE_TRANSITION = 2,
+    LOADING_SCREEN   = 3
+};
+
+constexpr std::string_view event_context_class_to_string(EventContextClass c) noexcept {
+    switch (c) {
+        case EventContextClass::GAMEPLAY:         return "GAMEPLAY";
+        case EventContextClass::STATE_TRANSITION: return "STATE_TRANSITION";
+        case EventContextClass::LOADING_SCREEN:   return "LOADING_SCREEN";
+        case EventContextClass::UNCLASSIFIED:
+        default:                                  return "UNCLASSIFIED";
+    }
+}
+
+inline std::string event_context_class_to_std_string(EventContextClass c) {
+    return std::string(event_context_class_to_string(c));
+}
+
+struct EventContextInfo {
+    EventContextClass classification{EventContextClass::UNCLASSIFIED};
+    double confidence{0.0};
+    bool policy_applied{false};
+
+    // Telemetry and calibration signals
+    uint32_t post_frame_samples{0};
+    double post_median_ms{0.0};
+    double post_dispersion{0.0}; // MAD / median
+    double pre_baseline_ms{0.0};
+    uint32_t disk_event_count{0};
+    uint64_t disk_total_bytes{0};
+    uint32_t disk_post_count{0};
+    uint64_t disk_post_bytes{0};
+    double voluntary_wait_fraction{0.0};
+    bool voluntary_available{false};
+    bool present_mode_changed{false};
+    bool impulse_confirmed{false};
+    bool stutter_evidence_dominant{false};
+};
+
 struct DiagnosticReport {
-    std::string schema_version{"1.4"};
+    std::string schema_version{"1.5"};
     std::string tool_version{TOOL_VERSION};
     std::string timestamp_utc;
     TriggerInfo trigger;
@@ -208,6 +251,8 @@ struct DiagnosticReport {
     uint64_t insertion_failures{0};
     uint32_t etw_events_lost{0};
     uint32_t etw_buffers_lost{0};
+
+    EventContextInfo event_context;
 };
 
 // Pure function for attribution calculation and deterministic testing
@@ -263,6 +308,13 @@ public:
     struct MemPhysicalAllocCandidate { EtwEventRecord record; double offset_ms{0.0}; };
 
 private:
+    EventContextInfo classify_event_context(
+        const DiagnosticReport& report,
+        const std::vector<EtwEventRecord>& snapshot,
+        const CorrelateOptions& options,
+        const ProviderContext& provider_ctx
+    ) const;
+
     const DriverSymbolResolver& driver_resolver_;
     const CorrelatorThresholds thresholds_;
     uint32_t cached_dwm_pid_{0};

@@ -1,6 +1,7 @@
 #include "stuttometer/correlator.hpp"
 #include "stuttometer/internal/severity_scales.hpp"
 #include "stuttometer/internal/judder_thresholds.hpp"
+#include "stuttometer/internal/transition_thresholds.hpp"
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -197,37 +198,54 @@ MetricSeverity classify_severity(const TriggerInfo& trigger, double present_thre
         return MetricSeverity::DANGER;
     }
 
-    if (trigger.reason == TriggerReason::CADENCE_JUDDER || trigger.source == TriggerSource::FRAME_PACING_JUDDER) {
-        using namespace judder_thresholds;
-        const uint16_t clamped_swing = std::min<uint16_t>(trigger.judder_max_swing_q100, 1000);
-        const bool high_alt   = trigger.judder_alternations >= JUDDER_DANGER_MIN_ALT;
-        const bool long_dur   = trigger.duration_ms >= JUDDER_DANGER_MIN_DUR_MS;
-        const bool high_swing = (clamped_swing >= JUDDER_DANGER_MIN_SWING) && (trigger.judder_alternations >= JUDDER_DANGER_SWING_MIN_ALT);
-        if (high_alt || long_dur || high_swing) return MetricSeverity::DANGER;
+    // Hardware vblank interval reference: pinned to physical display timing.
+    // Note: hardware_vblank_ms is currently a session-start snapshot from the primary monitor.
+    const double vblank_ref = (present_threshold_ms > 0.0) ? present_threshold_ms : DEFAULT_60HZ_VBLANK_MS;
 
-        const bool mid_alt   = trigger.judder_alternations >= JUDDER_WARNING_MIN_ALT;
-        const bool mid_dur   = trigger.duration_ms >= JUDDER_WARNING_MIN_DUR_MS;
-        const bool mid_swing = (clamped_swing >= JUDDER_WARNING_MIN_SWING) && (trigger.judder_alternations >= JUDDER_WARNING_SWING_MIN_ALT);
-        if (mid_alt || mid_dur || mid_swing) return MetricSeverity::WARNING;
-        return MetricSeverity::NORMAL;
+    if (trigger.reason == TriggerReason::CADENCE_JUDDER || trigger.source == TriggerSource::FRAME_PACING_JUDDER) {
+        if (trigger.baseline_avg_ms <= 0.0 || trigger.judder_alternations < 1) {
+            return MetricSeverity::NORMAL;
+        }
+
+        // Peak-to-peak delta between consecutive frames, maximized over the episode.
+        // For symmetric alternation it equals 2x the per-frame deviation from mean.
+        const double clamped_swing_ratio = std::min<uint16_t>(trigger.judder_max_swing_q100, 1000) / 100.0;
+        const double swing_pp_ms = clamped_swing_ratio * trigger.baseline_avg_ms;
+
+        if (swing_pp_ms < 1.0 * vblank_ref) {
+            return MetricSeverity::NORMAL;
+        }
+        if (swing_pp_ms < 2.0 * vblank_ref) {
+            return MetricSeverity::WARNING;
+        }
+
+        using namespace judder_thresholds;
+        const bool persistent = (trigger.judder_alternations >= JUDDER_DANGER_MIN_ALT ||
+                                 trigger.duration_ms >= JUDDER_DANGER_MIN_DUR_MS);
+        return persistent ? MetricSeverity::DANGER : MetricSeverity::WARNING;
     }
 
     // Baseline availability predicate: baseline is available iff both spike_ratio and baseline_avg_ms are positive.
     const bool has_baseline = (trigger.spike_ratio > 0.0 && trigger.baseline_avg_ms > 0.0);
 
     if (has_baseline) {
-        // 1. DANGER checks (evaluated first):
-        if (trigger.spike_ratio >= 3.0) return MetricSeverity::DANGER;
-
-        // 2. WARNING checks (evaluated second):
-        if (trigger.spike_ratio >= 2.0) {
-            return MetricSeverity::WARNING;
+        const MetricSeverity rel = (trigger.spike_ratio >= 3.0) ? MetricSeverity::DANGER
+                                 : (trigger.spike_ratio >= 2.0) ? MetricSeverity::WARNING
+                                                                : MetricSeverity::NORMAL;
+        // Absolute disturbance unmeasurable in incomplete test fixtures -> cap cannot be applied.
+        // Defensive branch only; production baseline-bearing triggers always carry duration_ms.
+        if (trigger.duration_ms <= 0.0) {
+            return rel;
         }
-        return MetricSeverity::NORMAL;
+
+        const MetricSeverity abs = compute_duration_severity_fallback(trigger.duration_ms, vblank_ref);
+        // Safety property: std::min(rel, abs) is monotonically <= the legacy severity.
+        // It suppresses sub-cadence micro-wobbles while preserving multi-frame stalls.
+        return std::min(rel, abs);
     }
 
     // Fallback: only reached when baseline is pending or unavailable
-    return compute_duration_severity_fallback(trigger.duration_ms, present_threshold_ms);
+    return compute_duration_severity_fallback(trigger.duration_ms, vblank_ref);
 }
 
 AttributionResult compute_attribution(const DiagnosticReport& report, uint32_t cached_dwm_pid) {
@@ -1259,6 +1277,18 @@ DiagnosticReport CorrelationEngine::correlate(
             }
         }
 
+        // Fallback: If DXGI present stops are empty for the target, fall back to kernel MMIO flip records
+        // Note: DXGKRNL_PRESENT is excluded per plan.
+        if (present_stops.empty()) {
+            for (const auto& rec : snapshot) {
+                if (static_cast<EventCategory>(rec.category) == EventCategory::DXGKRNL_MMIOFLIP &&
+                    rec.pid == trigger.target_pid &&
+                    rec.duration_us > 0) {
+                    present_stops.push_back(rec);
+                }
+            }
+        }
+
         if (!present_stops.empty()) {
             std::sort(present_stops.begin(), present_stops.end(), [](const EtwEventRecord& a, const EtwEventRecord& b) {
                 return a.qpc_timestamp < b.qpc_timestamp;
@@ -1348,6 +1378,9 @@ DiagnosticReport CorrelationEngine::correlate(
         }
     }
 
+    // 18.5 Event Context Classification
+    report.event_context = classify_event_context(report, snapshot, options, provider_ctx);
+
     // 19. Compute Attribution
     AttributionResult attr = compute_attribution(report, cached_dwm_pid_);
     report.attribution = attr.tag;
@@ -1356,6 +1389,263 @@ DiagnosticReport CorrelationEngine::correlate(
     report.attribution_redacted = attr.redacted;
 
     return report;
+}
+
+EventContextInfo CorrelationEngine::classify_event_context(
+    const DiagnosticReport& report,
+    const std::vector<EtwEventRecord>& snapshot,
+    const CorrelateOptions& options,
+    const ProviderContext& provider_ctx
+) const {
+    (void)options;
+    EventContextInfo info;
+    info.pre_baseline_ms = report.trigger.baseline_avg_ms;
+
+    // 1. Eligibility gate (§2.2)
+    const auto src = report.trigger.source;
+    const auto rsn = report.trigger.reason;
+    const bool valid_src = (src == TriggerSource::DXGI_PRESENT_STUTTER || src == TriggerSource::KERNEL_FRAME_STALL);
+    const bool valid_rsn = (rsn == TriggerReason::RELATIVE_SPIKE || rsn == TriggerReason::STATIC_THRESHOLD);
+    if (!valid_src || !valid_rsn) {
+        return info;
+    }
+
+    if (report.trigger.duration_ms < transition_thresholds::MIN_DURATION_MS) {
+        return info;
+    }
+    if (report.trigger.baseline_avg_ms > 0.0 &&
+        report.trigger.duration_ms < (transition_thresholds::MIN_BASELINE_MULT * report.trigger.baseline_avg_ms)) {
+        return info;
+    }
+    if (report.trigger.target_pid == 0 || report.frame_timeline.empty()) {
+        return info;
+    }
+
+    // 2. Signals extraction
+    // S1: Post-frame samples from frame_timeline
+    std::vector<double> post_durations;
+    post_durations.reserve(report.frame_timeline.size());
+    for (const auto& pt : report.frame_timeline) {
+        if (pt.relative_index > 0) {
+            post_durations.push_back(pt.duration_ms);
+        }
+    }
+
+    info.post_frame_samples = static_cast<uint32_t>(post_durations.size());
+    const size_t N = post_durations.size();
+
+    auto compute_median = [](std::vector<double>& v) -> double {
+        if (v.empty()) return 0.0;
+        std::sort(v.begin(), v.end());
+        const size_t sz = v.size();
+        if (sz % 2 == 1) {
+            return v[sz / 2];
+        }
+        return 0.5 * (v[sz / 2 - 1] + v[sz / 2]);
+    };
+
+    if (N > 0) {
+        std::vector<double> sorted_durs = post_durations;
+        info.post_median_ms = compute_median(sorted_durs);
+
+        std::vector<double> deviations;
+        deviations.reserve(N);
+        for (double d : post_durations) {
+            deviations.push_back(std::abs(d - info.post_median_ms));
+        }
+        const double mad = compute_median(deviations);
+        info.post_dispersion = (info.post_median_ms > 0.0) ? (mad / info.post_median_ms) : 0.0;
+    }
+
+    // S1a: Impulse confirmation
+    bool s1a_impulse = false;
+    if (N >= transition_thresholds::IMPULSE_MIN_POST_SAMPLES && report.trigger.baseline_avg_ms > 0.0) {
+        const double abs_tol = std::max(transition_thresholds::IMPULSE_ABS_TOLERANCE_MS,
+                                        report.trigger.baseline_avg_ms * transition_thresholds::IMPULSE_REL_TOLERANCE);
+        if (std::abs(info.post_median_ms - report.trigger.baseline_avg_ms) <= abs_tol) {
+            s1a_impulse = true;
+            info.impulse_confirmed = true;
+        }
+    }
+
+    // S1b: Regime step
+    bool s1b_regime = false;
+    if (N >= transition_thresholds::REGIME_MIN_POST_SAMPLES && report.trigger.baseline_avg_ms > 0.0) {
+        if (info.post_median_ms >= (transition_thresholds::REGIME_STEP_RATIO * report.trigger.baseline_avg_ms) &&
+            info.post_dispersion <= transition_thresholds::REGIME_MAX_DISPERSION &&
+            info.post_median_ms <= transition_thresholds::REGIME_SANITY_CEILING_MS) {
+            s1b_regime = true;
+        }
+    }
+
+    // S2: I/O burst
+    uint32_t disk_count = 0;
+    uint64_t disk_bytes = 0;
+    uint32_t disk_post_count = 0;
+    uint64_t disk_post_bytes = 0;
+
+    for (const auto& rec : snapshot) {
+        if (static_cast<EventCategory>(rec.category) == EventCategory::DISK &&
+            rec.pid == report.trigger.target_pid) {
+            disk_count++;
+            disk_bytes += rec.auxiliary_data;
+            if (rec.qpc_timestamp >= report.trigger.trigger_timestamp_qpc) {
+                disk_post_count++;
+                disk_post_bytes += rec.auxiliary_data;
+            }
+        }
+    }
+    info.disk_event_count = disk_count;
+    info.disk_total_bytes = disk_bytes;
+    info.disk_post_count = disk_post_count;
+    info.disk_post_bytes = disk_post_bytes;
+
+    const bool sustained_post = (disk_count > 0) &&
+        (static_cast<double>(disk_post_count) / static_cast<double>(disk_count) >= transition_thresholds::DISK_BURST_POST_FRACTION);
+
+    const bool s2_io_burst = provider_ctx.kernel_disk_active &&
+        (disk_count >= transition_thresholds::DISK_BURST_MIN_EVENTS) &&
+        (disk_bytes >= transition_thresholds::DISK_BURST_MIN_BYTES) &&
+        sustained_post;
+
+    // S3: Voluntary dominance (target TID deschedule strictly during the stall gap)
+    const uint64_t qpc_freq = (report.qpc_frequency > 0) ? report.qpc_frequency : get_qpc_frequency();
+    const uint64_t gap_span_qpc = ms_to_qpc_delta(report.trigger.duration_ms, qpc_freq);
+    const uint64_t gap_start_qpc = (report.trigger.trigger_timestamp_qpc > gap_span_qpc)
+        ? (report.trigger.trigger_timestamp_qpc - gap_span_qpc) : 0;
+    const uint64_t gap_end_qpc = report.trigger.trigger_timestamp_qpc;
+
+    uint64_t total_cswitch_desched_us = 0;
+    uint64_t voluntary_cswitch_desched_us = 0;
+    for (const auto& rec : snapshot) {
+        if (static_cast<EventCategory>(rec.category) == EventCategory::CSWITCH) {
+            if (report.trigger.target_tid != 0 && rec.tid == report.trigger.target_tid) {
+                if (rec.qpc_timestamp >= gap_start_qpc && rec.qpc_timestamp <= gap_end_qpc) {
+                    total_cswitch_desched_us += rec.duration_us;
+                    if (rec.flags & EventFlags::CSWITCH_VOLUNTARY) {
+                        voluntary_cswitch_desched_us += rec.duration_us;
+                    }
+                }
+            }
+        }
+    }
+    info.voluntary_available = provider_ctx.kernel_cswitch_active && (total_cswitch_desched_us > 0);
+    if (total_cswitch_desched_us > 0) {
+        info.voluntary_wait_fraction = static_cast<double>(voluntary_cswitch_desched_us) / static_cast<double>(total_cswitch_desched_us);
+    }
+    const bool s3_voluntary = info.voluntary_available &&
+                              (info.voluntary_wait_fraction >= transition_thresholds::VOLUNTARY_DOMINANCE_FRACTION);
+
+    // S4: Present-mode change (Phase C - deferred, false in Phase A)
+    // TODO(M3.6-Phase-C): Extract SyncInterval/PresentFlags change from DXGI Stop records and wire ladder rule 6
+    const bool s4_present_mode_changed = false;
+    info.present_mode_changed = s4_present_mode_changed;
+
+    // Check dominant in-gap, target-affine stutter evidence (D4)
+    constexpr double k = detail::severity::gpu_stall::VETO_DOMINANCE_FACTOR;
+    const double gap_start_ms = -report.trigger.duration_ms - 5.0;
+    const double gap_end_ms = 5.0;
+    for (const auto& diag : report.diagnoses) {
+        if (diag.hypothesis == "d3d12_shader_pso_compilation_stall") {
+            for (const auto& ev : diag.evidence) {
+                const bool in_gap = (ev.offset_from_trigger_ms >= gap_start_ms && ev.offset_from_trigger_ms <= gap_end_ms);
+                const bool target_affine = (ev.pid == 0 || ev.pid == report.trigger.target_pid);
+                if (in_gap && target_affine &&
+                    ev.duration_us >= static_cast<uint32_t>(k * thresholds_.d3d12_pso_threshold_ms * 1000u)) {
+                    info.stutter_evidence_dominant = true;
+                    break;
+                }
+            }
+        } else if (diag.hypothesis == "dpc_isr_spike") {
+            const uint32_t dpc_thresh = std::min(thresholds_.dpc_threshold_us, thresholds_.isr_threshold_us);
+            for (const auto& ev : diag.evidence) {
+                const bool in_gap = (ev.offset_from_trigger_ms >= gap_start_ms && ev.offset_from_trigger_ms <= gap_end_ms);
+                const bool core_affine = (ev.cpu_core == report.trigger.cpu_index);
+                if (in_gap && core_affine &&
+                    ev.duration_us >= static_cast<uint32_t>(k * dpc_thresh)) {
+                    info.stutter_evidence_dominant = true;
+                    break;
+                }
+            }
+        }
+        if (info.stutter_evidence_dominant) break;
+    }
+
+    // Check if post frames are uniformly elevated (all >= 1.5x baseline)
+    bool all_post_elevated = (N > 0 && report.trigger.baseline_avg_ms > 0.0);
+    if (all_post_elevated) {
+        for (double d : post_durations) {
+            if (d < (transition_thresholds::REGIME_STEP_RATIO * report.trigger.baseline_avg_ms)) {
+                all_post_elevated = false;
+                break;
+            }
+        }
+    }
+
+    // 3. Decision ladder (§2.4)
+    double raw_conf = 0.0;
+
+    if (s1a_impulse) {
+        // Step 2: Impulse return confirmed -> GAMEPLAY (terminal)
+        info.classification = EventContextClass::GAMEPLAY;
+        raw_conf = 0.85;
+    } else if (info.stutter_evidence_dominant && !s1b_regime) {
+        // Step 3: Dominant stutter evidence without regime step -> GAMEPLAY (terminal)
+        info.classification = EventContextClass::GAMEPLAY;
+        raw_conf = 0.85;
+    } else if (s1b_regime) {
+        // Step 4: Regime step confirmed
+        if (s2_io_burst) {
+            info.classification = EventContextClass::LOADING_SCREEN;
+            raw_conf = transition_thresholds::CONFIDENCE_LOADING_BASE;
+            if (disk_bytes >= transition_thresholds::DISK_BURST_HEAVY_BYTES) {
+                raw_conf += transition_thresholds::CONFIDENCE_LOADING_HEAVY_IO_BONUS;
+            }
+            if (s3_voluntary) {
+                raw_conf += transition_thresholds::CONFIDENCE_LOADING_VOLUNTARY_BONUS;
+            }
+            if (all_post_elevated) {
+                raw_conf += transition_thresholds::CONFIDENCE_LOADING_ELEVATED_POST_BONUS;
+            }
+        } else {
+            info.classification = EventContextClass::STATE_TRANSITION;
+            raw_conf = transition_thresholds::CONFIDENCE_REGIME_BASE;
+            if (N >= transition_thresholds::REGIME_HIGH_SAMPLES_THRESHOLD) {
+                raw_conf += transition_thresholds::CONFIDENCE_REGIME_HIGH_SAMPLES_BONUS;
+            }
+            if (info.post_dispersion <= transition_thresholds::REGIME_LOW_DISPERSION_THRESHOLD) {
+                raw_conf += transition_thresholds::CONFIDENCE_REGIME_LOW_DISPERSION_BONUS;
+            }
+        }
+    } else if (s2_io_burst && all_post_elevated) {
+        // Step 5: I/O burst + elevated post frames but unstable dispersion -> LOADING_SCREEN
+        info.classification = EventContextClass::LOADING_SCREEN;
+        raw_conf = transition_thresholds::CONFIDENCE_LOADING_BASE;
+        if (disk_bytes >= transition_thresholds::DISK_BURST_HEAVY_BYTES) {
+            raw_conf += transition_thresholds::CONFIDENCE_LOADING_HEAVY_IO_BONUS;
+        }
+        if (s3_voluntary) {
+            raw_conf += transition_thresholds::CONFIDENCE_LOADING_VOLUNTARY_BONUS;
+        }
+        raw_conf += transition_thresholds::CONFIDENCE_LOADING_ELEVATED_POST_BONUS;
+    } else {
+        // Step 7: UNCLASSIFIED
+        info.classification = EventContextClass::UNCLASSIFIED;
+        raw_conf = 0.0;
+    }
+
+    if (info.classification != EventContextClass::UNCLASSIFIED) {
+        const double coverage = software_coverage(provider_ctx);
+        const double scaled_conf = raw_conf * (0.5 + 0.5 * coverage);
+        info.confidence = std::clamp(scaled_conf, 0.0, transition_thresholds::CONFIDENCE_MAX);
+    } else {
+        info.confidence = 0.0;
+    }
+
+    // Phase A shadow requirement: policy_applied is unconditionally false
+    info.policy_applied = false;
+
+    return info;
 }
 
 } // namespace stuttometer

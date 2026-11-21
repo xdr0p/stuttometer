@@ -552,14 +552,19 @@ void GuiController::session_worker_loop(GuiConfig config) {
                 uint64_t unpaired_evicts = session_mgr->unpaired_evictions();
                 uint64_t ins_failures = session_mgr->insertion_failures();
 
+                const double effective_post_ms = (to_qpc > trigger_info.trigger_timestamp_qpc)
+                    ? qpc_delta_to_ms(to_qpc - trigger_info.trigger_timestamp_qpc, qpc_freq)
+                    : config.window_post_ms;
+
                 CorrelateOptions correlate_opts{
                     .window_pre_ms = config.window_pre_ms,
-                    .window_post_ms = config.window_post_ms,
+                    .window_post_ms = effective_post_ms,
                     .present_threshold_ms = trig_config.present_threshold_ms,
                     .hardware_vblank_ms = trig_config.vblank_interval_ms,
                     .provider_tier = config.provider_tier,
                     .redact = config.redact,
-                    .judder_swing_ratio = config.judder_swing_ratio
+                    .judder_swing_ratio = config.judder_swing_ratio,
+                    .enable_transition_salience = false
                 };
 
                 auto report = correlator.correlate(snapshot_buffer, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());

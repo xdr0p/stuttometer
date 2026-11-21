@@ -412,6 +412,7 @@ static void test_classify_severity() {
     }
 
     // 2. High refresh: 240Hz, 4.16ms baseline, 25ms stall -> spike_ratio = 6.0 >= 3.0 -> DANGER
+    // Evaluated against explicit 240Hz display reference interval (1000 / 240 = 4.1667ms).
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::DXGI_PRESENT_STUTTER;
@@ -419,7 +420,8 @@ static void test_classify_severity() {
         trig.baseline_avg_ms = 4.16;
         trig.baseline_fps = 240.0;
         trig.spike_ratio = 6.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
+        const double ref_240hz = 1000.0 / 240.0;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_240hz) == MetricSeverity::DANGER);
     }
 
     // 3. Standard refresh: 60Hz, 16.66ms baseline, 35ms stall -> spike_ratio = 2.1 -> WARNING
@@ -486,156 +488,150 @@ static void test_classify_severity() {
         STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
     }
 
-    // 6. Judder magnitude classification:
-    // Test values use hard-coded numeric literals (not named constants) to strictly lock the threshold
-    // contract so future tuning changes force a deliberate, conscious test update.
+    // 6. Judder perceptual magnitude classification:
+    // Physical timing: 60Hz display (vblank_ref = 16.6667ms, baseline = 16.6667ms).
+    // swing_pp_ms = (min(swing_q100, 1000) / 100.0) * baseline_avg_ms
+    // 1.0x vblank = 16.6667ms; 2.0x vblank = 33.3333ms.
+    const double ref_60hz = 1000.0 / 60.0;
 
-    // --- DANGER tier single-condition and boundary tests ---
-    // 6a. DANGER: only high_alt true (hard-coded literal: 30)
+    // 6a. Core defect regression: massive span & high alts with sub-vblank swing MUST be NORMAL
+    // swing_q100 = 40 -> swing_pp = 0.40 * 16.6667 = 6.67ms < 1.0x vblank -> NORMAL
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_alternations = 30;
-        trig.duration_ms = 0.0;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 5000.0;
+        trig.judder_alternations = 60;
+        trig.judder_max_swing_q100 = 40;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::NORMAL);
     }
-    // 6b. Boundary just below DANGER high_alt: alternations = 29 -> drops to WARNING (hard-coded literal: 29)
+
+    // 6b. Definitional floor: alternations < 1 yields NORMAL even with high swing
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_alternations = 29;
-        trig.duration_ms = 0.0;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
-    }
-    // 6c. DANGER: only long_dur true (hard-coded literal: 500.0)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 100.0;
         trig.judder_alternations = 0;
+        trig.judder_max_swing_q100 = 200;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::NORMAL);
+    }
+
+    // 6c. Amplitude unassessable: baseline <= 0 yields NORMAL
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 0.0;
         trig.duration_ms = 500.0;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
-    }
-    // 6d. Boundary just below DANGER long_dur: duration_ms = 499.9 -> drops to WARNING (hard-coded literal: 499.9)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_alternations = 0;
-        trig.duration_ms = 499.9;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
-    }
-    // 6e. DANGER: only high_swing true (hard-coded literals: swing 60, alternations 5)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_max_swing_q100 = 60;
-        trig.judder_alternations = 5;
-        trig.duration_ms = 0.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::DANGER);
-    }
-    // 6f. Boundary just below DANGER high_swing: swing = 59, alternations = 5 -> drops to WARNING (hard-coded literal: 59)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_max_swing_q100 = 59;
-        trig.judder_alternations = 5;
-        trig.duration_ms = 0.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
-    }
-    // 6g. Conjunction isolation for DANGER swing: swing >= 60 but alternations < 5 (alt = 4) -> drops to WARNING (hard-coded literals: 60, 4)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_max_swing_q100 = 60;
-        trig.judder_alternations = 4;
-        trig.duration_ms = 0.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+        trig.judder_alternations = 30;
+        trig.judder_max_swing_q100 = 100;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::NORMAL);
     }
 
-    // --- WARNING tier single-condition and boundary tests ---
-    // 6h. WARNING: only mid_alt true (hard-coded literal: 10)
+    // 6d. Band boundary 1: just below 1.0x vblank -> NORMAL
+    // swing_q100 = 95 -> swing_pp = 0.95 * 16.6667 = 15.83ms < 16.67ms -> NORMAL
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 200.0;
         trig.judder_alternations = 10;
-        trig.duration_ms = 0.0;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
-    }
-    // 6i. Boundary just below WARNING mid_alt: alternations = 9 -> drops to NORMAL (hard-coded literal: 9)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_alternations = 9;
-        trig.duration_ms = 0.0;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
-    }
-    // 6j. WARNING: only mid_dur true (hard-coded literal: 150.0)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_alternations = 0;
-        trig.duration_ms = 150.0;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
-    }
-    // 6k. Boundary just below WARNING mid_dur: duration_ms = 149.9 -> drops to NORMAL (hard-coded literal: 149.9)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_alternations = 0;
-        trig.duration_ms = 149.9;
-        trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
-    }
-    // 6l. WARNING: only mid_swing true (hard-coded literals: swing 40, alternations 3)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_max_swing_q100 = 40;
-        trig.judder_alternations = 3;
-        trig.duration_ms = 0.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
-    }
-    // 6m. Boundary just below WARNING mid_swing: swing = 39, alternations = 3 -> drops to NORMAL (hard-coded literal: 39)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_max_swing_q100 = 39;
-        trig.judder_alternations = 3;
-        trig.duration_ms = 0.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
-    }
-    // 6n. Conjunction isolation for WARNING swing: swing >= 40 but alternations < 3 (alt = 2) -> drops to NORMAL (hard-coded literals: 40, 2)
-    {
-        TriggerInfo trig{};
-        trig.source = TriggerSource::FRAME_PACING_JUDDER;
-        trig.reason = TriggerReason::CADENCE_JUDDER;
-        trig.judder_max_swing_q100 = 40;
-        trig.judder_alternations = 2;
-        trig.duration_ms = 0.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
+        trig.judder_max_swing_q100 = 95;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::NORMAL);
     }
 
-    // --- NORMAL tier tests ---
-    // 6o. NORMAL: all dimensions well below (hard-coded literals: 0, 0.0, 0)
+    // 6e. Band boundary 2: at/above 1.0x vblank -> WARNING (mild cadence disruption)
+    // swing_q100 = 105 -> swing_pp = 1.05 * 16.6667 = 17.50ms >= 16.67ms -> WARNING
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 100.0;
+        trig.judder_alternations = 5;
+        trig.judder_max_swing_q100 = 105;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::WARNING);
+    }
+
+    // 6f. Band boundary 3: just below 2.0x vblank -> WARNING even with high persistence
+    // swing_q100 = 195 -> swing_pp = 1.95 * 16.6667 = 32.50ms < 33.33ms -> WARNING (capped at WARNING)
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 1000.0;
+        trig.judder_alternations = 40;
+        trig.judder_max_swing_q100 = 195;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::WARNING);
+    }
+
+    // 6g. Band boundary 4: at/above 2.0x vblank without persistence (alt < 30 && dur < 500ms) -> stays WARNING
+    // swing_q100 = 210 -> swing_pp = 2.10 * 16.6667 = 35.00ms >= 33.33ms, alt=10, dur=200ms -> WARNING
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 200.0;
+        trig.judder_alternations = 10;
+        trig.judder_max_swing_q100 = 210;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::WARNING);
+    }
+
+    // 6h. Boundary just below DANGER persistence: alt = 29 (< 30) and dur = 499.9ms (< 500ms) -> WARNING
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 499.9;
+        trig.judder_alternations = 29;
+        trig.judder_max_swing_q100 = 210;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::WARNING);
+    }
+
+    // 6i. Severe sustained judder: swing >= 2.0x vblank with high alternations (alt >= 30) -> DANGER
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 200.0;
+        trig.judder_alternations = 30;
+        trig.judder_max_swing_q100 = 210;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::DANGER);
+    }
+
+    // 6j. Severe sustained judder: swing >= 2.0x vblank with high duration (dur >= 500ms) -> DANGER
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 500.0;
+        trig.judder_alternations = 10;
+        trig.judder_max_swing_q100 = 210;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::DANGER);
+    }
+
+    // 6k. Severe sustained judder: both high alternations and high duration -> DANGER
+    {
+        TriggerInfo trig{};
+        trig.source = TriggerSource::FRAME_PACING_JUDDER;
+        trig.reason = TriggerReason::CADENCE_JUDDER;
+        trig.baseline_avg_ms = 16.6667;
+        trig.duration_ms = 1000.0;
+        trig.judder_alternations = 40;
+        trig.judder_max_swing_q100 = 210;
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::DANGER);
+    }
+
+    // 6l. All dimensions zero -> NORMAL
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
@@ -643,7 +639,7 @@ static void test_classify_severity() {
         trig.duration_ms = 0.0;
         trig.judder_alternations = 0;
         trig.judder_max_swing_q100 = 0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
+        STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_60hz) == MetricSeverity::NORMAL);
     }
 
     // 7. Fallback without baseline (baseline_avg_ms == 0.0 or spike_ratio == 0.0)
@@ -710,14 +706,14 @@ static void test_classify_severity() {
         trig.duration_ms = 45.0;
         STUTTO_ASSERT(stuttometer::classify_severity(trig, ref_30hz) == MetricSeverity::NORMAL);
     }
-    // Fallback without baseline for Judder with mid magnitude (duration >= 150.0) -> WARNING
+    // Fallback without baseline for Judder: amplitude unassessable -> NORMAL
     {
         TriggerInfo trig{};
         trig.source = TriggerSource::FRAME_PACING_JUDDER;
         trig.duration_ms = 150.0;
         trig.baseline_avg_ms = 0.0;
         trig.spike_ratio = 0.0;
-        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::WARNING);
+        STUTTO_ASSERT(stuttometer::classify_severity(trig) == MetricSeverity::NORMAL);
     }
 
     std::cout << "[TEST] classify_severity PASSED.\n";

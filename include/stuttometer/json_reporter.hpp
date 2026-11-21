@@ -13,7 +13,7 @@ public:
     JsonReporter() = default;
     ~JsonReporter() = default;
 
-    // Serializes report to nlohmann::json object conforming to schema v1.0
+    // Serializes report to nlohmann::json object conforming to schema v1.5
     nlohmann::json to_json(const DiagnosticReport& report, bool redact = false) const;
 
     // Serializes report to formatted JSON string

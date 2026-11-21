@@ -33,6 +33,10 @@ namespace pacing_tuning {
     inline constexpr double   CATASTROPHIC_CEIL_MS       = 500.0;
     inline constexpr double   DEFAULT_JUDDER_SWING_RATIO = 0.35;
     inline constexpr double   DXGI_AUTHORITATIVE_STALENESS_MS = 1000.0;
+    inline constexpr double   STREAMING_VAR_ALPHA        = 0.20;
+    inline constexpr uint16_t HYSTERESIS_BASE_Q100       = 100;
+    inline constexpr uint16_t HYSTERESIS_MAX_Q100        = 125;
+    inline constexpr uint16_t HYSTERESIS_STEP_Q100       = 5;
 }
 
 // Strongly-typed trigger reason identifier
@@ -248,12 +252,23 @@ struct alignas(64) RollingFrameStats {
     uint16_t _judder_pad{0};                            // Bytes 326..327
     uint64_t judder_episode_start_qpc{0};               // Bytes 328..335
     uint64_t judder_episode_last_alt_qpc{0};            // Bytes 336..343
-    uint64_t _judder_reserved[5]{};                     // Bytes 344..383 (40 bytes)
+    uint32_t streaming_sigma_us{0};                     // Bytes 344..347 (M3: streaming baseline stddev)
+    uint32_t last_promoted_mean_us{0};                  // Bytes 348..351 (M3: baseline mean at promotion [telemetry])
+    uint16_t candidate_eval_count{0};                   // Bytes 352..353 (M3: candidate evaluation iterations [telemetry])
+    uint16_t hysteresis_factor_q100{100};               // Bytes 354..355 (M3: hysteresis ratio * 100)
+    uint32_t baseline_observed_var_us{0};               // Bytes 356..359 (M3: cached baseline variance in us^2 [telemetry])
+    uint64_t _adaptation_reserved[3]{};                 // Bytes 360..383 (24 bytes reserved)
 };
 static_assert(sizeof(RollingFrameStats) == 384, "RollingFrameStats must be exactly 384 bytes (6 cache lines)");
 static_assert(offsetof(RollingFrameStats, judder_episode_active) == 320);
 static_assert(offsetof(RollingFrameStats, judder_episode_start_qpc) == 328);
 static_assert(offsetof(RollingFrameStats, judder_episode_last_alt_qpc) == 336);
+static_assert(offsetof(RollingFrameStats, streaming_sigma_us) == 344);
+static_assert(offsetof(RollingFrameStats, last_promoted_mean_us) == 348);
+static_assert(offsetof(RollingFrameStats, candidate_eval_count) == 352);
+static_assert(offsetof(RollingFrameStats, hysteresis_factor_q100) == 354);
+static_assert(offsetof(RollingFrameStats, baseline_observed_var_us) == 356);
+static_assert(offsetof(RollingFrameStats, _adaptation_reserved) == 360);
 static_assert(std::is_trivially_copyable_v<RollingFrameStats>, "RollingFrameStats must be trivially copyable");
 
 inline void reset_cadence_state(RollingFrameStats& stats) noexcept {
@@ -263,16 +278,18 @@ inline void reset_cadence_state(RollingFrameStats& stats) noexcept {
     stats.alternating_cadence_count = 0;
 }
 
-// Clears all four candidate accumulator fields. Used at 7 sites: reset_frame_stats,
+// Clears all candidate accumulator and evaluation fields. Used at 7 sites: reset_frame_stats,
 // pause reset, promotion success, inconsistent-candidate rejection, CADENCE_JUDDER trigger,
 // STATIC_THRESHOLD fallback, and clean-frame tail.
 inline void clear_cadence_candidate(RollingFrameStats& stats) noexcept {
     stats.candidate_consecutive_skips = 0;
     stats.candidate_clean_frames_since_last_match = 0;
-    stats.candidate_count     = 0;
-    stats.candidate_sum_us    = 0;
-    stats.candidate_sum_sq_us = 0;
-    stats.candidate_first_qpc = 0;
+    stats.candidate_count        = 0;
+    stats.candidate_sum_us       = 0;
+    stats.candidate_sum_sq_us    = 0;
+    stats.candidate_first_qpc    = 0;
+    stats.candidate_eval_count   = 0;
+    stats.hysteresis_factor_q100 = pacing_tuning::HYSTERESIS_BASE_Q100;
 }
 
 inline void reset_frame_stats(RollingFrameStats& stats, uint64_t qpc_ts = 0) noexcept {
@@ -294,6 +311,14 @@ inline void reset_frame_stats(RollingFrameStats& stats, uint64_t qpc_ts = 0) noe
     stats.judder_episode_max_swing_q100 = 0;
     stats.judder_episode_start_qpc = 0;
     stats.judder_episode_last_alt_qpc = 0;
+    stats.streaming_sigma_us = 0;
+    stats.last_promoted_mean_us = 0;
+    stats.candidate_eval_count = 0;
+    stats.hysteresis_factor_q100 = 100;
+    stats.baseline_observed_var_us = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        stats._adaptation_reserved[i] = 0;
+    }
 }
 
 inline double calculate_mean_ms(const RollingFrameStats& stats) noexcept {
@@ -471,13 +496,68 @@ constexpr uint32_t MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR = 10;
         return CandidateOutcome::ACCUMULATED;
     }
 
+    if (stats.candidate_eval_count < 0xFFFF) {
+        ++stats.candidate_eval_count;
+    }
+
+    // Amortized streaming baseline variance sampling (~every 60 frames on ETW thread, allocation-free & lock-free)
+    if (stats.sample_count >= 16) {
+        const double base_mean_us = static_cast<double>(stats.sum_dur_us) / stats.sample_count;
+        const double base_mean_sq_us = static_cast<double>(stats.sum_sq_dur_us) / stats.sample_count;
+        const double base_var_us = std::max(0.0, base_mean_sq_us - (base_mean_us * base_mean_us));
+        stats.baseline_observed_var_us = static_cast<uint32_t>(std::min<double>(base_var_us, 4294967295.0));
+        const double base_stddev_ms = std::sqrt(base_var_us) / 1000.0;
+        const uint32_t base_stddev_us = static_cast<uint32_t>(base_stddev_ms * 1000.0);
+        if (stats.streaming_sigma_us == 0) {
+            stats.streaming_sigma_us = base_stddev_us;
+        } else {
+            // Smooth EMA update (alpha = 0.20): 0.8 * old + 0.2 * new
+            stats.streaming_sigma_us = static_cast<uint32_t>(
+                (4ULL * stats.streaming_sigma_us + base_stddev_us) / 5ULL
+            );
+        }
+    }
+
     const double mean_us    = static_cast<double>(stats.candidate_sum_us) / stats.candidate_count;
     const double mean_sq_us = static_cast<double>(stats.candidate_sum_sq_us) / stats.candidate_count;
     const double var_us     = std::max(0.0, mean_sq_us - (mean_us * mean_us));
     const double sigma_ms   = std::sqrt(var_us) / 1000.0;
+    const double current_cand_mean_ms = mean_us / 1000.0;
 
-    const double sigma_threshold_ms = std::clamp(pacing_tuning::SIGMA_SCALE * (mean_us / 1000.0), pacing_tuning::SIGMA_FLOOR_MS, pacing_tuning::SIGMA_CEIL_MS);
-    if (sigma_ms >= sigma_threshold_ms || (mean_us / 1000.0) >= CANDIDATE_SANITY_CEILING_MS) {
+    // Fixed sigma gate (floor 0.5 ms, ceil 5.0 ms)
+    const double fixed_sigma_threshold_ms = std::clamp(
+        pacing_tuning::SIGMA_SCALE * current_cand_mean_ms,
+        pacing_tuning::SIGMA_FLOOR_MS,
+        pacing_tuning::SIGMA_CEIL_MS
+    );
+
+    // Adaptive streaming variance gate with hysteresis
+    double adaptive_sigma_ms = fixed_sigma_threshold_ms;
+    if (stats.streaming_sigma_us > 0) {
+        const double streaming_sigma_ms = static_cast<double>(stats.streaming_sigma_us) / 1000.0;
+        const double base_mean_ms = calculate_mean_ms(stats);
+        const double streaming_cv = (base_mean_ms > 0.0)
+            ? (streaming_sigma_ms / base_mean_ms)
+            : pacing_tuning::SIGMA_SCALE;
+        const double scaled_streaming_sigma_ms = std::max(
+            streaming_sigma_ms,
+            streaming_cv * current_cand_mean_ms
+        );
+        const double hyst_multiplier = static_cast<double>(stats.hysteresis_factor_q100) / 100.0;
+        const double hyst_sigma_ms = scaled_streaming_sigma_ms * hyst_multiplier;
+        adaptive_sigma_ms = std::clamp(
+            std::max(fixed_sigma_threshold_ms, hyst_sigma_ms),
+            pacing_tuning::SIGMA_FLOOR_MS,
+            pacing_tuning::SIGMA_CEIL_MS
+        );
+    }
+
+    if (sigma_ms >= adaptive_sigma_ms || current_cand_mean_ms >= CANDIDATE_SANITY_CEILING_MS) {
+        // Increment hysteresis factor on persistence across evaluation cycles
+        stats.hysteresis_factor_q100 = std::min<uint16_t>(
+            pacing_tuning::HYSTERESIS_MAX_Q100,
+            static_cast<uint16_t>(stats.hysteresis_factor_q100 + pacing_tuning::HYSTERESIS_STEP_Q100)
+        );
         return CandidateOutcome::ACCUMULATED;
     }
 
@@ -491,9 +571,15 @@ constexpr uint32_t MAX_CLEAN_FRAMES_BEFORE_STALE_CLEAR = 10;
     stats.sample_count  = 64;
     stats.write_idx     = 0;
 
+    stats.last_promoted_mean_us    = seed_us;
+    stats.streaming_sigma_us       = static_cast<uint32_t>(sigma_ms * 1000.0);
+    stats.baseline_observed_var_us = static_cast<uint32_t>(std::min<double>(var_us, 4294967295.0));
+    stats.hysteresis_factor_q100   = pacing_tuning::HYSTERESIS_BASE_Q100;
+    stats.candidate_eval_count     = 0;
+
     clear_cadence_candidate(stats);
 
-    out_promoted_avg_ms = mean_us / 1000.0;
+    out_promoted_avg_ms = current_cand_mean_ms;
     return CandidateOutcome::PROMOTED;
 }
 

@@ -598,12 +598,15 @@ static void draw_card(
             dur_sub = ratio_buf;
         }
 
-        MetricSeverity sev = stuttometer::classify_severity(report.trigger, report.present_threshold_ms);
+        const double vblank_ref = (report.hardware_vblank_ms > 0.0)
+            ? report.hardware_vblank_ms
+            : report.present_threshold_ms;
+        MetricSeverity sev = stuttometer::classify_severity(report.trigger, vblank_ref);
         Color val_color = to_gdiplus_color(get_severity_color(sev));
         draw_metric_tile(0, L"STALL DURATION", dur_main, dur_sub, val_color);
     }
 
-    // Tile 2: Effective Framerate (state-driven colors, muted slate for N/A)
+    // Tile 2: Effective Framerate (neutral slate label)
     {
         std::wstring fps_main;
         std::wstring fps_sub;
@@ -625,16 +628,7 @@ static void draw_card(
             wfmt(fps_buf, L"%.1f \u2192 %.1f FPS", report.trigger.baseline_fps, stall_fps);
             fps_main = fps_buf;
             fps_sub  = L"Framerate drop";
-
-            double drop = (report.trigger.baseline_fps - stall_fps) / report.trigger.baseline_fps;
-            auto sev = detail::classify_stall(0.0, 0.0, drop, false, 0, report.present_threshold_ms);
-            if (sev == detail::MetricSeverity::DANGER) {
-                val_color = color_accent_danger;
-            } else if (sev == detail::MetricSeverity::WARNING) {
-                val_color = color_accent_amb;
-            } else {
-                val_color = color_text_bright;
-            }
+            val_color = color_text_bright;
         }
         draw_metric_tile(1, L"EFFECTIVE FRAMERATE", fps_main, fps_sub, val_color);
     }

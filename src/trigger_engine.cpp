@@ -14,6 +14,7 @@ TriggerEngine::TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq)
     , pre_window_qpc_(ms_to_qpc_delta(config.window_pre_ms, qpc_freq))
     , gpu_pre_window_qpc_(ms_to_qpc_delta(std::max(config.window_pre_ms, std::clamp(config.window_pre_ms * 1.5, 250.0, 1200.0)), qpc_freq))
     , post_window_qpc_(ms_to_qpc_delta(config.window_post_ms, qpc_freq))
+    , probe_qpc_(ms_to_qpc_delta(transition_thresholds::PROBE_WINDOW_MS, qpc_freq))
     , cooldown_qpc_(ms_to_qpc_delta(config.cooldown_ms, qpc_freq))
     , watchdog_qpc_(ms_to_qpc_delta(TRIGGER_WATCHDOG_MS, qpc_freq)) // 5.0s recovery
     , last_target_pid_(config.target_pid)
@@ -23,6 +24,7 @@ TriggerEngine::TriggerEngine(const TriggerConfig& config, uint64_t qpc_freq)
     const uint64_t initial_state = (static_cast<uint64_t>(config.target_pid) << 32) | (waiting ? 1ULL : 0ULL);
     target_state_.store(initial_state, std::memory_order_relaxed);
     target_attach_qpc_.store(get_current_qpc(), std::memory_order_release);
+    effective_post_window_qpc_.store(post_window_qpc_, std::memory_order_relaxed);
 }
 
 void TriggerEngine::on_target_changed(uint32_t new_pid) noexcept {
@@ -45,7 +47,9 @@ void TriggerEngine::record_filtered_event(
     uint32_t pid,
     uint32_t tid,
     uint8_t cpu_index,
-    FilterKind kind
+    FilterKind kind,
+    uint16_t judder_alternations,
+    uint16_t judder_max_swing_q100
 ) noexcept {
     filtered_reports_.fetch_add(1, std::memory_order_relaxed);
     if (reason != TriggerReason::CADENCE_JUDDER) {
@@ -67,8 +71,10 @@ void TriggerEngine::record_filtered_event(
     tmp.target_pid = pid;
     tmp.target_tid = tid;
     tmp.cpu_index = cpu_index;
+    tmp.judder_alternations = judder_alternations;
+    tmp.judder_max_swing_q100 = judder_max_swing_q100;
 
-    const MetricSeverity sev = classify_severity(tmp, config_.present_threshold_ms);
+    const MetricSeverity sev = classify_severity(tmp, vblank_interval_ms());
 
     FilteredEvent fe{};
     fe.qpc_timestamp   = timestamp_qpc;
@@ -116,11 +122,12 @@ bool TriggerEngine::initiate_trigger_atomic(
     candidate.judder_alternations = judder_alternations;
     candidate.judder_max_swing_q100 = judder_max_swing_q100;
 
-    const MetricSeverity sev = classify_severity(candidate, config_.present_threshold_ms);
+    const MetricSeverity sev = classify_severity(candidate, vblank_interval_ms());
     if (!meets_min_severity(sev, min_report_severity_.load(std::memory_order_acquire))) {
         record_filtered_event(src, reason, timestamp_qpc, duration_ms,
                               baseline_avg_ms, spike_ratio, pid, tid, cpu_index,
-                              FilterKind::SEVERITY_GATE);
+                              FilterKind::SEVERITY_GATE,
+                              judder_alternations, judder_max_swing_q100);
         return false;
     }
 
@@ -152,7 +159,22 @@ bool TriggerEngine::initiate_trigger_atomic(
     const uint64_t now_qpc = get_current_qpc();
     claimed_timestamp_qpc_.store(now_qpc, std::memory_order_release);
     active_source_.store(src, std::memory_order_release);
-    post_target_qpc_.store(now_qpc + post_window_qpc_, std::memory_order_release);
+
+    // Evaluate eligibility for adaptive probe window (D5)
+    // Eligible: catastrophic stall (>=100ms, >=8x baseline), target PID != 0, frame source & relative/static reason
+    const bool is_eligible =
+        (src == TriggerSource::DXGI_PRESENT_STUTTER || src == TriggerSource::KERNEL_FRAME_STALL) &&
+        (reason == TriggerReason::RELATIVE_SPIKE || reason == TriggerReason::STATIC_THRESHOLD) &&
+        (duration_ms >= transition_thresholds::MIN_DURATION_MS) &&
+        (baseline_avg_ms <= 0.0 || duration_ms >= (transition_thresholds::MIN_BASELINE_MULT * baseline_avg_ms)) &&
+        (pid != 0);
+
+    const uint64_t effective_post = is_eligible
+        ? std::max(post_window_qpc_, probe_qpc_)
+        : post_window_qpc_;
+
+    effective_post_window_qpc_.store(effective_post, std::memory_order_release);
+    post_target_qpc_.store(now_qpc + effective_post, std::memory_order_release);
     report_consumed_.store(false, std::memory_order_release);
 
     // Test-only seam: signal that Phase 1 & 2 are complete before entering pause loop
@@ -203,7 +225,7 @@ bool TriggerEngine::initiate_trigger_atomic(
     }
 
     TriggerState expected_claimed = TriggerState::CLAIMED;
-    const TriggerState next_state = (config_.window_post_ms > 0.0)
+    const TriggerState next_state = (effective_post > 0)
         ? TriggerState::COLLECTING_POST
         : TriggerState::FROZEN;
 
@@ -617,7 +639,7 @@ bool TriggerEngine::poll_state(
             ? gpu_pre_window_qpc_ : pre_window_qpc_;
 
         out_from_qpc = (trig_qpc > pre_qpc) ? (trig_qpc - pre_qpc) : 0;
-        out_to_qpc   = trig_qpc + post_window_qpc_;
+        out_to_qpc   = trig_qpc + effective_post_window_qpc_.load(std::memory_order_acquire);
         return true;
     }
 
@@ -634,6 +656,7 @@ void TriggerEngine::on_report_completed(uint64_t current_qpc) noexcept {
     cooldown_target_qpc_.store(current_qpc + cooldown_qpc_, std::memory_order_release);
     frozen_timestamp_qpc_.store(0, std::memory_order_release);
     claimed_timestamp_qpc_.store(0, std::memory_order_release);
+    effective_post_window_qpc_.store(post_window_qpc_, std::memory_order_release);
     active_source_.store(TriggerSource::NONE, std::memory_order_release);
     staged_gpu_duration_us_.store(0, std::memory_order_relaxed);
     report_consumed_.store(false, std::memory_order_release);

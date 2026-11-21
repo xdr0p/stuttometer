@@ -10,6 +10,7 @@
 #include "settings_dialog.hpp"
 #include "gui_string_utils.hpp"
 #include "stuttometer/internal/display_strings.hpp"
+#include "stuttometer/internal/gui_constants.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -84,6 +85,45 @@ static RECT get_trigger_mode_badge_rect(int client_width) {
     const int badge_w = scale_dpi(220);
     const int badge_x = client_width - scale_dpi(16) - scale_dpi(12) - badge_w;
     return { badge_x, badge_mode_y, badge_x + badge_w, badge_mode_y + badge_mode_h };
+}
+
+// Minor events aggregation & OSD notification state
+struct MinorEventSample {
+    uint64_t tick_ms{0};
+    uint32_t count{0};
+};
+
+static std::deque<MinorEventSample> g_recent_minor_events;
+static uint64_t g_last_filtered_reports = 0;
+static uint64_t g_last_osd_toast_tick = 0;
+static bool g_aggregation_needs_baseline = true;
+
+static void prune_minor_events(uint64_t now_tick) {
+    const uint64_t window_ms = gui_constants::OSD_AGGREGATION_WINDOW_MS;
+    while (!g_recent_minor_events.empty()) {
+        if (now_tick >= g_recent_minor_events.front().tick_ms &&
+            (now_tick - g_recent_minor_events.front().tick_ms) > window_ms) {
+            g_recent_minor_events.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+static uint32_t get_recent_minor_count(uint64_t now_tick) {
+    prune_minor_events(now_tick);
+    uint32_t total = 0;
+    for (const auto& sample : g_recent_minor_events) {
+        total += sample.count;
+    }
+    return total;
+}
+
+static void reset_osd_aggregation_state() {
+    g_recent_minor_events.clear();
+    g_last_filtered_reports = 0;
+    g_last_osd_toast_tick = 0;
+    g_aggregation_needs_baseline = true;
 }
 
 // Forward declarations
@@ -345,7 +385,10 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
         g_session_stutter_count++;
     }
 
-    rec.severity = stuttometer::classify_severity(report->trigger, report->present_threshold_ms);
+    const double vblank_ref = (report->hardware_vblank_ms > 0.0)
+        ? report->hardware_vblank_ms
+        : report->present_threshold_ms;
+    rec.severity = stuttometer::classify_severity(report->trigger, vblank_ref);
     rec.report = std::move(report);
     g_stutters.push_back(std::move(rec));
 
@@ -419,6 +462,8 @@ static void clear_stutter_history() {
     g_session_audio_count = 0;
     g_capture_start_tick = 0;
     g_capture_elapsed_seconds = 0;
+    reset_osd_aggregation_state();
+    g_osd_toast.hide();
     if (g_current_session_state == GuiSessionState::IDLE) {
         g_status_text = L"IDLE (Ready to monitor)";
     }
@@ -585,6 +630,7 @@ static void update_session_ui_state(GuiSessionState state) {
             g_capture_elapsed_seconds = 0;
             g_session_stutter_count = 0;
             g_session_audio_count = 0;
+            reset_osd_aggregation_state();
             update_metrics_text();
         }
     } else if (state == GuiSessionState::IDLE || state == GuiSessionState::STOPPING) {
@@ -597,6 +643,8 @@ static void update_session_ui_state(GuiSessionState state) {
             g_capture_elapsed_seconds = (GetTickCount64() - g_capture_start_tick) / 1000;
         }
         g_capture_start_tick = 0;
+        reset_osd_aggregation_state();
+        g_osd_toast.hide();
         update_metrics_text();
     }
 
@@ -1614,9 +1662,18 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_STUTTO_TRIGGER: {
             std::unique_ptr<DiagnosticReport> report(reinterpret_cast<DiagnosticReport*>(lParam));
             if (report && g_settings_config.enable_osd) {
-                const auto sev = stuttometer::classify_severity(report->trigger, report->present_threshold_ms);
+                const double vblank_ref = (report->hardware_vblank_ms > 0.0)
+                    ? report->hardware_vblank_ms
+                    : report->present_threshold_ms;
+                const auto sev = stuttometer::classify_severity(report->trigger, vblank_ref);
                 if (stuttometer::meets_min_severity(sev, g_settings_config.min_osd_severity)) {
-                    g_osd_toast.show(*report, g_settings_config.osd_duration_ms, g_settings_config.osd_position);
+                    const uint64_t now_tick = GetTickCount64();
+                    const uint64_t cooldown_ms = static_cast<uint64_t>(std::max(100.0, g_settings_config.cooldown_ms));
+                    if (g_last_osd_toast_tick == 0 || (now_tick - g_last_osd_toast_tick) >= cooldown_ms) {
+                        g_last_osd_toast_tick = now_tick;
+                        const uint32_t minor_count = get_recent_minor_count(now_tick);
+                        g_osd_toast.show(*report, g_settings_config.osd_duration_ms, g_settings_config.osd_position, minor_count);
+                    }
                 }
             }
             handle_new_report(std::move(report));
@@ -1629,6 +1686,25 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 if (metrics->total_events_recorded > 0) {
                     g_has_received_data = true;
                 }
+
+                const uint64_t now_tick = GetTickCount64();
+                if (g_aggregation_needs_baseline) {
+                    g_last_filtered_reports = metrics->filtered_reports;
+                    g_aggregation_needs_baseline = false;
+                } else if (metrics->filtered_reports > g_last_filtered_reports) {
+                    const uint32_t delta = static_cast<uint32_t>(metrics->filtered_reports - g_last_filtered_reports);
+                    g_recent_minor_events.push_back({ now_tick, delta });
+                    g_last_filtered_reports = metrics->filtered_reports;
+                } else if (metrics->filtered_reports < g_last_filtered_reports) {
+                    g_last_filtered_reports = metrics->filtered_reports;
+                }
+
+                prune_minor_events(now_tick);
+
+                if (g_settings_config.enable_osd && g_osd_toast.is_visible()) {
+                    g_osd_toast.update_minor_count(get_recent_minor_count(now_tick));
+                }
+
                 update_metrics_text();
                 update_clear_button_state();
 
@@ -1664,6 +1740,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_STUTTO_TARGET_ATTACHED: {
             g_is_target_waiting = false;
             g_target_attach_tick = GetTickCount64();
+            reset_osd_aggregation_state();
             update_session_ui_state(g_current_session_state);
             update_metrics_text();
 
@@ -1691,6 +1768,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             // overwrite active gameplay time with total session time (including pre-launch wait).
             g_capture_start_tick = 0;
             g_is_target_waiting = false;
+            reset_osd_aggregation_state();
+            g_osd_toast.hide();
             update_metrics_text();
 
             // Auto-finish the capture session on target exit

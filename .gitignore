@@ -44,6 +44,8 @@ Testing/
 
 # Test, trace, and report outputs
 temp/
+results/
+scratch/
 stutto_*.json
 *.etl
 *.log
@@ -57,6 +59,7 @@ desktop.ini
 
 # Repomix & AI bundle tools & outputs
 codebase*.txt
+tests.txt
 repomix-output.*
 repomix.config.json
 split_codebase.*

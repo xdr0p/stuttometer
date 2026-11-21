@@ -27,6 +27,9 @@ namespace detail {
 
     using MetricSeverity = stuttometer::MetricSeverity;
 
+    // DEPRECATED / LEGACY TEST-UTILITY ONLY:
+    // This function implements the legacy ratio/drop heuristic and is retained
+    // strictly for test_card_renderer compatibility. Do NOT use for production rendering.
     [[nodiscard]] inline MetricSeverity classify_stall(
         double dur_ms, double spike_ratio, double drop, bool is_audio, uint32_t glitches, double present_threshold_ms = stuttometer::DEFAULT_60HZ_VBLANK_MS
     ) {

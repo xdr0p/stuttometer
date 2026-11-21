@@ -426,6 +426,50 @@ static void test_comprehensive_pii_path_redaction() {
     std::cout << "  -> Comprehensive PII path redaction suite PASSED.\n";
 }
 
+static void test_schema_1_5_report_and_event_context() {
+    std::cout << "[TEST] Validating Default Schema 1.5, Fallback Literal & EventContext Shape...\n";
+    stuttometer::JsonReporter reporter;
+
+    // 1. Default-constructed report
+    stuttometer::DiagnosticReport default_report;
+    STUTTO_ASSERT(default_report.schema_version == "1.5");
+    auto j_default = reporter.to_json(default_report, false);
+    STUTTO_ASSERT(j_default["schema_version"] == "1.5");
+    STUTTO_ASSERT(j_default.contains("event_context"));
+    STUTTO_ASSERT(j_default["event_context"]["classification"] == "UNCLASSIFIED");
+    STUTTO_ASSERT(j_default["event_context"]["confidence"] == 0.0);
+    STUTTO_ASSERT(j_default["event_context"]["policy_applied"] == false);
+    STUTTO_ASSERT(j_default["event_context"]["signals"]["post_frame_samples"] == 0);
+    STUTTO_ASSERT(j_default["event_context"]["signals"].contains("disk_post_count"));
+    STUTTO_ASSERT(j_default["event_context"]["signals"].contains("voluntary_available"));
+
+    // 2. Empty schema_version fallback literal
+    stuttometer::DiagnosticReport empty_schema_report;
+    empty_schema_report.schema_version = "";
+    auto j_empty = reporter.to_json(empty_schema_report, false);
+    STUTTO_ASSERT(j_empty["schema_version"] == "1.5");
+
+    // 3. Populated event_context with GAMEPLAY, STATE_TRANSITION, and LOADING_SCREEN enum values
+    stuttometer::DiagnosticReport pop_report;
+    pop_report.event_context.classification = stuttometer::EventContextClass::GAMEPLAY;
+    pop_report.event_context.confidence = 0.95;
+    pop_report.event_context.impulse_confirmed = true;
+    auto j_gameplay = reporter.to_json(pop_report, false);
+    STUTTO_ASSERT(j_gameplay["event_context"]["classification"] == "GAMEPLAY");
+    STUTTO_ASSERT(j_gameplay["event_context"]["confidence"] == 0.95);
+    STUTTO_ASSERT(j_gameplay["event_context"]["signals"]["impulse_confirmed"] == true);
+
+    pop_report.event_context.classification = stuttometer::EventContextClass::STATE_TRANSITION;
+    auto j_transition = reporter.to_json(pop_report, false);
+    STUTTO_ASSERT(j_transition["event_context"]["classification"] == "STATE_TRANSITION");
+
+    pop_report.event_context.classification = stuttometer::EventContextClass::LOADING_SCREEN;
+    auto j_loading = reporter.to_json(pop_report, false);
+    STUTTO_ASSERT(j_loading["event_context"]["classification"] == "LOADING_SCREEN");
+
+    std::cout << "  -> Schema 1.5 & EventContext Shape in test_json_schema PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer JSON Schema & Redaction Tests ===\n";
     try {
@@ -437,6 +481,7 @@ int main() {
         test_comprehensive_pii_path_redaction();
         test_audio_glitch_json_serialization();
         test_save_to_file_non_ascii_path();
+        test_schema_1_5_report_and_event_context();
         std::cout << ">>> All JSON Schema tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {
