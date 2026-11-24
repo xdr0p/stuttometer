@@ -27,7 +27,6 @@ struct OsdToastData {
     uint32_t glitch_count{0};
     double present_threshold_ms{stuttometer::DEFAULT_60HZ_VBLANK_MS};
     double hardware_vblank_ms{0.0};
-    uint32_t minor_event_count{0};
     stuttometer::TriggerInfo trigger{};
 };
 
@@ -39,8 +38,7 @@ public:
     bool create(HINSTANCE hInst) noexcept;
     void destroy() noexcept;
 
-    void show(const DiagnosticReport& report, uint32_t duration_ms, OsdPosition position, uint32_t minor_event_count = 0) noexcept;
-    void update_minor_count(uint32_t count) noexcept;
+    void show(const DiagnosticReport& report, uint32_t duration_ms, OsdPosition position) noexcept;
     void hide() noexcept;
 
     [[nodiscard]] bool is_visible() const noexcept;

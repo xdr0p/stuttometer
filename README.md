@@ -276,7 +276,8 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 ### Frame Pacing CSV Export & Auto-Save Retention
 
 - `--export-csv <path>` writes the retained frame pacing timeline in RFC 4180 CRLF format.
-- When `--output-dir <dir>` is specified, Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (Diagnostic Report JSON Schema v1.4) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix. In the current release both DiagnosticReport and BenchmarkSummary happen to be Schema 1.4, but the schemas version independently as a matter of policy.
+- When `--output-dir <dir>` is specified (default `--auto-save-mode per_trigger`), Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (Diagnostic Report JSON Schema v1.5) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix. DiagnosticReport (v1.5) and BenchmarkSummary (v1.4) version independently as a matter of policy.
+- When `--auto-save-mode session_bundle` (with `--output-dir <dir>`) or `--session-file <path>` is specified, Stuttometer streams an incremental, crash-safe JSONL session bundle (`stutto_session_YYYYMMDD_HHMMSS.jsonl` with a 20-file rolling retention cap in directory mode), flushing each report line immediately and appending a summary line on clean exit. In the GUI, the **Export Session** toolbar button exports the in-memory session history and `BenchmarkSummary` to a single JSON bundle (`session_schema` v1.0).
 - When `--output <path>` or `--export-csv <path>` is specified without `--output-dir` (and `--max-reports` is not 1), Stuttometer emits an overwrite notice to `stderr`, warning that the file will be overwritten with the latest report or timeline on each subsequent trigger.
 
 ### Exit Codes

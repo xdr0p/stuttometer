@@ -1,6 +1,7 @@
 #include "gui_controller.hpp"
 #include "gui_state.hpp"
 #include "stuttometer/csv_exporter.hpp"
+#include "stuttometer/session_bundle.hpp"
 #include "stuttometer/constants.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
 #include <psapi.h>
@@ -425,12 +426,29 @@ void GuiController::session_worker_loop(GuiConfig config) {
         watcher_.start(config.target_process_name, make_watcher_callbacks(), /* exact_match_only= */ true);
     }
 
+    SessionBundleWriter bundle_writer;
     if (!config.output_dir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(config.output_dir), ec);
         if (ec) {
             std::cerr << "[STUTTOMETER] Error: Failed to create auto-save directory: " << ec.message() << "\n";
             config.output_dir.clear();
+        } else if (config.auto_save_mode == AutoSaveMode::SESSION_BUNDLE) {
+            const nlohmann::json cfg_snap = {
+                {"provider_tier", config.provider_tier},
+                {"window_pre_ms", config.window_pre_ms},
+                {"window_post_ms", config.window_post_ms},
+                {"cooldown_ms", config.cooldown_ms},
+                {"present_threshold_ms", trig_config.present_threshold_ms},
+                {"hardware_vblank_ms", trig_config.vblank_interval_ms},
+                {"target_process", config.target_process_name},
+                {"output_dir", std::filesystem::path(config.output_dir).generic_string()}
+            };
+            if (bundle_writer.open_in_dir(std::filesystem::path(config.output_dir), cfg_snap, config.redact)) {
+                std::cout << "[STUTTOMETER] Auto-saving session bundle enabled.\n";
+            } else {
+                std::cerr << "[STUTTOMETER] Warning: Failed to open session bundle file.\n";
+            }
         } else {
             std::cout << "[STUTTOMETER] Auto-saving reports to directory enabled.\n";
         }
@@ -569,18 +587,24 @@ void GuiController::session_worker_loop(GuiConfig config) {
 
                 auto report = correlator.correlate(snapshot_buffer, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());
 
-                // Auto-save JSON report and CSV to disk if configured (with 100-file rotation cap)
+                // Auto-save report(s) to disk if configured
                 if (!config.output_dir.empty()) {
-                    const std::filesystem::path dir(config.output_dir);
-                    const std::string json_name = "stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json";
-                    if (reporter.save_to_file(report, dir / json_name, config.redact)) {
-                        rotate_directory_by_prefix(dir, "stutto_report_", ".json", 100);
+                    if (config.auto_save_mode == AutoSaveMode::SESSION_BUNDLE) {
+                        if (bundle_writer.is_open() && !bundle_writer.write_report(report, config.redact)) {
+                            std::cerr << "[STUTTOMETER] Warning: Failed to append report to session bundle.\n";
+                        }
                     } else {
-                        std::cerr << "[STUTTOMETER] Warning: Failed to auto-save JSON report to '" << (dir / json_name).generic_string() << "'\n";
-                    }
-                    const std::string csv_name = "stutto_pacing_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".csv";
-                    if (stuttometer::csv::export_to_file(report, dir / csv_name)) {
-                        rotate_directory_by_prefix(dir, "stutto_pacing_", ".csv", 100);
+                        const std::filesystem::path dir(config.output_dir);
+                        const std::string json_name = "stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json";
+                        if (reporter.save_to_file(report, dir / json_name, config.redact)) {
+                            rotate_directory_by_prefix(dir, "stutto_report_", ".json", 100);
+                        } else {
+                            std::cerr << "[STUTTOMETER] Warning: Failed to auto-save JSON report to '" << (dir / json_name).generic_string() << "'\n";
+                        }
+                        const std::string csv_name = "stutto_pacing_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".csv";
+                        if (stuttometer::csv::export_to_file(report, dir / csv_name)) {
+                            rotate_directory_by_prefix(dir, "stutto_pacing_", ".csv", 100);
+                        }
                     }
                 }
                 ++report_count;
@@ -609,6 +633,15 @@ void GuiController::session_worker_loop(GuiConfig config) {
     // Teardown ETW sessions (joins threads off the UI thread)
     session_mgr->stop();
     session_mgr.reset();
+
+    if (bundle_writer.is_open()) {
+        if (session_benchmark_) {
+            bundle_writer.write_summary(session_benchmark_->get_summary(config.redact));
+        } else {
+            bundle_writer.write_cli_summary(report_count, 0.0);
+        }
+        bundle_writer.close();
+    }
 
     {
         std::lock_guard<std::mutex> lock(trigger_engine_mutex_);

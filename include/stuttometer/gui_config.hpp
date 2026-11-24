@@ -43,6 +43,11 @@ enum class OsdPosition : uint32_t {
     BOTTOM_LEFT = 3
 };
 
+enum class AutoSaveMode : uint8_t {
+    PER_TRIGGER = 0,
+    SESSION_BUNDLE = 1
+};
+
 struct TriggerConfig;
 
 struct GuiConfig {
@@ -78,6 +83,7 @@ struct GuiConfig {
     std::string browsed_target_process_name;
     bool redact{false};
     std::wstring output_dir;
+    AutoSaveMode auto_save_mode{AutoSaveMode::PER_TRIGGER};
 
     // Frame Pacing & Dynamic Relative Trigger configuration
     FrameTriggerMode frame_trigger_mode{FrameTriggerMode::HYBRID};

@@ -6,6 +6,7 @@
 #include "stuttometer/privilege_utils.hpp"
 #include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/csv_exporter.hpp"
+#include "stuttometer/session_bundle.hpp"
 
 #include "stuttometer/cli_parser.hpp"
 #include "stuttometer/version.hpp"
@@ -328,6 +329,31 @@ int main(int argc, char** argv) {
     stuttometer::CorrelationEngine correlator(driver_resolver, thresholds);
     stuttometer::JsonReporter reporter;
 
+    stuttometer::SessionBundleWriter bundle_writer;
+    if (!config.session_file.empty() || (!output_dir.empty() && config.auto_save_mode == "session_bundle")) {
+        const nlohmann::json cfg_snap = {
+            {"provider_tier", provider_tier},
+            {"window_pre_ms", window_pre_ms},
+            {"window_post_ms", window_post_ms},
+            {"cooldown_ms", cooldown_ms},
+            {"present_threshold_ms", present_threshold_ms},
+            {"hardware_vblank_ms", trig_config.vblank_interval_ms},
+            {"target_process", target_process_name},
+            {"output_dir", output_dir},
+            {"session_file", config.session_file}
+        };
+        if (!config.session_file.empty()) {
+            if (!bundle_writer.open(std::filesystem::path(config.session_file), cfg_snap, redact)) {
+                std::cerr << "error: [STUTTOMETER] Failed to open session file '" << config.session_file << "'\n";
+            }
+        } else {
+            if (!bundle_writer.open_in_dir(std::filesystem::path(output_dir), cfg_snap, redact)) {
+                std::cerr << "error: [STUTTOMETER] Failed to open session bundle in '" << output_dir << "'\n";
+            }
+        }
+    }
+
+    const uint64_t session_start_qpc = stuttometer::get_current_qpc();
     uint32_t report_count = 0;
     uint32_t loop_counter = 0;
 
@@ -465,7 +491,12 @@ int main(int argc, char** argv) {
                         std::cerr << "error: [STUTTOMETER] Failed to export CSV to '" << export_csv_path << "'\n";
                     }
                 }
-                if (!output_dir.empty()) {
+                if (bundle_writer.is_open()) {
+                    if (!bundle_writer.write_report(report, redact)) {
+                        std::cerr << "error: [STUTTOMETER] Failed to append report to session bundle\n";
+                    }
+                }
+                if (!output_dir.empty() && config.auto_save_mode == "per_trigger") {
                     const std::filesystem::path dir(output_dir);
                     const std::string json_name = "stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json";
                     if (reporter.save_to_file(report, dir / json_name, redact)) {
@@ -496,6 +527,11 @@ int main(int argc, char** argv) {
 
     info << "\ninfo: [STUTTOMETER] Stopping trace sessions and cleaning up...\n";
     session_mgr.stop();
+    if (bundle_writer.is_open()) {
+        const double session_dur_ms = stuttometer::qpc_delta_to_ms(stuttometer::get_current_qpc() - session_start_qpc, qpc_freq);
+        bundle_writer.write_cli_summary(report_count, session_dur_ms);
+        bundle_writer.close();
+    }
     if (ndjson_writer) {
         stuttometer::FilteredEvent fe;
         while (trigger_engine.pop_filtered_event(fe)) {

@@ -595,10 +595,10 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             RECT sub_rc = { banner_rc.left + scale(16), banner_rc.top + scale(38), banner_rc.right - scale(16), banner_rc.top + scale(60) };
             DrawTextW(mem_dc, sub_buf, -1, &sub_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-            // 2. Metrics Grid (5 Cards side-by-side)
+            // 2. Metrics Grid (6 Cards side-by-side)
             int grid_y = banner_y + banner_h + scale(12);
             int grid_h = scale(76);
-            int num_cards = 5;
+            int num_cards = 6;
             int card_gap = scale(8);
             int total_card_w = (width - 2 * margin - (num_cards - 1) * card_gap);
             int card_w = total_card_w / num_cards;
@@ -666,12 +666,23 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 worst_color = RGB(203, 213, 225);
             }
 
-            MetricCardData cards[5] = {
+            std::wstring minor_str;
+            COLORREF minor_color;
+            if (summary.total_frames == 0) {
+                minor_str = L"\u2014";
+                minor_color = RGB(148, 163, 184);
+            } else {
+                minor_str = std::to_wstring(summary.minor_stutters);
+                minor_color = (summary.minor_stutters > 0) ? RGB(203, 213, 225) : RGB(148, 163, 184);
+            }
+
+            MetricCardData cards[6] = {
                 { L"Avg FPS", avg_fps_str, avg_color },
                 { L"1% Low FPS", low_1_str, low_1_color },
                 { L"0.1% Low FPS", low_01_str, low_01_color },
                 { L"Net Stall", stall_str, stall_color },
-                { L"Worst Stutter", worst_str, worst_color }
+                { L"Worst Stutter", worst_str, worst_color },
+                { L"Minor (Filtered)", minor_str, minor_color }
             };
 
             for (int i = 0; i < num_cards; ++i) {

@@ -63,6 +63,7 @@ add_library(stuttometer_core STATIC
   src/etw_session.cpp
   src/trigger_engine.cpp
   src/session_benchmark.cpp
+  src/session_bundle.cpp
   src/correlator.cpp
   src/json_reporter.cpp
   src/privilege_utils.cpp
@@ -264,6 +265,13 @@ add_executable(test_ndjson_writer
 target_link_libraries(test_ndjson_writer PRIVATE stuttometer_core)
 add_test(NAME test_ndjson_writer COMMAND test_ndjson_writer)
 set_tests_properties(test_ndjson_writer PROPERTIES TIMEOUT 30)
+
+add_executable(test_session_bundle
+  tests/test_session_bundle.cpp
+)
+target_link_libraries(test_session_bundle PRIVATE stuttometer_core)
+add_test(NAME test_session_bundle COMMAND test_session_bundle)
+set_tests_properties(test_session_bundle PROPERTIES TIMEOUT 30)
 
 add_executable(test_report_serialization_consistency
   tests/test_report_serialization_consistency.cpp

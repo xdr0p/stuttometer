@@ -2,6 +2,8 @@
 #include "gui_state.hpp"
 #include "card_renderer.hpp"
 #include <stuttometer/json_reporter.hpp>
+#include <stuttometer/session_bundle.hpp>
+#include "gui_controller.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
 
 #include <windows.h>
@@ -79,6 +81,52 @@ void export_selected_report_json(HWND hwnd) {
             SetWindowTextW(g_h_btn_export, ok ? L"Exported \u2713" : L"Failed \u2715");
             InvalidateRect(g_h_btn_export, NULL, TRUE);
             SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export), gui_constants::BUTTON_FEEDBACK_MS, NULL);
+        }
+    }
+}
+
+void export_session_bundle(HWND hwnd) {
+    if (g_stutters.empty()) {
+        return;
+    }
+
+    const bool redact = g_settings_config.redact;
+    std::vector<DiagnosticReport> reports;
+    reports.reserve(g_stutters.size());
+    for (const auto& item : g_stutters) {
+        if (item.report) {
+            reports.push_back(*item.report);
+        }
+    }
+    if (reports.empty()) {
+        return;
+    }
+
+    BenchmarkSummary summary{};
+    if (g_controller) {
+        auto bench = g_controller->get_session_benchmark();
+        if (bench) {
+            summary = bench->get_summary(redact);
+        }
+    }
+
+    wchar_t filename_buf[MAX_PATH] = L"stutto_session.json";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = filename_buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"json";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (GetSaveFileNameW(&ofn)) {
+        const std::filesystem::path out_path(filename_buf);
+        const bool ok = SessionBundleExporter::export_session(out_path, reports, summary, redact);
+        if (g_h_btn_export_session) {
+            SetWindowTextW(g_h_btn_export_session, ok ? L"Exported \u2713" : L"Failed \u2715");
+            InvalidateRect(g_h_btn_export_session, NULL, TRUE);
+            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export_session), gui_constants::BUTTON_FEEDBACK_MS, NULL);
         }
     }
 }

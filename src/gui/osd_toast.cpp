@@ -217,7 +217,7 @@ void OsdToast::destroy() noexcept {
     }
 }
 
-void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPosition position, uint32_t minor_event_count) noexcept {
+void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPosition position) noexcept {
     try {
         if (!hwnd_) {
             return;
@@ -231,7 +231,6 @@ void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPos
         current_data_.attribution = report.attribution;
         current_data_.present_threshold_ms = report.present_threshold_ms;
         current_data_.hardware_vblank_ms = report.hardware_vblank_ms;
-        current_data_.minor_event_count = minor_event_count;
         current_data_.trigger = report.trigger;
 
         if (report.redacted) {
@@ -301,17 +300,6 @@ void OsdToast::hide() noexcept {
             KillTimer(hwnd_, timer_id_);
             timer_id_ = 0;
         }
-    } catch (...) {
-    }
-}
-
-void OsdToast::update_minor_count(uint32_t count) noexcept {
-    try {
-        if (!hwnd_ || current_data_.minor_event_count == count) {
-            return;
-        }
-        current_data_.minor_event_count = count;
-        InvalidateRect(hwnd_, nullptr, TRUE);
     } catch (...) {
     }
 }
@@ -526,18 +514,13 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
         RECT rc_diag = { pad_left, r2_top, width - pad_right, r2_bot };
         DrawTextW(mem_dc, diag_w.c_str(), -1, &rc_diag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-        // Row 3: Attribution Tag pill + Minor Count (Left) + Confidence (Right)
+        // Row 3: Attribution Tag pill (Left) + Confidence (Right)
         SelectObject(mem_dc, font_sub_);
         SetTextColor(mem_dc, COLOR_TEXT_LABEL);
 
-        std::wstring row3_tag = attr_tag;
-        if (current_data_.minor_event_count > 0) {
-            row3_tag += L"  \x2022  +" + std::to_wstring(current_data_.minor_event_count) + L" MINOR";
-        }
-
         int conf_w = MulDiv(80, dpi, 96);
         RECT rc_tag = { pad_left, r3_top, width - pad_right - conf_w, r3_bot };
-        DrawTextW(mem_dc, row3_tag.c_str(), -1, &rc_tag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        DrawTextW(mem_dc, attr_tag.c_str(), -1, &rc_tag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
         if (current_data_.confidence > 0.0) {
             std::wstringstream css;

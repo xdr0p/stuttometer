@@ -681,9 +681,11 @@ static void test_schema_3_settings() {
     // 13a. advanced_unlocked true round-trip
     {
         GuiConfig cfg;
+        cfg.auto_save_mode = AutoSaveMode::SESSION_BUNDLE;
         nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, true, "Game.exe");
-        STUTTO_ASSERT(j["settings_version"] == 4);
+        STUTTO_ASSERT(j["settings_version"] == 5);
         STUTTO_ASSERT(j["advanced_unlocked"] == true);
+        STUTTO_ASSERT(j["auto_save_mode"] == "session_bundle");
 
         GuiConfig out_cfg;
         uint32_t vk = 0, mods = 0;
@@ -692,6 +694,7 @@ static void test_schema_3_settings() {
         deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc);
         STUTTO_ASSERT(adv == true);
         STUTTO_ASSERT(proc == "Game.exe");
+        STUTTO_ASSERT(out_cfg.auto_save_mode == AutoSaveMode::SESSION_BUNDLE);
     }
 
     // 13b. advanced_unlocked false round-trip
@@ -706,6 +709,7 @@ static void test_schema_3_settings() {
         std::string proc;
         deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc);
         STUTTO_ASSERT(adv == false);
+        STUTTO_ASSERT(out_cfg.auto_save_mode == AutoSaveMode::PER_TRIGGER);
     }
 
     // 13c. Absent advanced_unlocked in older schema files defaults to false
@@ -720,6 +724,7 @@ static void test_schema_3_settings() {
         std::string proc;
         deserialize_gui_settings_from_json(j, out_cfg, vk, mods, snd, adv, proc);
         STUTTO_ASSERT(adv == false);
+        STUTTO_ASSERT(out_cfg.auto_save_mode == AutoSaveMode::PER_TRIGGER);
     }
 
     // 13d. judder_min_alternations round-trips within range (1-50)
@@ -793,7 +798,7 @@ static void test_schema_4_settings() {
     {
         GuiConfig cfg;
         nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, true, "Game.exe", "CustomGame.exe");
-        STUTTO_ASSERT(j["settings_version"] == 4);
+        STUTTO_ASSERT(j["settings_version"] == 5);
         STUTTO_ASSERT(j["browsed_target_process_name"] == "CustomGame.exe");
 
         GuiConfig out_cfg;

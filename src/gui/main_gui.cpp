@@ -87,43 +87,11 @@ static RECT get_trigger_mode_badge_rect(int client_width) {
     return { badge_x, badge_mode_y, badge_x + badge_w, badge_mode_y + badge_mode_h };
 }
 
-// Minor events aggregation & OSD notification state
-struct MinorEventSample {
-    uint64_t tick_ms{0};
-    uint32_t count{0};
-};
-
-static std::deque<MinorEventSample> g_recent_minor_events;
-static uint64_t g_last_filtered_reports = 0;
+// OSD notification cooldown state
 static uint64_t g_last_osd_toast_tick = 0;
-static bool g_aggregation_needs_baseline = true;
-
-static void prune_minor_events(uint64_t now_tick) {
-    const uint64_t window_ms = gui_constants::OSD_AGGREGATION_WINDOW_MS;
-    while (!g_recent_minor_events.empty()) {
-        if (now_tick >= g_recent_minor_events.front().tick_ms &&
-            (now_tick - g_recent_minor_events.front().tick_ms) > window_ms) {
-            g_recent_minor_events.pop_front();
-        } else {
-            break;
-        }
-    }
-}
-
-static uint32_t get_recent_minor_count(uint64_t now_tick) {
-    prune_minor_events(now_tick);
-    uint32_t total = 0;
-    for (const auto& sample : g_recent_minor_events) {
-        total += sample.count;
-    }
-    return total;
-}
 
 static void reset_osd_aggregation_state() {
-    g_recent_minor_events.clear();
-    g_last_filtered_reports = 0;
     g_last_osd_toast_tick = 0;
-    g_aggregation_needs_baseline = true;
 }
 
 // Forward declarations
@@ -448,6 +416,9 @@ static void update_clear_button_state() {
     bool is_idle = (g_current_session_state == GuiSessionState::IDLE);
     bool has_data = g_has_received_data || !g_stutters.empty() || !g_engine_logs.empty();
     EnableWindow(g_h_btn_clear, (is_idle && has_data) ? TRUE : FALSE);
+    if (g_h_btn_export_session) {
+        EnableWindow(g_h_btn_export_session, !g_stutters.empty() ? TRUE : FALSE);
+    }
 }
 
 // Clear history with explicit ListView invalidation
@@ -824,6 +795,8 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     MoveWindow(g_h_btn_stop, bx, act_y, btn_w, act_h, TRUE);
     bx += btn_w + btn_gap;
     MoveWindow(g_h_btn_clear, bx, act_y, scale_dpi(75), act_h, TRUE);
+    bx += scale_dpi(75) + btn_gap;
+    MoveWindow(g_h_btn_export_session, bx, act_y, scale_dpi(114), act_h, TRUE);
 
     // 3. Stutter Events Table (ListView) and Diagnostic Inspector Card
     int content_top = act_y + act_h + scale_dpi(10);
@@ -969,6 +942,10 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SetPropW(g_h_btn_clear, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
             EnableWindow(g_h_btn_clear, FALSE);
 
+            g_h_btn_export_session = CreateWindowExW(0, L"BUTTON", L"Export Session", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_EXPORT_SESSION, NULL, NULL);
+            SetPropW(g_h_btn_export_session, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
+            EnableWindow(g_h_btn_export_session, FALSE);
+
             // Severity Filter Combobox (Positioned on Configuration Card)
             g_h_lbl_sev_filter = CreateWindowExW(0, L"STATIC", L"Filter:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
             SendMessageW(g_h_lbl_sev_filter, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
@@ -1012,6 +989,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SetWindowSubclass(g_h_btn_start, DarkButtonSubclassProc, IDC_BTN_START, 0);
             SetWindowSubclass(g_h_btn_stop, DarkButtonSubclassProc, IDC_BTN_STOP, 0);
             SetWindowSubclass(g_h_btn_clear, DarkButtonSubclassProc, IDC_BTN_CLEAR, 0);
+            SetWindowSubclass(g_h_btn_export_session, DarkButtonSubclassProc, IDC_BTN_EXPORT_SESSION, 0);
             SetWindowSubclass(g_h_btn_copy_card, DarkButtonSubclassProc, IDC_BTN_COPY_CARD, 0);
             SetWindowSubclass(g_h_btn_export_card, DarkButtonSubclassProc, IDC_BTN_EXPORT_CARD, 0);
             SetWindowSubclass(g_h_btn_copy, DarkButtonSubclassProc, IDC_BTN_COPY_JSON, 0);
@@ -1394,6 +1372,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     break;
                 }
 
+                case IDC_BTN_EXPORT_SESSION: {
+                    export_session_bundle(hwnd);
+                    break;
+                }
+
                 case IDC_BTN_EXPORT_JSON: {
                     export_selected_report_json(hwnd);
                     break;
@@ -1614,6 +1597,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 SetWindowTextW(g_h_btn_export_card, L"Export Card");
                 InvalidateRect(g_h_btn_export_card, NULL, TRUE);
                 return 0;
+            } else if (wParam == reinterpret_cast<UINT_PTR>(g_h_btn_export_session)) {
+                KillTimer(hwnd, wParam);
+                SetWindowTextW(g_h_btn_export_session, L"Export Session");
+                InvalidateRect(g_h_btn_export_session, NULL, TRUE);
+                return 0;
             }
             break;
         }
@@ -1671,8 +1659,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     const uint64_t cooldown_ms = static_cast<uint64_t>(std::max(100.0, g_settings_config.cooldown_ms));
                     if (g_last_osd_toast_tick == 0 || (now_tick - g_last_osd_toast_tick) >= cooldown_ms) {
                         g_last_osd_toast_tick = now_tick;
-                        const uint32_t minor_count = get_recent_minor_count(now_tick);
-                        g_osd_toast.show(*report, g_settings_config.osd_duration_ms, g_settings_config.osd_position, minor_count);
+                        g_osd_toast.show(*report, g_settings_config.osd_duration_ms, g_settings_config.osd_position);
                     }
                 }
             }
@@ -1685,24 +1672,6 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             if (metrics) {
                 if (metrics->total_events_recorded > 0) {
                     g_has_received_data = true;
-                }
-
-                const uint64_t now_tick = GetTickCount64();
-                if (g_aggregation_needs_baseline) {
-                    g_last_filtered_reports = metrics->filtered_reports;
-                    g_aggregation_needs_baseline = false;
-                } else if (metrics->filtered_reports > g_last_filtered_reports) {
-                    const uint32_t delta = static_cast<uint32_t>(metrics->filtered_reports - g_last_filtered_reports);
-                    g_recent_minor_events.push_back({ now_tick, delta });
-                    g_last_filtered_reports = metrics->filtered_reports;
-                } else if (metrics->filtered_reports < g_last_filtered_reports) {
-                    g_last_filtered_reports = metrics->filtered_reports;
-                }
-
-                prune_minor_events(now_tick);
-
-                if (g_settings_config.enable_osd && g_osd_toast.is_visible()) {
-                    g_osd_toast.update_minor_count(get_recent_minor_count(now_tick));
                 }
 
                 update_metrics_text();

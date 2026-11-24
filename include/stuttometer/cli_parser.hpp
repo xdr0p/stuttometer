@@ -37,6 +37,8 @@ struct CliConfig {
     std::string target_process_name;
     std::string output_file;
     std::string output_dir;
+    std::string session_file;
+    std::string auto_save_mode{"per_trigger"};
     uint32_t max_reports{0};
     std::string provider_tier{"standard"};
     bool redact{false};

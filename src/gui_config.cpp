@@ -47,7 +47,7 @@ nlohmann::json serialize_gui_settings_to_json(
     const std::string& browsed_target_process_name
 ) {
     nlohmann::json j;
-    j["settings_version"] = 4;
+    j["settings_version"] = 5;
     j["hotkey_vk"] = hotkey_vk;
     j["hotkey_modifiers"] = hotkey_mods;
     j["sound_cues_enabled"] = sound_cues;
@@ -107,6 +107,8 @@ nlohmann::json serialize_gui_settings_to_json(
     j["list_severity_filter"] = std::string(report_severity_to_string(config.list_severity_filter));
 
     j["auto_save_dir"] = wstring_to_utf8_helper(config.output_dir);
+    j["auto_save_mode"] = (config.auto_save_mode == AutoSaveMode::SESSION_BUNDLE)
+        ? "session_bundle" : "per_trigger";
     j["last_target_process"] = last_target_process;
     j["browsed_target_process_name"] = browsed_target_process_name;
 
@@ -366,6 +368,15 @@ void deserialize_gui_settings_from_json(
 
         if (j.contains("auto_save_dir") && j["auto_save_dir"].is_string()) {
             out_config.output_dir = utf8_to_wstring_helper(j["auto_save_dir"].get<std::string>());
+        }
+
+        if (j.contains("auto_save_mode") && j["auto_save_mode"].is_string()) {
+            const std::string mode = j["auto_save_mode"].get<std::string>();
+            out_config.auto_save_mode = (mode == "session_bundle")
+                ? AutoSaveMode::SESSION_BUNDLE
+                : AutoSaveMode::PER_TRIGGER;
+        } else {
+            out_config.auto_save_mode = AutoSaveMode::PER_TRIGGER;
         }
 
         if (j.contains("enable_osd") && j["enable_osd"].is_boolean()) {

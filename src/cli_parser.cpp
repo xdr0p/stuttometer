@@ -36,6 +36,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     std::string target_process_name;
     std::string output_file;
     std::string output_dir;
+    std::string session_file;
+    std::string auto_save_mode = "per_trigger";
     uint32_t max_reports = 0;
     std::string provider_tier = "standard";
     bool redact = false;
@@ -158,6 +160,10 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     app.add_option("-o,--output", output_file, "Output file path for JSON reports (overwritten on each trigger if max-reports != 1; use --output-dir to save all reports)")
        ->group("Output");
     app.add_option("--output-dir", output_dir, "Directory to save individual trigger reports")
+       ->group("Output");
+    app.add_option("--session-file", session_file, "Append incremental session bundle (JSONL) to file")
+       ->group("Output");
+    app.add_option("--auto-save-mode", auto_save_mode, "Auto-save mode with --output-dir: per_trigger, session_bundle (default: per_trigger)")
        ->group("Output");
     app.add_option("--max-reports", max_reports, "Maximum number of reports before exiting (0 = continuous)")
        ->group("Output");
@@ -329,6 +335,9 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         }
         if (j.contains("auto_save_dir") && j["auto_save_dir"].is_string()) {
             apply_if_unset("--output-dir", output_dir, j["auto_save_dir"].get<std::string>());
+        }
+        if (j.contains("auto_save_mode") && j["auto_save_mode"].is_string()) {
+            apply_if_unset("--auto-save-mode", auto_save_mode, j["auto_save_mode"].get<std::string>());
         }
         if (j.contains("provider_tier") && j["provider_tier"].is_string()) {
             apply_if_unset("--tier", provider_tier, j["provider_tier"].get<std::string>());
@@ -650,8 +659,15 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     out_config.buffer_slots = buffer_slots;
     out_config.target_pid = target_pid;
     out_config.target_process_name = target_process_name;
+    if (auto_save_mode != "per_trigger" && auto_save_mode != "session_bundle") {
+        err << "[STUTTOMETER] Error: Invalid --auto-save-mode '" << auto_save_mode << "'. Must be per_trigger or session_bundle.\n";
+        return CliParseResult::ERROR_USAGE;
+    }
+
     out_config.output_file = output_file;
     out_config.output_dir = output_dir;
+    out_config.session_file = session_file;
+    out_config.auto_save_mode = auto_save_mode;
     out_config.max_reports = max_reports;
     out_config.provider_tier = provider_tier;
     out_config.redact = redact;
@@ -705,6 +721,8 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         eff["target_process_name"] = out_config.target_process_name;
         eff["output_file"] = out_config.output_file;
         eff["output_dir"] = out_config.output_dir;
+        eff["session_file"] = out_config.session_file;
+        eff["auto_save_mode"] = out_config.auto_save_mode;
         eff["max_reports"] = out_config.max_reports;
         eff["provider_tier"] = out_config.provider_tier;
         eff["min_report_severity"] = report_severity_to_string(out_config.min_report_severity);

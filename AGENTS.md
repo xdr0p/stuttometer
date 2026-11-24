@@ -40,7 +40,7 @@ This document defines standing invariants and operational constraints for automa
 ## 4. Policy, Presets & Reporting
 
 - **Detection is decoupled from reporting.** The detector remains sensitive and accurate; the pre-claim severity gate in `initiate_trigger_atomic` filters triggers before they touch the state machine or trigger cooldown.
-- **Session Benchmark (Schema 1.3):**
+- **Session Benchmark (Schema 1.4):**
   - `stutters_detected` counts `WARNING` and `DANGER` severity events only.
   - `minor_stutters` counts filtered triggers (`NORMAL` severity or vblank floor drops).
   - `total_triggers = stutters_detected + minor_stutters` provides backward-compatible continuity with pre-1.3 benchmark totals.
@@ -90,5 +90,19 @@ This document defines standing invariants and operational constraints for automa
 
 - **Canonical Release Tool:** Always use `python scripts/release.py <version> [options]` (or `--bump {patch,minor,major}`) whenever upping the version or creating a release. Never bump versions or create tags manually.
 - The script automatically updates canonical version targets (`include/stuttometer/version.hpp` and `src/gui/stuttometer_gui.manifest`), audits the codebase for stray version literals, compiles Release binaries, runs the test suite, packages the release zip, commits, tags, pushes, and publishes the official GitHub release with binary assets via the GitHub REST API.
+
+---
+
+## 9. Author Test Environment (Context Only)
+
+- **Display / Sync:** Dual-monitor mixed-refresh setup, VRR disabled globally due to mismatched refresh-rate VRR issues:
+  - Primary (`DISPLAY1`): `1920x1080` @ 200 Hz
+  - Secondary (`DISPLAY2`): `1920x1080` @ 60 Hz
+- **CPU:** AMD Ryzen 5 7600X 6-Core Processor
+- **GPU:** AMD Radeon RX 9060 XT (Driver `32.0.31041.1004`)
+- **Memory:** 32 GB RAM (31.6 GB usable)
+- **OS:** Windows 11 Pro 26H2 (Build 26300.9974)
+- **Scope note:** This describes the author's primary local test/repro rig for trace analysis and debugging. Production detection, pacing, and vblank logic must remain hardware-agnostic and support both VRR-on and VRR-off user setups.
+
 
 

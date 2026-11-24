@@ -55,6 +55,7 @@ constexpr int IDC_SET_COMBO_PACING_PROFILE = 2035;
 constexpr int IDC_SET_LBL_PROFILE_HINT     = 2036;
 constexpr int IDC_SET_COMBO_PRESET         = 2037;
 constexpr int IDC_SET_EDIT_JUDDER_MIN_ALT  = 2038;
+constexpr int IDC_SET_COMBO_AUTO_SAVE_MODE = 2039;
 
 
 
@@ -75,6 +76,7 @@ struct SettingsDialogState {
     HWND h_chk_redact{nullptr};
     HWND h_chk_audio{nullptr};
     HWND h_chk_auto_save{nullptr};
+    HWND h_combo_auto_save_mode{nullptr};
     HWND h_edit_auto_save{nullptr};
     HWND h_btn_browse_auto_save{nullptr};
     HWND h_chk_osd{nullptr};
@@ -371,6 +373,7 @@ static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM 
 static void update_settings_dependencies(SettingsDialogState* state) {
     if (!state) return;
     bool auto_save_enabled = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    EnableWindow(state->h_combo_auto_save_mode, auto_save_enabled ? TRUE : FALSE);
     EnableWindow(state->h_edit_auto_save, auto_save_enabled ? TRUE : FALSE);
     EnableWindow(state->h_btn_browse_auto_save, auto_save_enabled ? TRUE : FALSE);
 
@@ -536,7 +539,8 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
 
     int r5_y = c1_y + scale_y(142);
     MoveWindow(state->h_chk_auto_save, c1_x + scale_dpi(14), r5_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
-    state->rc_lbl_auto_save = { c1_x + scale_dpi(32), r5_y, (std::min<int>)(c1_x + scale_dpi(32) + static_cast<int>(sz_as.cx) + scale_dpi(6), c1_x + c1_w - scale_dpi(14)), r5_y + ctrl_h };
+    state->rc_lbl_auto_save = { c1_x + scale_dpi(32), r5_y, (std::min<int>)(c1_x + scale_dpi(32) + static_cast<int>(sz_as.cx) + scale_dpi(6), c1_x + scale_dpi(272)), r5_y + ctrl_h };
+    MoveWindow(state->h_combo_auto_save_mode, c1_x + scale_dpi(280), r5_y + scale_dpi(1), c1_w - scale_dpi(294), scale_dpi(150), TRUE);
 
     int r6_y = c1_y + scale_y(170);
     int browse_w = scale_dpi(66);
@@ -706,6 +710,11 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             state->h_chk_redact    = create_checkbox(hwnd, IDC_SET_CHK_REDACT,    g_settings_config.redact);
             state->h_chk_audio     = create_checkbox(hwnd, IDC_SET_CHK_AUDIO,     g_settings_config.enable_audio);
             state->h_chk_auto_save = create_checkbox(hwnd, IDC_SET_CHK_AUTO_SAVE, !g_settings_config.output_dir.empty());
+
+            int as_mode_idx = (g_settings_config.auto_save_mode == AutoSaveMode::SESSION_BUNDLE) ? 1 : 0;
+            state->h_combo_auto_save_mode = create_dropdown(hwnd, IDC_SET_COMBO_AUTO_SAVE_MODE,
+                { L"Per-Trigger (JSON+CSV)", L"Session Bundle (JSONL)" },
+                as_mode_idx);
 
             state->h_edit_auto_save = CreateWindowExW(0, L"EDIT", g_settings_config.output_dir.c_str(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
@@ -1502,8 +1511,8 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                         SetWindowTextW(state->h_edit_spike_mult, L"1.4");
                         SetWindowTextW(state->h_edit_min_delta, L"1.5");
                     } else if (gc.pacing_profile == PacingProfile::CONSERVATIVE) {
-                        SetWindowTextW(state->h_edit_spike_mult, L"3.0");
-                        SetWindowTextW(state->h_edit_min_delta, L"8.0");
+                        SetWindowTextW(state->h_edit_spike_mult, L"2.0");
+                        SetWindowTextW(state->h_edit_min_delta, L"4.0");
                     }
                     SetWindowTextW(state->h_edit_judder_min_alt, std::to_wstring(gc.judder_min_alternations).c_str());
                 } else {
@@ -1682,6 +1691,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 SendMessageW(state->h_chk_redact, BM_SETCHECK, BST_UNCHECKED, 0);
                 SendMessageW(state->h_chk_audio, BM_SETCHECK, BST_CHECKED, 0);
                 SendMessageW(state->h_chk_auto_save, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessageW(state->h_combo_auto_save_mode, CB_SETCURSEL, 0, 0);
                 SetWindowTextW(state->h_edit_auto_save, L"");
                 SendMessageW(state->h_chk_osd, BM_SETCHECK, BST_UNCHECKED, 0);
                 SendMessageW(state->h_combo_osd_pos, CB_SETCURSEL, 0, 0);
@@ -1785,6 +1795,10 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 }
 
                 bool auto_save_checked = (SendMessageW(state->h_chk_auto_save, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                int as_mode_sel = static_cast<int>(SendMessageW(state->h_combo_auto_save_mode, CB_GETCURSEL, 0, 0));
+                g_settings_config.auto_save_mode = (as_mode_sel == 1)
+                    ? AutoSaveMode::SESSION_BUNDLE
+                    : AutoSaveMode::PER_TRIGGER;
                 if (auto_save_checked) {
                     int len = GetWindowTextLengthW(state->h_edit_auto_save);
                     if (len > 0) {
@@ -2030,6 +2044,7 @@ void settings_dialog_apply_fonts(HWND hDlg) {
         { &state->h_chk_redact,           g_font_ui,      false },
         { &state->h_chk_audio,            g_font_ui,      false },
         { &state->h_chk_auto_save,        g_font_ui,      false },
+        { &state->h_combo_auto_save_mode, g_font_ui,      true  },
         { &state->h_edit_auto_save,       g_font_ui,      false },
         { &state->h_btn_browse_auto_save, g_font_ui_bold, false },
         { &state->h_chk_osd,              g_font_ui,      false },
