@@ -682,10 +682,12 @@ static void test_schema_3_settings() {
     {
         GuiConfig cfg;
         cfg.auto_save_mode = AutoSaveMode::SESSION_BUNDLE;
+        cfg.enable_transition_salience = true;
         nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, true, "Game.exe");
-        STUTTO_ASSERT(j["settings_version"] == 5);
+        STUTTO_ASSERT(j["settings_version"] == 6);
         STUTTO_ASSERT(j["advanced_unlocked"] == true);
         STUTTO_ASSERT(j["auto_save_mode"] == "session_bundle");
+        STUTTO_ASSERT(j["enable_transition_salience"] == true);
 
         GuiConfig out_cfg;
         uint32_t vk = 0, mods = 0;
@@ -695,6 +697,7 @@ static void test_schema_3_settings() {
         STUTTO_ASSERT(adv == true);
         STUTTO_ASSERT(proc == "Game.exe");
         STUTTO_ASSERT(out_cfg.auto_save_mode == AutoSaveMode::SESSION_BUNDLE);
+        STUTTO_ASSERT(out_cfg.enable_transition_salience == true);
     }
 
     // 13b. advanced_unlocked false round-trip
@@ -798,7 +801,7 @@ static void test_schema_4_settings() {
     {
         GuiConfig cfg;
         nlohmann::json j = serialize_gui_settings_to_json(cfg, 0x70, 0, true, true, "Game.exe", "CustomGame.exe");
-        STUTTO_ASSERT(j["settings_version"] == 5);
+        STUTTO_ASSERT(j["settings_version"] == 6);
         STUTTO_ASSERT(j["browsed_target_process_name"] == "CustomGame.exe");
 
         GuiConfig out_cfg;

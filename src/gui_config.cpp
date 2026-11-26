@@ -47,7 +47,7 @@ nlohmann::json serialize_gui_settings_to_json(
     const std::string& browsed_target_process_name
 ) {
     nlohmann::json j;
-    j["settings_version"] = 5;
+    j["settings_version"] = 6;
     j["hotkey_vk"] = hotkey_vk;
     j["hotkey_modifiers"] = hotkey_mods;
     j["sound_cues_enabled"] = sound_cues;
@@ -101,6 +101,7 @@ nlohmann::json serialize_gui_settings_to_json(
     j["enable_judder_detection"] = config.enable_judder_detection;
     j["judder_swing_ratio"] = config.judder_swing_ratio;
     j["judder_min_alternations"] = config.judder_min_alternations;
+    j["enable_transition_salience"] = config.enable_transition_salience;
 
     j["detection_preset"] = std::string(detection_preset_to_string(config.detection_preset));
     j["min_osd_severity"] = std::string(report_severity_to_string(config.min_osd_severity));
@@ -364,6 +365,9 @@ void deserialize_gui_settings_from_json(
 
         if (j.contains("enable_judder_detection") && j["enable_judder_detection"].is_boolean()) {
             out_config.enable_judder_detection = j["enable_judder_detection"].get<bool>();
+        }
+        if (j.contains("enable_transition_salience") && j["enable_transition_salience"].is_boolean()) {
+            out_config.enable_transition_salience = j["enable_transition_salience"].get<bool>();
         }
 
         if (j.contains("auto_save_dir") && j["auto_save_dir"].is_string()) {

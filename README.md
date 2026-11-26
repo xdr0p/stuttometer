@@ -197,6 +197,8 @@ Detection:
   --min-spike-delta-ms FLOAT      Minimum absolute spike delta in ms (default: 4.0) [1 - 50]
   --judder-detection, --no-judder Enable/disable cadence judder detection (default: enabled)
   --judder-swing-ratio FLOAT      Judder cadence swing threshold ratio (preset-dependent, balanced: 0.50) [0.1 - 1]
+  --transition-salience, --no-transition-salience
+                                  Suppress loading-screen & state-transition stutters from OSD and benchmark totals (default: disabled)
   --audio-trigger, --no-audio     Enable/disable AudioGlitch Event ID 11 trigger (default: enabled)
 
 Thresholds:
@@ -276,7 +278,7 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 ### Frame Pacing CSV Export & Auto-Save Retention
 
 - `--export-csv <path>` writes the retained frame pacing timeline in RFC 4180 CRLF format.
-- When `--output-dir <dir>` is specified (default `--auto-save-mode per_trigger`), Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (Diagnostic Report JSON Schema v1.5) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix. DiagnosticReport (v1.5) and BenchmarkSummary (v1.4) version independently as a matter of policy.
+- When `--output-dir <dir>` is specified (default `--auto-save-mode per_trigger`), Stuttometer automatically writes both `stutto_report_<count>_<qpc>.json` (Diagnostic Report JSON Schema v1.5) and `stutto_pacing_<count>_<qpc>.csv` for every trigger, applying an automated 100-file rolling retention cap per prefix. DiagnosticReport (v1.5) and BenchmarkSummary (v1.5) version independently as a matter of policy.
 - When `--auto-save-mode session_bundle` (with `--output-dir <dir>`) or `--session-file <path>` is specified, Stuttometer streams an incremental, crash-safe JSONL session bundle (`stutto_session_YYYYMMDD_HHMMSS.jsonl` with a 20-file rolling retention cap in directory mode), flushing each report line immediately and appending a summary line on clean exit. In the GUI, the **Export Session** toolbar button exports the in-memory session history and `BenchmarkSummary` to a single JSON bundle (`session_schema` v1.0).
 - When `--output <path>` or `--export-csv <path>` is specified without `--output-dir` (and `--max-reports` is not 1), Stuttometer emits an overwrite notice to `stderr`, warning that the file will be overwritten with the latest report or timeline on each subsequent trigger.
 
@@ -302,7 +304,7 @@ Stuttometer supports real-time event streaming via `--dump-events <path|- >`:
 
 ## Limitations & Best Practices
 
-- **Engine State Transitions (Menus & Focus Changes):** When games open UI overlays (e.g. pressing ESC), transition between scenes, or regain window focus, game engines often perform synchronous state teardown, frame-buffer capture, or asset garbage collection. These transient frame delays are real display stalls, but are inherent engine transition behaviors rather than gameplay performance defects. For clean benchmarking runs, start capture before gameplay begins and avoid evaluating menu transitions.
+- **Engine State Transitions (Menus & Focus Changes):** When games open UI overlays (e.g. pressing ESC), transition between scenes, or regain window focus, game engines often perform synchronous state teardown, frame-buffer capture, or asset garbage collection. These transient frame delays are real display stalls, but are inherent engine transition behaviors rather than gameplay performance defects. Enabling **Transition Salience** (`--transition-salience` or Settings → *Suppress Loading / Transition Stutters*) suppresses `LOADING_SCREEN` and `STATE_TRANSITION` reports from OSD toasts and benchmark totals while retaining them in the history list. Note: transition context classification currently covers `DXGI_PRESENT_STUTTER` and `KERNEL_FRAME_STALL` (`RELATIVE_SPIKE` / `STATIC_THRESHOLD`) triggers only; `FRAME_PACING_JUDDER`, `DWM_GLITCH`, and `AUDIO_GLITCH` triggers are not suppressed by transition salience (extending eligibility is post-1.0 scope).
 - **Platform & Privileges:** Windows 10/11 x64 only. Live tracing strictly requires administrator privileges.
 - **In-Game OSD Presentation:** In-game notifications may be suppressed by some games running in exclusive fullscreen mode; borderless-windowed mode ensures visibility.
 - **Heuristic Confidence:** Root-cause rankings are probabilistic correlation heuristics designed as high-signal starting points for investigation.

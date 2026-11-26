@@ -582,7 +582,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
                     .provider_tier = config.provider_tier,
                     .redact = config.redact,
                     .judder_swing_ratio = config.judder_swing_ratio,
-                    .enable_transition_salience = false
+                    .enable_transition_salience = config.enable_transition_salience
                 };
 
                 auto report = correlator.correlate(snapshot_buffer, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());

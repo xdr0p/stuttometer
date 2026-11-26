@@ -130,8 +130,6 @@ static void update_inspector(int selected_index) {
         if (prev_pos > 0) {
             SendMessageW(g_h_edit_inspector, EM_LINESCROLL, 0, prev_pos);
         }
-        EnableWindow(g_h_btn_export, FALSE);
-        EnableWindow(g_h_btn_copy, FALSE);
         EnableWindow(g_h_btn_export_card, FALSE);
         EnableWindow(g_h_btn_copy_card, FALSE);
         return;
@@ -191,7 +189,19 @@ static void update_inspector(int selected_index) {
             << L" ms, Effective: " << eff_thresh << L" ms)\r\n";
     }
     oss << L"  CAPTURE WINDOW:      " << r.window_pre_ms << L" ms pre-trigger / " << r.window_post_ms << L" ms post-trigger\r\n";
-    oss << L"  PROVIDER TIER:       " << utf8_to_wstring(r.provider_tier) << (r.redacted ? L" [REDACTED]" : L"") << L"\r\n\r\n";
+    oss << L"  PROVIDER TIER:       " << utf8_to_wstring(r.provider_tier) << (r.redacted ? L" [REDACTED]" : L"") << L"\r\n";
+    oss << L"  EVENT CONTEXT:       " << utf8_to_wstring(event_context_class_to_string(r.event_context.classification));
+    if (r.event_context.classification != EventContextClass::UNCLASSIFIED) {
+        oss << L" (" << static_cast<int>(r.event_context.confidence * 100.0 + 0.5) << L"% conf";
+        if (r.event_context.present_mode_changed) {
+            oss << L", present-mode shift";
+        }
+        if (stuttometer::should_suppress_event_context(r.event_context)) {
+            oss << L", suppressed";
+        }
+        oss << L")";
+    }
+    oss << L"\r\n\r\n";
 
     if (r.diagnoses.empty()) {
         oss << L"  ------------------------------------------------------------------------------\r\n";
@@ -237,8 +247,6 @@ static void update_inspector(int selected_index) {
     oss << L"   Evictions: " << r.unpaired_evictions << L" | Ins Failures: " << r.insertion_failures << L"\r\n";
 
     SetWindowTextW(g_h_edit_inspector, oss.str().c_str());
-    EnableWindow(g_h_btn_export, TRUE);
-    EnableWindow(g_h_btn_copy, TRUE);
     bool can_card = CardRenderer::is_initialized();
     EnableWindow(g_h_btn_export_card, can_card ? TRUE : FALSE);
     EnableWindow(g_h_btn_copy_card, can_card ? TRUE : FALSE);
@@ -336,6 +344,11 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
     if (report->trigger.reason != TriggerReason::NONE && report->trigger.reason != TriggerReason::STATIC_THRESHOLD) {
         trig_str += " (" + std::string(display::trigger_reason_display(trigger_reason_to_string(report->trigger.reason))) + ")";
     }
+    if (report->event_context.classification == EventContextClass::LOADING_SCREEN) {
+        trig_str += " [Loading]";
+    } else if (report->event_context.classification == EventContextClass::STATE_TRANSITION) {
+        trig_str += " [Transition]";
+    }
     rec.trigger_reason = trig_str;
     rec.duration_ms = report->trigger.duration_ms;
 
@@ -389,8 +402,11 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
         int new_lv_index = ListView_GetItemCount(g_h_list_stutters);
         insert_record_into_listview(last_rec, new_lv_index);
 
-        const bool should_follow = (g_selected_stutter_index < 0 || g_selected_stutter_index == static_cast<int>(g_stutters.size() - 2));
+        const bool has_multi_sel = (ListView_GetSelectedCount(g_h_list_stutters) > 1);
+        const bool should_follow = !has_multi_sel &&
+                                   (g_selected_stutter_index < 0 || g_selected_stutter_index == static_cast<int>(g_stutters.size() - 2));
         if (should_follow) {
+            ListView_SetItemState(g_h_list_stutters, -1, 0, LVIS_SELECTED);
             ListView_SetItemState(g_h_list_stutters, new_lv_index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             ListView_EnsureVisible(g_h_list_stutters, new_lv_index, FALSE);
             g_selected_stutter_index = static_cast<int>(g_stutters.size() - 1);
@@ -416,9 +432,9 @@ static void update_clear_button_state() {
     bool is_idle = (g_current_session_state == GuiSessionState::IDLE);
     bool has_data = g_has_received_data || !g_stutters.empty() || !g_engine_logs.empty();
     EnableWindow(g_h_btn_clear, (is_idle && has_data) ? TRUE : FALSE);
-    if (g_h_btn_export_session) {
-        EnableWindow(g_h_btn_export_session, !g_stutters.empty() ? TRUE : FALSE);
-    }
+    BOOL has_stutters = !g_stutters.empty() ? TRUE : FALSE;
+    if (g_h_btn_export) EnableWindow(g_h_btn_export, has_stutters);
+    if (g_h_btn_copy) EnableWindow(g_h_btn_copy, has_stutters);
 }
 
 // Clear history with explicit ListView invalidation
@@ -794,9 +810,7 @@ static void layout_controls(HWND /*hwnd*/, int width, int height) {
     bx += btn_w + btn_gap;
     MoveWindow(g_h_btn_stop, bx, act_y, btn_w, act_h, TRUE);
     bx += btn_w + btn_gap;
-    MoveWindow(g_h_btn_clear, bx, act_y, scale_dpi(75), act_h, TRUE);
-    bx += scale_dpi(75) + btn_gap;
-    MoveWindow(g_h_btn_export_session, bx, act_y, scale_dpi(114), act_h, TRUE);
+    MoveWindow(g_h_btn_clear, bx, act_y, btn_w, act_h, TRUE);
 
     // 3. Stutter Events Table (ListView) and Diagnostic Inspector Card
     int content_top = act_y + act_h + scale_dpi(10);
@@ -942,10 +956,6 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SetPropW(g_h_btn_clear, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
             EnableWindow(g_h_btn_clear, FALSE);
 
-            g_h_btn_export_session = CreateWindowExW(0, L"BUTTON", L"Export Session", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BTN_EXPORT_SESSION, NULL, NULL);
-            SetPropW(g_h_btn_export_session, L"BtnStyle", reinterpret_cast<HANDLE>(BtnStyle::SecondarySlate));
-            EnableWindow(g_h_btn_export_session, FALSE);
-
             // Severity Filter Combobox (Positioned on Configuration Card)
             g_h_lbl_sev_filter = CreateWindowExW(0, L"STATIC", L"Filter:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
             SendMessageW(g_h_lbl_sev_filter, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
@@ -989,7 +999,6 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SetWindowSubclass(g_h_btn_start, DarkButtonSubclassProc, IDC_BTN_START, 0);
             SetWindowSubclass(g_h_btn_stop, DarkButtonSubclassProc, IDC_BTN_STOP, 0);
             SetWindowSubclass(g_h_btn_clear, DarkButtonSubclassProc, IDC_BTN_CLEAR, 0);
-            SetWindowSubclass(g_h_btn_export_session, DarkButtonSubclassProc, IDC_BTN_EXPORT_SESSION, 0);
             SetWindowSubclass(g_h_btn_copy_card, DarkButtonSubclassProc, IDC_BTN_COPY_CARD, 0);
             SetWindowSubclass(g_h_btn_export_card, DarkButtonSubclassProc, IDC_BTN_EXPORT_CARD, 0);
             SetWindowSubclass(g_h_btn_copy, DarkButtonSubclassProc, IDC_BTN_COPY_JSON, 0);
@@ -1001,7 +1010,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             }
 
             // Stutter Events ListView (LVS_EX_DOUBLEBUFFER: High throughput, flicker-free)
-            g_h_list_stutters = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_LIST_STUTTERS, NULL, NULL);
+            g_h_list_stutters = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | WS_VSCROLL, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_LIST_STUTTERS, NULL, NULL);
             SendMessageW(g_h_list_stutters, WM_SETFONT, (WPARAM)g_font_ui, TRUE);
             apply_control_dark_theme(g_h_list_stutters);
             SetWindowSubclass(g_h_list_stutters, ListViewSubclassProc, IDC_LIST_STUTTERS, 0);
@@ -1372,18 +1381,13 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     break;
                 }
 
-                case IDC_BTN_EXPORT_SESSION: {
+                case IDC_BTN_EXPORT_JSON: {
                     export_session_bundle(hwnd);
                     break;
                 }
 
-                case IDC_BTN_EXPORT_JSON: {
-                    export_selected_report_json(hwnd);
-                    break;
-                }
-
                 case IDC_BTN_COPY_JSON: {
-                    copy_selected_report_json(hwnd);
+                    copy_session_bundle(hwnd);
                     break;
                 }
 
@@ -1523,19 +1527,51 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             if (pnm->idFrom == IDC_LIST_STUTTERS) {
                 if (pnm->code == LVN_ITEMCHANGED) {
                     LPNMLISTVIEW pnmlv = reinterpret_cast<LPNMLISTVIEW>(lParam);
-                    if ((pnmlv->uChanged & LVIF_STATE) && (pnmlv->uNewState & LVIS_SELECTED)) {
-                        g_selected_stutter_index = get_stutter_index_from_listview(pnmlv->iItem);
-                        update_inspector(g_selected_stutter_index);
-                        if (g_h_edit_inspector && IsWindow(g_h_edit_inspector)) {
-                            RECT client_rc{};
-                            GetClientRect(hwnd, &client_rc);
-                            RECT insp_wnd_rc{};
-                            GetWindowRect(g_h_edit_inspector, &insp_wnd_rc);
-                            POINT pt_insp = { insp_wnd_rc.left, insp_wnd_rc.top };
-                            ScreenToClient(hwnd, &pt_insp);
-                            RECT rc_hdr = { scale_dpi(16), pt_insp.y - scale_dpi(34), client_rc.right - scale_dpi(16), pt_insp.y };
-                            InvalidateRect(hwnd, &rc_hdr, TRUE);
+                    if (pnmlv->uChanged & LVIF_STATE) {
+                        int next_selected = g_selected_stutter_index;
+                        if (pnmlv->uNewState & LVIS_SELECTED) {
+                            int lv_item = pnmlv->iItem;
+                            if (lv_item < 0) {
+                                lv_item = ListView_GetNextItem(g_h_list_stutters, -1, LVNI_FOCUSED | LVNI_SELECTED);
+                                if (lv_item < 0) {
+                                    lv_item = ListView_GetNextItem(g_h_list_stutters, -1, LVNI_SELECTED);
+                                }
+                            }
+                            next_selected = (lv_item >= 0) ? get_stutter_index_from_listview(lv_item) : -1;
+                        } else if (pnmlv->uOldState & LVIS_SELECTED) {
+                            if (ListView_GetSelectedCount(g_h_list_stutters) == 0) {
+                                next_selected = -1;
+                            } else {
+                                int deselected_idx = (pnmlv->iItem >= 0) ? get_stutter_index_from_listview(pnmlv->iItem) : -1;
+                                if (pnmlv->iItem < 0 || deselected_idx == g_selected_stutter_index) {
+                                    int fallback_lv = ListView_GetNextItem(g_h_list_stutters, -1, LVNI_FOCUSED | LVNI_SELECTED);
+                                    if (fallback_lv < 0) {
+                                        fallback_lv = ListView_GetNextItem(g_h_list_stutters, -1, LVNI_SELECTED);
+                                    }
+                                    next_selected = (fallback_lv >= 0) ? get_stutter_index_from_listview(fallback_lv) : -1;
+                                }
+                            }
                         }
+
+                        if (next_selected != g_selected_stutter_index) {
+                            g_selected_stutter_index = next_selected;
+                            update_inspector(g_selected_stutter_index);
+                            if (g_h_edit_inspector && IsWindow(g_h_edit_inspector)) {
+                                RECT client_rc{};
+                                GetClientRect(hwnd, &client_rc);
+                                RECT insp_wnd_rc{};
+                                GetWindowRect(g_h_edit_inspector, &insp_wnd_rc);
+                                POINT pt_insp = { insp_wnd_rc.left, insp_wnd_rc.top };
+                                ScreenToClient(hwnd, &pt_insp);
+                                RECT rc_hdr = { scale_dpi(16), pt_insp.y - scale_dpi(34), client_rc.right - scale_dpi(16), pt_insp.y };
+                                InvalidateRect(hwnd, &rc_hdr, TRUE);
+                            }
+                        }
+                    }
+                } else if (pnm->code == LVN_KEYDOWN) {
+                    LPNMLVKEYDOWN pnmkd = reinterpret_cast<LPNMLVKEYDOWN>(lParam);
+                    if (pnmkd->wVKey == 'C' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                        copy_selected_report_json(hwnd);
                     }
                 } else if (pnm->code == NM_CUSTOMDRAW) {
                     LPNMLVCUSTOMDRAW pCustomDraw = reinterpret_cast<LPNMLVCUSTOMDRAW>(lParam);
@@ -1597,11 +1633,6 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 SetWindowTextW(g_h_btn_export_card, L"Export Card");
                 InvalidateRect(g_h_btn_export_card, NULL, TRUE);
                 return 0;
-            } else if (wParam == reinterpret_cast<UINT_PTR>(g_h_btn_export_session)) {
-                KillTimer(hwnd, wParam);
-                SetWindowTextW(g_h_btn_export_session, L"Export Session");
-                InvalidateRect(g_h_btn_export_session, NULL, TRUE);
-                return 0;
             }
             break;
         }
@@ -1649,7 +1680,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         case WM_STUTTO_TRIGGER: {
             std::unique_ptr<DiagnosticReport> report(reinterpret_cast<DiagnosticReport*>(lParam));
-            if (report && g_settings_config.enable_osd) {
+            if (report && g_settings_config.enable_osd &&
+                !stuttometer::should_suppress_event_context(report->event_context)) {
                 const double vblank_ref = (report->hardware_vblank_ms > 0.0)
                     ? report->hardware_vblank_ms
                     : report->present_threshold_ms;

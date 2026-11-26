@@ -122,6 +122,8 @@ struct PresentInFlight {
     uint64_t swapchain_ptr{0};
     uint32_t pid{0};
     uint32_t tid{0};
+    uint32_t sync_interval{0};
+    uint32_t present_flags{0};
 };
 
 struct DiskInFlight {
@@ -178,7 +180,7 @@ struct LastFlipEntry {
     uint32_t pid{0};
     uint32_t tid{0};
 };
-static_assert(sizeof(PresentInFlight) == 24, "PresentInFlight must be 24 bytes");
+static_assert(sizeof(PresentInFlight) == 32, "PresentInFlight must be 32 bytes");
 static_assert(std::is_trivially_copyable_v<PresentInFlight>, "PresentInFlight must be trivially copyable");
 static_assert(sizeof(DiskInFlight) == 24, "DiskInFlight must be 24 bytes");
 static_assert(std::is_trivially_copyable_v<DiskInFlight>, "DiskInFlight must be trivially copyable");

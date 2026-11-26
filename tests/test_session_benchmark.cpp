@@ -659,7 +659,7 @@ static void test_audio_glitch_separation() {
     // Verify JSON serialization
     std::string json_str = summary.to_json();
     auto root = nlohmann::json::parse(json_str);
-    STUTTO_ASSERT(root["schema_version"] == "1.4");
+    STUTTO_ASSERT(root["schema_version"] == "1.5");
     STUTTO_ASSERT(root.contains("audio_glitches_detected"));
     STUTTO_ASSERT(root["audio_glitches_detected"] == 1);
     STUTTO_ASSERT(root["stutters_detected"] == 1);
@@ -846,7 +846,7 @@ static void test_schema_1_4_dual_counters_and_filtering() {
     // 5. JSON serialization validation
     std::string json_str = s4.to_json();
     auto root = nlohmann::json::parse(json_str);
-    STUTTO_ASSERT(root["schema_version"] == "1.4");
+    STUTTO_ASSERT(root["schema_version"] == "1.5");
     STUTTO_ASSERT(root["stutters_detected"] == 1);
     STUTTO_ASSERT(root["minor_stutters"] == 3);
     STUTTO_ASSERT(std::abs(root["minor_stall_ms"].get<double>() - 40.5) < 0.01);
@@ -890,6 +890,53 @@ static void test_judder_filtered_event_stall_exclusion() {
     std::cout << "[TEST 23] PASSED\n";
 }
 
+static void test_suppressed_transitions_accounting() {
+    std::cout << "[TEST 24] Suppressed Transitions Accounting & Schema 1.5...\n";
+
+    const uint64_t qpc_freq = 10000000ULL;
+    stuttometer::SessionBenchmark benchmark(qpc_freq);
+    benchmark.retarget(1234);
+
+    // 1. Suppressed LOADING_SCREEN report -> increments suppressed_transitions only
+    stuttometer::DiagnosticReport rep_sup;
+    rep_sup.trigger.target_pid = 1234;
+    rep_sup.trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    rep_sup.trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    rep_sup.trigger.duration_ms = 250.0;
+    rep_sup.trigger.baseline_avg_ms = 16.67;
+    rep_sup.event_context.classification = stuttometer::EventContextClass::LOADING_SCREEN;
+    rep_sup.event_context.confidence = 0.85;
+    rep_sup.event_context.policy_applied = true;
+    benchmark.ingest_report(rep_sup);
+
+    // 2. GAMEPLAY is never suppressible even if policy_applied were set
+    stuttometer::DiagnosticReport rep_gp;
+    rep_gp.trigger.target_pid = 1234;
+    rep_gp.trigger.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    rep_gp.trigger.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    rep_gp.trigger.duration_ms = 50.0;
+    rep_gp.trigger.baseline_avg_ms = 16.67;
+    rep_gp.event_context.classification = stuttometer::EventContextClass::GAMEPLAY;
+    rep_gp.event_context.confidence = 0.85;
+    rep_gp.event_context.policy_applied = true;
+    benchmark.ingest_report(rep_gp);
+
+    auto s = benchmark.get_summary();
+    STUTTO_ASSERT(s.suppressed_transitions == 1);
+    STUTTO_ASSERT(s.stutters_detected == 1);
+    STUTTO_ASSERT(s.total_triggers == 1);
+
+    auto j = nlohmann::json::parse(s.to_json());
+    STUTTO_ASSERT(j["schema_version"] == "1.5");
+    STUTTO_ASSERT(j["suppressed_transitions"] == 1);
+    STUTTO_ASSERT(s.to_markdown().find("- **Suppressed Transitions:** 1") != std::string::npos);
+
+    benchmark.reset();
+    STUTTO_ASSERT(benchmark.get_summary().suppressed_transitions == 0);
+
+    std::cout << "[TEST 24] PASSED\n";
+}
+
 int main() {
     try {
         test_glass_smooth();
@@ -915,8 +962,9 @@ int main() {
         test_top_5_boundary_six_hypotheses();
         test_schema_1_4_dual_counters_and_filtering();
         test_judder_filtered_event_stall_exclusion();
+        test_suppressed_transitions_accounting();
 
-        std::cout << "\nAll 23 Session Benchmark tests PASSED successfully!\n";
+        std::cout << "\nAll 24 Session Benchmark tests PASSED successfully!\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\nTest suite failed with exception: " << ex.what() << "\n";

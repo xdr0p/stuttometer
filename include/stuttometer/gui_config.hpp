@@ -93,6 +93,7 @@ struct GuiConfig {
     bool enable_judder_detection{true};
     double judder_swing_ratio{0.35};
     uint8_t judder_min_alternations{5};
+    bool enable_transition_salience{false};
 
     // In-Game OSD Toast Configuration
     bool enable_osd{false};

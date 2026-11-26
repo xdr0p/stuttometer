@@ -137,6 +137,9 @@ constexpr std::array<HypothesisTagEntry, 15> kHypothesisTagTable = {{
     return ev;
 }
 
+// D5 Coverage-loss policy: etw_events_lost and etw_buffers_lost are cumulative
+// session totals. Any nonzero loss drops software_coverage to 0.0 (halving confidence via
+// 0.5 + 0.5 * coverage). Per-trigger loss delta is deferred if shadow data shows starvation.
 [[nodiscard]] inline double software_coverage(const ProviderContext& ctx) noexcept {
     if (ctx.etw_events_lost > 0 || ctx.etw_buffers_lost > 0) {
         return 0.0;
@@ -1397,7 +1400,6 @@ EventContextInfo CorrelationEngine::classify_event_context(
     const CorrelateOptions& options,
     const ProviderContext& provider_ctx
 ) const {
-    (void)options;
     EventContextInfo info;
     info.pre_baseline_ms = report.trigger.baseline_avg_ms;
 
@@ -1478,20 +1480,35 @@ EventContextInfo CorrelationEngine::classify_event_context(
         }
     }
 
-    // S2: I/O burst
+    // S2: I/O burst (read-only for burst & heavy-IO evaluation; read+write totals retained in info.* for schema continuity)
     uint32_t disk_count = 0;
     uint64_t disk_bytes = 0;
     uint32_t disk_post_count = 0;
     uint64_t disk_post_bytes = 0;
 
+    uint32_t read_count = 0;
+    uint64_t read_bytes = 0;
+    uint32_t read_post_count = 0;
+
     for (const auto& rec : snapshot) {
         if (static_cast<EventCategory>(rec.category) == EventCategory::DISK &&
             rec.pid == report.trigger.target_pid) {
+            const bool is_post = (rec.qpc_timestamp >= report.trigger.trigger_timestamp_qpc);
+            const bool is_read = ((rec.flags & EventFlags::DISK_IS_WRITE) == 0);
+
             disk_count++;
             disk_bytes += rec.auxiliary_data;
-            if (rec.qpc_timestamp >= report.trigger.trigger_timestamp_qpc) {
+            if (is_post) {
                 disk_post_count++;
                 disk_post_bytes += rec.auxiliary_data;
+            }
+
+            if (is_read) {
+                read_count++;
+                read_bytes += rec.auxiliary_data;
+                if (is_post) {
+                    read_post_count++;
+                }
             }
         }
     }
@@ -1500,12 +1517,12 @@ EventContextInfo CorrelationEngine::classify_event_context(
     info.disk_post_count = disk_post_count;
     info.disk_post_bytes = disk_post_bytes;
 
-    const bool sustained_post = (disk_count > 0) &&
-        (static_cast<double>(disk_post_count) / static_cast<double>(disk_count) >= transition_thresholds::DISK_BURST_POST_FRACTION);
+    const bool sustained_post = (read_count > 0) &&
+        (static_cast<double>(read_post_count) / static_cast<double>(read_count) >= transition_thresholds::DISK_BURST_POST_FRACTION);
 
     const bool s2_io_burst = provider_ctx.kernel_disk_active &&
-        (disk_count >= transition_thresholds::DISK_BURST_MIN_EVENTS) &&
-        (disk_bytes >= transition_thresholds::DISK_BURST_MIN_BYTES) &&
+        (read_count >= transition_thresholds::DISK_BURST_MIN_EVENTS) &&
+        (read_bytes >= transition_thresholds::DISK_BURST_MIN_BYTES) &&
         sustained_post;
 
     // S3: Voluntary dominance (target TID deschedule strictly during the stall gap)
@@ -1536,9 +1553,49 @@ EventContextInfo CorrelationEngine::classify_event_context(
     const bool s3_voluntary = info.voluntary_available &&
                               (info.voluntary_wait_fraction >= transition_thresholds::VOLUNTARY_DOMINANCE_FRACTION);
 
-    // S4: Present-mode change (Phase C - deferred, false in Phase A)
-    // TODO(M3.6-Phase-C): Extract SyncInterval/PresentFlags change from DXGI Stop records and wire ladder rule 6
-    const bool s4_present_mode_changed = false;
+    // S4: Present-mode change (SyncInterval / stable PresentFlags shift across trigger boundary)
+    // Boundary convention: post = qpc_timestamp >= trigger_timestamp_qpc, pre = <
+    // (matches S2 and catches mode changes landing on the trigger frame).
+    // Filter strictly to EventCategory::DXGI (payload.dxgi_present aliases payload.dxgi used by DxgKrnl)
+    // and exclude duplicate present path artifacts and sentinel (0xFFFFFFFF) records.
+    constexpr uint32_t DXGI_SENTINEL = 0xFFFFFFFFU;
+    constexpr uint32_t DXGI_PRESENT_TRANSIENT_MASK = 0x00000001U | 0x00000008U; // DXGI_PRESENT_TEST | DXGI_PRESENT_DO_NOT_WAIT
+
+    bool has_pre_dxgi = false;
+    uint64_t best_pre_qpc = 0;
+    uint32_t pre_sync = 0;
+    uint32_t pre_flags = 0;
+
+    bool has_post_dxgi = false;
+    uint64_t best_post_qpc = 0;
+    uint32_t post_sync = 0;
+    uint32_t post_flags = 0;
+
+    for (const auto& rec : snapshot) {
+        if (static_cast<EventCategory>(rec.category) != EventCategory::DXGI) continue;
+        if (rec.pid != report.trigger.target_pid) continue;
+        if (rec.flags & EventFlags::DXGI_DUPLICATE_PRESENT_PATH) continue;
+        if (rec.payload.dxgi_present.sync_interval == DXGI_SENTINEL) continue;
+
+        if (rec.qpc_timestamp < report.trigger.trigger_timestamp_qpc) {
+            if (!has_pre_dxgi || rec.qpc_timestamp >= best_pre_qpc) {
+                has_pre_dxgi = true;
+                best_pre_qpc = rec.qpc_timestamp;
+                pre_sync = rec.payload.dxgi_present.sync_interval;
+                pre_flags = rec.payload.dxgi_present.present_flags & ~DXGI_PRESENT_TRANSIENT_MASK;
+            }
+        } else {
+            if (!has_post_dxgi || rec.qpc_timestamp >= best_post_qpc) {
+                has_post_dxgi = true;
+                best_post_qpc = rec.qpc_timestamp;
+                post_sync = rec.payload.dxgi_present.sync_interval;
+                post_flags = rec.payload.dxgi_present.present_flags & ~DXGI_PRESENT_TRANSIENT_MASK;
+            }
+        }
+    }
+
+    const bool s4_present_mode_changed = has_pre_dxgi && has_post_dxgi &&
+        ((pre_sync != post_sync) || (pre_flags != post_flags));
     info.present_mode_changed = s4_present_mode_changed;
 
     // Check dominant in-gap, target-affine stutter evidence (D4)
@@ -1598,7 +1655,7 @@ EventContextInfo CorrelationEngine::classify_event_context(
         if (s2_io_burst) {
             info.classification = EventContextClass::LOADING_SCREEN;
             raw_conf = transition_thresholds::CONFIDENCE_LOADING_BASE;
-            if (disk_bytes >= transition_thresholds::DISK_BURST_HEAVY_BYTES) {
+            if (read_bytes >= transition_thresholds::DISK_BURST_HEAVY_BYTES) {
                 raw_conf += transition_thresholds::CONFIDENCE_LOADING_HEAVY_IO_BONUS;
             }
             if (s3_voluntary) {
@@ -1606,6 +1663,9 @@ EventContextInfo CorrelationEngine::classify_event_context(
             }
             if (all_post_elevated) {
                 raw_conf += transition_thresholds::CONFIDENCE_LOADING_ELEVATED_POST_BONUS;
+            }
+            if (s4_present_mode_changed) {
+                raw_conf += transition_thresholds::CONFIDENCE_LOADING_S4_BONUS;
             }
         } else {
             info.classification = EventContextClass::STATE_TRANSITION;
@@ -1616,18 +1676,24 @@ EventContextInfo CorrelationEngine::classify_event_context(
             if (info.post_dispersion <= transition_thresholds::REGIME_LOW_DISPERSION_THRESHOLD) {
                 raw_conf += transition_thresholds::CONFIDENCE_REGIME_LOW_DISPERSION_BONUS;
             }
+            if (s4_present_mode_changed) {
+                raw_conf += transition_thresholds::CONFIDENCE_REGIME_S4_SYNC_BONUS;
+            }
         }
     } else if (s2_io_burst && all_post_elevated) {
         // Step 5: I/O burst + elevated post frames but unstable dispersion -> LOADING_SCREEN
         info.classification = EventContextClass::LOADING_SCREEN;
         raw_conf = transition_thresholds::CONFIDENCE_LOADING_BASE;
-        if (disk_bytes >= transition_thresholds::DISK_BURST_HEAVY_BYTES) {
+        if (read_bytes >= transition_thresholds::DISK_BURST_HEAVY_BYTES) {
             raw_conf += transition_thresholds::CONFIDENCE_LOADING_HEAVY_IO_BONUS;
         }
         if (s3_voluntary) {
             raw_conf += transition_thresholds::CONFIDENCE_LOADING_VOLUNTARY_BONUS;
         }
         raw_conf += transition_thresholds::CONFIDENCE_LOADING_ELEVATED_POST_BONUS;
+        if (s4_present_mode_changed) {
+            raw_conf += transition_thresholds::CONFIDENCE_LOADING_S4_BONUS;
+        }
     } else {
         // Step 7: UNCLASSIFIED
         info.classification = EventContextClass::UNCLASSIFIED;
@@ -1642,8 +1708,12 @@ EventContextInfo CorrelationEngine::classify_event_context(
         info.confidence = 0.0;
     }
 
-    // Phase A shadow requirement: policy_applied is unconditionally false
-    info.policy_applied = false;
+    const bool is_transition_class =
+        (info.classification == EventContextClass::LOADING_SCREEN ||
+         info.classification == EventContextClass::STATE_TRANSITION);
+    info.policy_applied = options.enable_transition_salience &&
+                          is_transition_class &&
+                          (info.confidence >= transition_thresholds::POLICY_CONFIDENCE_GATE);
 
     return info;
 }

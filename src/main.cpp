@@ -474,7 +474,7 @@ int main(int argc, char** argv) {
                     .provider_tier = provider_tier,
                     .redact = redact,
                     .judder_swing_ratio = judder_swing_ratio,
-                    .enable_transition_salience = false
+                    .enable_transition_salience = config.enable_transition_salience
                 };
 
                 auto report = correlator.correlate(snapshot_buffer, trigger_info, qpc_freq, correlate_opts, p_ctx, drops, unpaired_evicts, ins_failures, flight_recorder.total_dropped_events());

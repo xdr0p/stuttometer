@@ -30,7 +30,7 @@ inline constexpr size_t DISK_BURST_MIN_EVENTS = 40;
 inline constexpr uint64_t DISK_BURST_MIN_BYTES = 8ULL * 1024ULL * 1024ULL; // 8 MB
 // Fraction of disk events required to occur after trigger timestamp (sustained into post-window)
 inline constexpr double DISK_BURST_POST_FRACTION = 0.25;
-inline constexpr uint64_t DISK_BURST_HEAVY_BYTES = 32ULL * 1024ULL * 1024ULL; // 32 MB for bonus confidence
+inline constexpr uint64_t DISK_BURST_HEAVY_BYTES = 16ULL * 1024ULL * 1024ULL; // 16 MB for bonus confidence
 
 // S3 Voluntary dominance
 inline constexpr double VOLUNTARY_DOMINANCE_FRACTION = 0.80; // 80%
@@ -41,17 +41,12 @@ inline constexpr size_t REGIME_HIGH_SAMPLES_THRESHOLD = 10;
 inline constexpr double CONFIDENCE_REGIME_HIGH_SAMPLES_BONUS = 0.10;
 inline constexpr double REGIME_LOW_DISPERSION_THRESHOLD = 0.15;
 inline constexpr double CONFIDENCE_REGIME_LOW_DISPERSION_BONUS = 0.10;
-inline constexpr double CONFIDENCE_REGIME_S2_BONUS = 0.10;
-
-// TODO(M3.6-Phase-C): Wire S4 SyncInterval bonus when present mode change flags land in Phase C
 inline constexpr double CONFIDENCE_REGIME_S4_SYNC_BONUS = 0.15;
 
 inline constexpr double CONFIDENCE_LOADING_BASE = 0.45;
 inline constexpr double CONFIDENCE_LOADING_HEAVY_IO_BONUS = 0.15;
 inline constexpr double CONFIDENCE_LOADING_VOLUNTARY_BONUS = 0.10;
 inline constexpr double CONFIDENCE_LOADING_ELEVATED_POST_BONUS = 0.10;
-
-// TODO(M3.6-Phase-C): Wire S4 present mode change bonus when present flags land in Phase C
 inline constexpr double CONFIDENCE_LOADING_S4_BONUS = 0.10;
 
 inline constexpr double CONFIDENCE_MAX = 0.95;

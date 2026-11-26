@@ -32,7 +32,6 @@ HWND g_h_btn_stop = nullptr;
 HWND g_h_btn_settings = nullptr;
 HWND g_h_btn_session_summary = nullptr;
 HWND g_h_btn_clear = nullptr;
-HWND g_h_btn_export_session = nullptr;
 HWND g_h_btn_export = nullptr;
 HWND g_h_btn_copy = nullptr;
 HWND g_h_btn_export_card = nullptr;
@@ -311,7 +310,6 @@ void apply_fonts_to_main_controls() {
     if (g_h_btn_start) SendMessageW(g_h_btn_start, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_stop) SendMessageW(g_h_btn_stop, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_clear) SendMessageW(g_h_btn_clear, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
-    if (g_h_btn_export_session) SendMessageW(g_h_btn_export_session, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_export) SendMessageW(g_h_btn_export, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_copy) SendMessageW(g_h_btn_copy, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);
     if (g_h_btn_export_card) SendMessageW(g_h_btn_export_card, WM_SETFONT, (WPARAM)g_font_ui_bold, TRUE);

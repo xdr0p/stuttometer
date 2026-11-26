@@ -25,6 +25,9 @@ std::string BenchmarkSummary::to_markdown() const {
             << std::fixed << std::setprecision(1) << minor_stall_ms << " ms)\n";
     }
     oss << "- **Total Triggers:** " << total_triggers << "\n";
+    if (suppressed_transitions > 0) {
+        oss << "- **Suppressed Transitions:** " << suppressed_transitions << "\n";
+    }
     oss << "- **Audio Glitches:** " << audio_glitches_detected << "\n";
     oss << "- **Net Stall Time:** " << std::fixed << std::setprecision(1) << net_stall_ms << " ms\n";
     if (judder_episodes > 0) {
@@ -100,8 +103,8 @@ std::string BenchmarkSummary::to_markdown() const {
 
 std::string BenchmarkSummary::to_json() const {
     nlohmann::json j;
-    // Schema 1.4: judder_episodes, judder_total_span_ms, and worst_judder_span_ms added
-    j["schema_version"] = "1.4";
+    // Schema 1.5: suppressed_transitions added
+    j["schema_version"] = "1.5";
     j["target_process"] = target_process;
     j["target_pid"] = target_pid;
     j["duration_ms"] = duration_ms;
@@ -109,6 +112,7 @@ std::string BenchmarkSummary::to_json() const {
     j["stutters_detected"] = stutters_detected;
     j["minor_stutters"] = minor_stutters;
     j["minor_stall_ms"] = minor_stall_ms;
+    j["suppressed_transitions"] = suppressed_transitions;
     j["total_triggers"] = total_triggers;
     j["audio_glitches_detected"] = audio_glitches_detected;
     j["dropped_pause_frames"] = dropped_pause_frames;
@@ -232,6 +236,11 @@ void SessionBenchmark::ingest_report(const DiagnosticReport& report) {
 
     if (target_process_.empty() && !report.target_process.empty()) {
         target_process_ = report.target_process;
+    }
+
+    if (should_suppress_event_context(report.event_context)) {
+        suppressed_transitions_++;
+        return;
     }
 
     if (report.trigger.source == TriggerSource::AUDIO_GLITCH) {
@@ -529,6 +538,7 @@ BenchmarkSummary SessionBenchmark::get_summary(bool redact) const {
         summary.audio_glitches_detected = audio_glitches_detected_;
         summary.minor_stutters = minor_stutters_.load(std::memory_order_relaxed);
         summary.minor_stall_ms = static_cast<double>(minor_stall_us_.load(std::memory_order_relaxed)) / 1000.0;
+        summary.suppressed_transitions = suppressed_transitions_;
         summary.total_triggers = summary.stutters_detected + summary.minor_stutters;
         summary.net_stall_ms = net_stall_ms_;
         summary.worst_stutter_ms = worst_stutter_ms_;
@@ -632,6 +642,7 @@ void SessionBenchmark::clear_attribution_locked() {
     tag_stats_.clear();
     stutters_detected_ = 0;
     audio_glitches_detected_ = 0;
+    suppressed_transitions_ = 0;
     minor_stutters_.store(0, std::memory_order_relaxed);
     minor_stall_us_.store(0, std::memory_order_relaxed);
     net_stall_ms_ = 0.0;

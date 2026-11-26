@@ -243,7 +243,7 @@ static void test_schema_1_2_benchmark_summary_serialization() {
 
     auto root = nlohmann::json::parse(json_str);
 
-    STUTTO_ASSERT(root["schema_version"] == "1.4");
+    STUTTO_ASSERT(root["schema_version"] == "1.5");
     STUTTO_ASSERT(root["target_process"] == "Cyberpunk2077.exe");
     STUTTO_ASSERT(root["target_pid"] == 4321);
     STUTTO_ASSERT(root["total_frames"] == 3600);
@@ -252,6 +252,8 @@ static void test_schema_1_2_benchmark_summary_serialization() {
     STUTTO_ASSERT(root.contains("minor_stutters"));
     STUTTO_ASSERT(root["minor_stutters"] == 0);
     STUTTO_ASSERT(root.contains("minor_stall_ms"));
+    STUTTO_ASSERT(root.contains("suppressed_transitions"));
+    STUTTO_ASSERT(root["suppressed_transitions"] == 0);
     STUTTO_ASSERT(root.contains("total_triggers"));
     STUTTO_ASSERT(root["total_triggers"] == 0);
     STUTTO_ASSERT(root.contains("judder_episodes"));

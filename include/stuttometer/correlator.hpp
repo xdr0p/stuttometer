@@ -204,6 +204,7 @@ struct EventContextInfo {
     double post_median_ms{0.0};
     double post_dispersion{0.0}; // MAD / median
     double pre_baseline_ms{0.0};
+    // Read+write disk totals retained for schema continuity; S2 burst & heavy-IO bonus evaluate reads only.
     uint32_t disk_event_count{0};
     uint64_t disk_total_bytes{0};
     uint32_t disk_post_count{0};
@@ -214,6 +215,12 @@ struct EventContextInfo {
     bool impulse_confirmed{false};
     bool stutter_evidence_dominant{false};
 };
+
+[[nodiscard]] constexpr bool should_suppress_event_context(const EventContextInfo& info) noexcept {
+    return info.policy_applied &&
+           (info.classification == EventContextClass::LOADING_SCREEN ||
+            info.classification == EventContextClass::STATE_TRANSITION);
+}
 
 struct DiagnosticReport {
     std::string schema_version{"1.5"};

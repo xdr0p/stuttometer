@@ -1244,6 +1244,23 @@ static void test_config_file_support() {
         STUTTO_ASSERT(j.is_object());
         STUTTO_ASSERT(j["spike_multiplier"].get<double>() == 3.5);
         STUTTO_ASSERT(j["window_pre_ms"].get<double>() == 400.0);
+        STUTTO_ASSERT(j["enable_transition_salience"].get<bool>() == false);
+    }
+
+    // 15. --transition-salience / --no-transition-salience + config overlay
+    {
+        TempConfigFile f(R"({ "enable_transition_salience": true })");
+        const char* argv_cfg[] = { "stuttometer.exe", "-c", f.string().c_str() };
+        CliConfig cfg1;
+        std::ostringstream out1, err1;
+        STUTTO_ASSERT(parse_cli_args(3, argv_cfg, cfg1, out1, err1) == CliParseResult::OK);
+        STUTTO_ASSERT(cfg1.enable_transition_salience == true);
+
+        const char* argv_ovr[] = { "stuttometer.exe", "-c", f.string().c_str(), "--no-transition-salience" };
+        CliConfig cfg2;
+        std::ostringstream out2, err2;
+        STUTTO_ASSERT(parse_cli_args(4, argv_ovr, cfg2, out2, err2) == CliParseResult::OK);
+        STUTTO_ASSERT(cfg2.enable_transition_salience == false);
     }
 
     std::cout << "  -> All 14 configuration file support cases passed.\n";

@@ -34,7 +34,6 @@ constexpr int IDC_BTN_COPY_CARD      = 1016;
 constexpr int IDC_BTN_EXPORT_CARD    = 1017;
 constexpr int IDC_BTN_SESSION_SUMMARY = 1018;
 constexpr int IDC_BTN_BROWSE_TARGET  = 1019;
-constexpr int IDC_BTN_EXPORT_SESSION = 1020;
 
 // Global Hotkeys
 constexpr int ID_HOTKEY_TOGGLE_CAPTURE = 9001;
@@ -72,7 +71,6 @@ extern HWND g_h_btn_stop;
 extern HWND g_h_btn_settings;
 extern HWND g_h_btn_session_summary;
 extern HWND g_h_btn_clear;
-extern HWND g_h_btn_export_session;
 extern HWND g_h_btn_export;
 extern HWND g_h_btn_copy;
 extern HWND g_h_btn_export_card;

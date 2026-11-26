@@ -81,6 +81,7 @@ struct BenchmarkSummary {
     uint64_t audio_glitches_detected{0};
     uint64_t minor_stutters{0};
     double minor_stall_ms{0.0};
+    uint64_t suppressed_transitions{0};
     uint64_t total_triggers{0};
     uint64_t dropped_pause_frames{0};
     FrametimePercentiles frametimes;
@@ -214,6 +215,7 @@ private:
     std::unordered_map<AttributionTag, TagAttributionStat> tag_stats_;
     uint64_t stutters_detected_{0};
     uint64_t audio_glitches_detected_{0};
+    uint64_t suppressed_transitions_{0};
     std::atomic<uint64_t> minor_stutters_{0};
     std::atomic<uint64_t> minor_stall_us_{0};
     double net_stall_ms_{0.0};

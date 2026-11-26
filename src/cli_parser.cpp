@@ -52,6 +52,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     double min_spike_delta_ms = DEFAULT_MIN_SPIKE_DELTA_MS;
     bool enable_judder = true;
     double judder_swing_ratio = pacing_tuning::DEFAULT_JUDDER_SWING_RATIO;
+    bool enable_transition_salience = false;
     uint32_t judder_min_alternations = 5;
     std::string dump_events_path;
     size_t dump_max_mb = 100;
@@ -110,6 +111,9 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
        ->group("Detection");
     app.add_option("--judder-swing-ratio", judder_swing_ratio, "Judder cadence swing threshold ratio (preset-dependent, balanced: 0.50)")
        ->check(CLI::Range(0.1, 1.0))
+       ->group("Detection");
+    app.add_flag("--transition-salience,!--no-transition-salience", enable_transition_salience,
+        "Suppress loading-screen & state-transition stutters from OSD and benchmark totals (default: disabled)")
        ->group("Detection");
     app.add_flag("--audio-trigger,!--no-audio", enable_audio, "Enable/disable AudioGlitch Event ID 11 trigger")
        ->group("Detection");
@@ -326,6 +330,9 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         }
         if (j.contains("enable_judder_detection") && j["enable_judder_detection"].is_boolean()) {
             apply_if_unset("--judder-detection", enable_judder, j["enable_judder_detection"].get<bool>());
+        }
+        if (j.contains("enable_transition_salience") && j["enable_transition_salience"].is_boolean()) {
+            apply_if_unset("--transition-salience", enable_transition_salience, j["enable_transition_salience"].get<bool>());
         }
         if (j.contains("enable_audio_glitch") && j["enable_audio_glitch"].is_boolean()) {
             apply_if_unset("--audio-trigger", enable_audio, j["enable_audio_glitch"].get<bool>());
@@ -681,6 +688,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
     out_config.min_spike_delta_ms = min_spike_delta_ms;
     out_config.enable_judder = enable_judder;
     out_config.judder_swing_ratio = judder_swing_ratio;
+    out_config.enable_transition_salience = enable_transition_salience;
     out_config.dump_events_path = dump_events_path;
     out_config.dump_max_mb = dump_max_mb;
     out_config.dump_max_files = dump_max_files;
@@ -711,6 +719,7 @@ CliParseResult parse_cli_args(int argc, const char* const* argv, CliConfig& out_
         eff["judder_swing_ratio"] = out_config.judder_swing_ratio;
         eff["judder_min_alternations"] = out_config.judder_min_alternations;
         eff["enable_judder"] = out_config.enable_judder;
+        eff["enable_transition_salience"] = out_config.enable_transition_salience;
         eff["enable_audio"] = out_config.enable_audio;
         eff["window_pre_ms"] = out_config.window_pre_ms;
         eff["window_post_ms"] = out_config.window_post_ms;

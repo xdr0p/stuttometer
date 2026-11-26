@@ -40,9 +40,10 @@ This document defines standing invariants and operational constraints for automa
 ## 4. Policy, Presets & Reporting
 
 - **Detection is decoupled from reporting.** The detector remains sensitive and accurate; the pre-claim severity gate in `initiate_trigger_atomic` filters triggers before they touch the state machine or trigger cooldown.
-- **Session Benchmark (Schema 1.4):**
+- **Session Benchmark (Schema 1.5):**
   - `stutters_detected` counts `WARNING` and `DANGER` severity events only.
   - `minor_stutters` counts filtered triggers (`NORMAL` severity or vblank floor drops).
+  - `suppressed_transitions` counts loading-screen and state-transition triggers suppressed by transition salience policy (excluded from stutter/minor/hypothesis/tag counts).
   - `total_triggers = stutters_detected + minor_stutters` provides backward-compatible continuity with pre-1.3 benchmark totals.
 - **Shared Constants:** Do not add constants to `constants.hpp` unless they are shared across multiple subsystems. Subsystem-specific constants belong in internal headers or tuning namespaces.
 

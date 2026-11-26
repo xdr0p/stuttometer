@@ -56,6 +56,7 @@ constexpr int IDC_SET_LBL_PROFILE_HINT     = 2036;
 constexpr int IDC_SET_COMBO_PRESET         = 2037;
 constexpr int IDC_SET_EDIT_JUDDER_MIN_ALT  = 2038;
 constexpr int IDC_SET_COMBO_AUTO_SAVE_MODE = 2039;
+constexpr int IDC_SET_CHK_TRANSITION_SALIENCE = 2040;
 
 
 
@@ -106,6 +107,7 @@ struct SettingsDialogState {
     HWND h_lbl_profile_hint{nullptr};
     HWND h_chk_judder{nullptr};
     HWND h_edit_judder_min_alt{nullptr};
+    HWND h_chk_transition_salience{nullptr};
     HWND h_btn_reset{nullptr};
     HWND h_btn_cancel{nullptr};
     HWND h_btn_save{nullptr};
@@ -132,6 +134,7 @@ struct SettingsDialogState {
     RECT rc_lbl_auto_save{};
     RECT rc_lbl_osd{};
     RECT rc_lbl_judder{};
+    RECT rc_lbl_transition_salience{};
 };
 
 static LRESULT CALLBACK SettingsHotkeySubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
@@ -491,8 +494,9 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     const wchar_t* txt_osd = L"Enable In-Game OSD Toast";
     const wchar_t* txt_adv = L"Unlock Advanced Settings";
     const wchar_t* txt_jud = L"Enable Presentation Judder Detection";
+    const wchar_t* txt_sal = L"Suppress Loading / Transition Stutters";
 
-    SIZE sz_snd{}, sz_rd{}, sz_aud{}, sz_as{}, sz_osd{}, sz_adv{}, sz_jud{};
+    SIZE sz_snd{}, sz_rd{}, sz_aud{}, sz_as{}, sz_osd{}, sz_adv{}, sz_jud{}, sz_sal{};
     GetTextExtentPoint32W(hdc, txt_snd, static_cast<int>(wcslen(txt_snd)), &sz_snd);
     GetTextExtentPoint32W(hdc, txt_rd, static_cast<int>(wcslen(txt_rd)), &sz_rd);
     GetTextExtentPoint32W(hdc, txt_aud, static_cast<int>(wcslen(txt_aud)), &sz_aud);
@@ -500,12 +504,13 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     GetTextExtentPoint32W(hdc, txt_osd, static_cast<int>(wcslen(txt_osd)), &sz_osd);
     GetTextExtentPoint32W(hdc, txt_adv, static_cast<int>(wcslen(txt_adv)), &sz_adv);
     GetTextExtentPoint32W(hdc, txt_jud, static_cast<int>(wcslen(txt_jud)), &sz_jud);
+    GetTextExtentPoint32W(hdc, txt_sal, static_cast<int>(wcslen(txt_sal)), &sz_sal);
 
     SelectObject(hdc, old_font);
     ReleaseDC(hwnd, hdc);
 
     double v_scale = 1.0;
-    int target_h = scale_dpi(564);
+    int target_h = scale_dpi(592);
     if (client_rc.bottom < target_h) {
         v_scale = (std::max)(0.85, static_cast<double>(client_rc.bottom) / static_cast<double>(target_h));
     }
@@ -616,6 +621,10 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     int j_edit_x = c2_x + scale_dpi(354);
     MoveWindow(state->h_edit_judder_min_alt, j_edit_x, p6_jud_y + scale_dpi(1), th_pacing_w, ctrl_h, TRUE);
 
+    int p7_sal_y = c2_y + scale_y(214);
+    MoveWindow(state->h_chk_transition_salience, c2_x + scale_dpi(14), p7_sal_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
+    state->rc_lbl_transition_salience = { c2_x + scale_dpi(32), p7_sal_y, (std::min<int>)(c2_x + scale_dpi(32) + static_cast<int>(sz_sal.cx) + scale_dpi(6), c2_x + c2_w - scale_dpi(14)), p7_sal_y + ctrl_h };
+
     // ==========================================
     // RIGHT COLUMN: Card 4 (Kernel & System Anomaly Thresholds) (Y: 266, H: 232)
     // Organized into 2 balanced sub-columns
@@ -648,9 +657,9 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     MoveWindow(state->h_edit_vram_demoted, col2_edit_x, k5_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
 
     // ==========================================
-    // FOOTER (Y: 514, H: 34)
+    // FOOTER (Y: 542, H: 34)
     // ==========================================
-    const int f_y = scale_y(514);
+    const int f_y = scale_y(542);
     const int f_h = (std::max)(scale_dpi(28), scale_y(34));
     MoveWindow(state->h_btn_reset, margin, f_y, scale_dpi(130), f_h, TRUE);
 
@@ -909,6 +918,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             apply_control_dark_theme(state->h_lbl_profile_hint);
 
             state->h_chk_judder = create_checkbox(hwnd, IDC_SET_CHK_JUDDER, g_settings_config.enable_judder_detection);
+            state->h_chk_transition_salience = create_checkbox(hwnd, IDC_SET_CHK_TRANSITION_SALIENCE, g_settings_config.enable_transition_salience);
 
             wchar_t jud_buf[16]{};
             swprintf_s(jud_buf, L"%u", static_cast<unsigned>(g_settings_config.judder_min_alternations));
@@ -1012,6 +1022,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                     SendMessageW(state->h_chk_judder, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
                     update_settings_dependencies(state);
                     InvalidateRect(hwnd, NULL, TRUE);
+                } else if (PtInRect(&state->rc_lbl_transition_salience, pt)) {
+                    BOOL cur = (SendMessageW(state->h_chk_transition_salience, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    SendMessageW(state->h_chk_transition_salience, BM_SETCHECK, cur ? BST_UNCHECKED : BST_CHECKED, 0);
                 }
             }
             break;
@@ -1078,13 +1091,13 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             const int c2_x = c_left_x;
             const int c2_y = scale_y(266);
             const int c2_w = col_w;
-            const int c2_h = scale_y(232);
+            const int c2_h = scale_y(260);
 
             // Card 4: Kernel & System Anomaly Thresholds (Right Bottom)
             const int c4_x = c_right_x;
             const int c4_y = scale_y(266);
             const int c4_w = col_w;
-            const int c4_h = scale_y(232);
+            const int c4_h = scale_y(260);
 
             SelectObject(mem_dc, g_theme.br_card);
             SelectObject(mem_dc, g_theme.pen_card_border);
@@ -1282,6 +1295,10 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SetTextColor(mem_dc, COLOR_TEXT_MUTED);
             RECT rc_lbl_jalt_unit = { j_edit_x + j_edit_w + scale_dpi(6), p6_jud_y, c2_x + c2_w - scale_dpi(10), p6_jud_y + ctrl_h };
             DrawTextW(mem_dc, L"1\u201350", -1, &rc_lbl_jalt_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            SelectObject(mem_dc, g_font_ui_bold);
+            SetTextColor(mem_dc, COLOR_TEXT_LABEL);
+            DrawTextW(mem_dc, L"Suppress Loading / Transition Stutters", -1, &state->rc_lbl_transition_salience, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             // Card 4 Labels (Kernel & System Anomaly Thresholds)
             SelectObject(mem_dc, g_font_ui_sm_bold);
@@ -1694,6 +1711,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 SendMessageW(state->h_combo_auto_save_mode, CB_SETCURSEL, 0, 0);
                 SetWindowTextW(state->h_edit_auto_save, L"");
                 SendMessageW(state->h_chk_osd, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessageW(state->h_chk_transition_salience, BM_SETCHECK, BST_UNCHECKED, 0);
                 SendMessageW(state->h_combo_osd_pos, CB_SETCURSEL, 0, 0);
                 state->osd_duration_ms = 3500;
                 SendMessageW(state->h_combo_tier, CB_SETCURSEL, 0, 0);
@@ -1888,6 +1906,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 }
 
                 g_settings_config.enable_judder_detection = (SendMessageW(state->h_chk_judder, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                g_settings_config.enable_transition_salience = (SendMessageW(state->h_chk_transition_salience, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
                 if (g_hwnd_main && IsWindow(g_hwnd_main)) {
                     UnregisterHotKey(g_hwnd_main, ID_HOTKEY_TOGGLE_CAPTURE);
@@ -1948,7 +1967,7 @@ void ShowSettingsDialog(HWND hParent) {
     if (dpi == 0) dpi = 96;
 
     int client_w = MulDiv(960, dpi, 96);
-    int client_h = MulDiv(564, dpi, 96);
+    int client_h = MulDiv(592, dpi, 96);
 
     DWORD dwStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
     RECT rc = { 0, 0, client_w, client_h };
@@ -2072,8 +2091,9 @@ void settings_dialog_apply_fonts(HWND hDlg) {
         { &state->h_edit_spike_mult,      g_font_ui_bold, false },
         { &state->h_edit_min_delta,       g_font_ui_bold, false },
         { &state->h_lbl_profile_hint,     g_font_ui,      false },
-        { &state->h_chk_judder,           g_font_ui,      false },
-        { &state->h_edit_judder_min_alt,  g_font_ui_bold, false },
+        { &state->h_chk_judder,               g_font_ui,      false },
+        { &state->h_chk_transition_salience,  g_font_ui,      false },
+        { &state->h_edit_judder_min_alt,      g_font_ui_bold, false },
         { &state->h_btn_reset,            g_font_ui_bold, false },
         { &state->h_btn_cancel,           g_font_ui_bold, false },
         { &state->h_btn_save,             g_font_ui_bold, false },

@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <iostream>
 #include "stuttometer/etw_session.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
@@ -12,12 +14,51 @@ void EtwSessionManager::handle_dxgi_event(
     const uint64_t thread_key = make_thread_key(ctx.pid, ctx.tid);
 
     if (ctx.event_id == 42 || ctx.event_id == 55) { // Present Start / PresentMultiplaneOverlay Start
+        // Verified against Microsoft-Windows-DXGI manifest & PresentMon (PresentStartArgs /
+        // PresentMultiplaneOverlayStartArgs, x64):
+        //   @0  pIDXGISwapChain (8B)
+        //   @8  Flags           (4B, uint32_t)
+        //   @12 SyncInterval    (4B, uint32_t)
+        // Known limitation: NDJSON line schema v1 does not carry sync_interval / present_flags.
         uint64_t swapchain_ptr = 0;
         if (p_event->UserDataLength >= 8 && p_event->UserData) {
             std::memcpy(&swapchain_ptr, p_event->UserData, sizeof(uint64_t));
         }
+
+        constexpr uint32_t DXGI_SENTINEL = 0xFFFFFFFFU;
+        uint32_t sync_interval = DXGI_SENTINEL;
+        uint32_t present_flags = DXGI_SENTINEL;
+        if (p_event->UserDataLength >= 16 && p_event->UserData) {
+            const auto* raw = static_cast<const uint8_t*>(p_event->UserData);
+            uint32_t raw_flags = 0;
+            uint32_t raw_sync = 0;
+            std::memcpy(&raw_flags, raw + 8, sizeof(uint32_t));
+            std::memcpy(&raw_sync, raw + 12, sizeof(uint32_t));
+            if (raw_sync <= 4U) {
+                sync_interval = raw_sync;
+                present_flags = raw_flags;
+            } else {
+                static std::atomic<bool> layout_drift_logged{false};
+                bool expected = false;
+                if (layout_drift_logged.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+                    std::cerr << "[ETW] Warning: DXGI event " << ctx.event_id
+                              << " SyncInterval decoded as " << raw_sync
+                              << " (expected 0-4). Suspected layout drift; using sentinel.\n";
+                }
+            }
+        } else {
+            static std::atomic<bool> short_payload_logged{false};
+            bool expected = false;
+            if (short_payload_logged.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+                std::cerr << "[ETW] Warning: DXGI event " << ctx.event_id
+                          << " UserDataLength=" << p_event->UserDataLength
+                          << " (< 16). Using sentinel for sync_interval/present_flags.\n";
+            }
+        }
+
         rec.auxiliary_data = swapchain_ptr;
-        in_flight_present_.insert(thread_key, { ctx.timestamp, swapchain_ptr, ctx.pid, ctx.tid });
+        rec.payload.dxgi_present = { sync_interval, present_flags };
+        in_flight_present_.insert(thread_key, { ctx.timestamp, swapchain_ptr, ctx.pid, ctx.tid, sync_interval, present_flags });
         emit_ndjson_only(rec);
         return;
     }
@@ -30,6 +71,7 @@ void EtwSessionManager::handle_dxgi_event(
         // Always push Event 43/56 to flight recorder and ndjson writer (N-2)
         // If orphaned (no matching Event 42/55), fallback skips inter-frame calculation to prevent baseline pollution
         if (has_in_flight && present_data.pid == ctx.pid) {
+            rec.payload.dxgi_present = { present_data.sync_interval, present_data.present_flags };
             const uint64_t start_qpc = present_data.start_qpc;
             const uint64_t swapchain_ptr = present_data.swapchain_ptr;
             const uint64_t swapchain_key = make_swapchain_key(ctx.pid, swapchain_ptr);
@@ -83,6 +125,7 @@ void EtwSessionManager::handle_dxgi_event(
                     ctx.pid, ctx.tid, dur_ms, ctx.timestamp, swapchain_key, ctx.cpu);
             }
         } else {
+            rec.payload.dxgi_present = { 0xFFFFFFFFU, 0xFFFFFFFFU };
             emit_event(rec);
         }
         return;

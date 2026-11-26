@@ -202,26 +202,12 @@ void SessionBundleWriter::close() {
     path_.clear();
 }
 
-bool SessionBundleExporter::export_session(
-    const std::filesystem::path& file_path,
+bool SessionBundleExporter::export_session_to_stream(
+    std::ostream& out,
     const std::vector<DiagnosticReport>& reports,
     const BenchmarkSummary& summary,
     bool redact
 ) {
-    std::error_code ec;
-    const std::filesystem::path parent = file_path.parent_path();
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, ec);
-        if (ec) {
-            return false;
-        }
-    }
-
-    std::ofstream out(file_path, std::ios::out | std::ios::trunc);
-    if (!out.is_open()) {
-        return false;
-    }
-
     nlohmann::json summary_json = nlohmann::json::parse(summary.to_json(), nullptr, false);
     if (summary_json.is_discarded()) {
         return false;
@@ -249,6 +235,43 @@ bool SessionBundleExporter::export_session(
     out << "]\n}\n";
     out.flush();
     return out.good();
+}
+
+bool SessionBundleExporter::export_session_string(
+    std::string& out_json,
+    const std::vector<DiagnosticReport>& reports,
+    const BenchmarkSummary& summary,
+    bool redact
+) {
+    std::ostringstream oss;
+    if (!export_session_to_stream(oss, reports, summary, redact)) {
+        return false;
+    }
+    out_json = oss.str();
+    return true;
+}
+
+bool SessionBundleExporter::export_session(
+    const std::filesystem::path& file_path,
+    const std::vector<DiagnosticReport>& reports,
+    const BenchmarkSummary& summary,
+    bool redact
+) {
+    std::error_code ec;
+    const std::filesystem::path parent = file_path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            return false;
+        }
+    }
+
+    std::ofstream out(file_path, std::ios::out | std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+
+    return export_session_to_stream(out, reports, summary, redact);
 }
 
 } // namespace stuttometer

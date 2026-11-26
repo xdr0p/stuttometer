@@ -98,6 +98,7 @@ struct EtwEventRecord {
         uint64_t file_key;      // Disk FileObject pointer or hashed path
         struct { uint32_t prev_pid; uint32_t prev_tid; } cswitch;
         struct { uint32_t frame_index; uint32_t present_flags; } dxgi;
+        struct { uint32_t sync_interval; uint32_t present_flags; } dxgi_present;
         struct { uint32_t glitch_count; int32_t  error_code; } audio;
         uint64_t payload_u64;
     } payload;

@@ -2528,6 +2528,59 @@ static void test_event_context_approved_coverage_scaling() {
     std::cout << "  -> Approved coverage scaling formula PASSED.\n";
 }
 
+static void test_s4_present_mode_and_policy_activation() {
+    std::cout << "[TEST] Validating S4 present-mode signal & transition salience policy...\n";
+
+    const uint64_t qpc_freq = 10000000ULL;
+    const uint64_t base_qpc = 2000000000ULL;
+    const uint32_t pid = 7789;
+    const uint32_t tid = 9912;
+
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+
+    stuttometer::TriggerInfo trig{};
+    trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+    trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+    trig.trigger_timestamp_qpc = base_qpc;
+    trig.duration_ms = 200.0;
+    trig.baseline_avg_ms = 16.67;
+    trig.target_pid = pid;
+    trig.target_tid = tid;
+
+    auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 16.67, 200.0,
+        {33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34, 33.34});
+
+    // Stamp SyncInterval=0 + ALLOW_TEARING pre-trigger, SyncInterval=1 post-trigger
+    for (auto& rec : snap) {
+        if (static_cast<stuttometer::EventCategory>(rec.category) == stuttometer::EventCategory::DXGI) {
+            if (rec.qpc_timestamp < base_qpc) {
+                rec.payload.dxgi_present = { 0U, 0x00000200U }; // ALLOW_TEARING
+            } else {
+                rec.payload.dxgi_present = { 1U, 0x00000008U }; // DO_NOT_WAIT (transient)
+            }
+        }
+    }
+
+    stuttometer::ProviderContext p_ctx{};
+    stuttometer::CorrelateOptions opts_off{};
+    opts_off.enable_transition_salience = false;
+    auto rep_off = correlator.correlate(snap, trig, qpc_freq, opts_off, p_ctx);
+    STUTTO_ASSERT(rep_off.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+    STUTTO_ASSERT(rep_off.event_context.present_mode_changed == true);
+    STUTTO_ASSERT(rep_off.event_context.policy_applied == false);
+    STUTTO_ASSERT(!stuttometer::should_suppress_event_context(rep_off.event_context));
+
+    stuttometer::CorrelateOptions opts_on{};
+    opts_on.enable_transition_salience = true;
+    auto rep_on = correlator.correlate(snap, trig, qpc_freq, opts_on, p_ctx);
+    STUTTO_ASSERT(rep_on.event_context.present_mode_changed == true);
+    STUTTO_ASSERT(rep_on.event_context.policy_applied == true);
+    STUTTO_ASSERT(stuttometer::should_suppress_event_context(rep_on.event_context));
+
+    std::cout << "  -> S4 present-mode & transition salience policy PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -2573,6 +2626,7 @@ int main() {
         test_event_context_eligibility_fallbacks();
         test_event_context_rule2_impulse_terminal_override();
         test_event_context_rule3_d4_branches();
+        test_s4_present_mode_and_policy_activation();
         test_event_context_rule4_state_transition_and_loading_screen();
         test_event_context_rule5_unstable_loading();
         test_event_context_rule7_unclassified_fallback();

@@ -52,6 +52,7 @@ struct CliConfig {
     double min_spike_delta_ms{DEFAULT_MIN_SPIKE_DELTA_MS};
     bool enable_judder{true};
     double judder_swing_ratio{pacing_tuning::DEFAULT_JUDDER_SWING_RATIO};
+    bool enable_transition_salience{false};
     std::string dump_events_path;
     size_t dump_max_mb{100};
     size_t dump_max_files{3};

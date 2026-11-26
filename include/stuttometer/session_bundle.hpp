@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,20 @@ private:
  */
 class SessionBundleExporter {
 public:
+    static bool export_session_to_stream(
+        std::ostream& out,
+        const std::vector<DiagnosticReport>& reports,
+        const BenchmarkSummary& summary,
+        bool redact = false
+    );
+
+    static bool export_session_string(
+        std::string& out_json,
+        const std::vector<DiagnosticReport>& reports,
+        const BenchmarkSummary& summary,
+        bool redact = false
+    );
+
     static bool export_session(
         const std::filesystem::path& file_path,
         const std::vector<DiagnosticReport>& reports,
