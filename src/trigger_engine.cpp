@@ -160,13 +160,13 @@ bool TriggerEngine::initiate_trigger_atomic(
     claimed_timestamp_qpc_.store(now_qpc, std::memory_order_release);
     active_source_.store(src, std::memory_order_release);
 
-    // Evaluate eligibility for adaptive probe window (D5)
-    // Eligible: catastrophic stall (>=100ms, >=8x baseline), target PID != 0, frame source & relative/static reason
+    // Evaluate eligibility for adaptive probe window (D5 / D8)
+    // Eligible: probe-tier or full-tier stall (>=15ms, >=3x baseline), target PID != 0, frame source & relative/static reason
     const bool is_eligible =
         (src == TriggerSource::DXGI_PRESENT_STUTTER || src == TriggerSource::KERNEL_FRAME_STALL) &&
         (reason == TriggerReason::RELATIVE_SPIKE || reason == TriggerReason::STATIC_THRESHOLD) &&
-        (duration_ms >= transition_thresholds::MIN_DURATION_MS) &&
-        (baseline_avg_ms <= 0.0 || duration_ms >= (transition_thresholds::MIN_BASELINE_MULT * baseline_avg_ms)) &&
+        (duration_ms >= transition_thresholds::PROBE_MIN_DURATION_MS) &&
+        (baseline_avg_ms <= 0.0 || duration_ms >= (transition_thresholds::PROBE_MIN_BASELINE_MULT * baseline_avg_ms)) &&
         (pid != 0);
 
     const uint64_t effective_post = is_eligible

@@ -1403,7 +1403,7 @@ EventContextInfo CorrelationEngine::classify_event_context(
     EventContextInfo info;
     info.pre_baseline_ms = report.trigger.baseline_avg_ms;
 
-    // 1. Eligibility gate (§2.2)
+    // 1. Eligibility gate (§2.2 + C1 split probe-tier gate)
     const auto src = report.trigger.source;
     const auto rsn = report.trigger.reason;
     const bool valid_src = (src == TriggerSource::DXGI_PRESENT_STUTTER || src == TriggerSource::KERNEL_FRAME_STALL);
@@ -1412,16 +1412,21 @@ EventContextInfo CorrelationEngine::classify_event_context(
         return info;
     }
 
-    if (report.trigger.duration_ms < transition_thresholds::MIN_DURATION_MS) {
+    if (report.trigger.duration_ms < transition_thresholds::PROBE_MIN_DURATION_MS) {
         return info;
     }
     if (report.trigger.baseline_avg_ms > 0.0 &&
-        report.trigger.duration_ms < (transition_thresholds::MIN_BASELINE_MULT * report.trigger.baseline_avg_ms)) {
+        report.trigger.duration_ms < (transition_thresholds::PROBE_MIN_BASELINE_MULT * report.trigger.baseline_avg_ms)) {
         return info;
     }
     if (report.trigger.target_pid == 0 || report.frame_timeline.empty()) {
         return info;
     }
+
+    const bool full_ladder_eligible =
+        (report.trigger.duration_ms >= transition_thresholds::MIN_DURATION_MS) &&
+        (report.trigger.baseline_avg_ms <= 0.0 ||
+         report.trigger.duration_ms >= (transition_thresholds::MIN_BASELINE_MULT * report.trigger.baseline_avg_ms));
 
     // 2. Signals extraction
     // S1: Post-frame samples from frame_timeline
@@ -1639,10 +1644,39 @@ EventContextInfo CorrelationEngine::classify_event_context(
         }
     }
 
-    // 3. Decision ladder (§2.4)
+    // 3. Decision ladder (§2.4 + C1 probe-tier branch)
+    auto compute_regime_confidence = [](size_t post_samples, double post_disp, bool s4_changed) -> double {
+        double conf = transition_thresholds::CONFIDENCE_REGIME_BASE;
+        if (post_samples >= transition_thresholds::REGIME_HIGH_SAMPLES_THRESHOLD) {
+            conf += transition_thresholds::CONFIDENCE_REGIME_HIGH_SAMPLES_BONUS;
+        }
+        if (post_disp <= transition_thresholds::REGIME_LOW_DISPERSION_THRESHOLD) {
+            conf += transition_thresholds::CONFIDENCE_REGIME_LOW_DISPERSION_BONUS;
+        }
+        if (s4_changed) {
+            conf += transition_thresholds::CONFIDENCE_REGIME_S4_SYNC_BONUS;
+        }
+        return conf;
+    };
+
     double raw_conf = 0.0;
 
-    if (s1a_impulse) {
+    if (!full_ladder_eligible) {
+        // Probe-tier ladder (sub-100 ms or sub-8x triggers meeting PROBE_MIN_*):
+        //   - Impulse-confirmed -> GAMEPLAY (terminal, never suppressed)
+        //   - s1b_regime alone -> STATE_TRANSITION (same confidence formula, S4 as bonus)
+        //   - Otherwise -> UNCLASSIFIED
+        if (s1a_impulse) {
+            info.classification = EventContextClass::GAMEPLAY;
+            raw_conf = 0.85;
+        } else if (s1b_regime) {
+            info.classification = EventContextClass::STATE_TRANSITION;
+            raw_conf = compute_regime_confidence(N, info.post_dispersion, s4_present_mode_changed);
+        } else {
+            info.classification = EventContextClass::UNCLASSIFIED;
+            raw_conf = 0.0;
+        }
+    } else if (s1a_impulse) {
         // Step 2: Impulse return confirmed -> GAMEPLAY (terminal)
         info.classification = EventContextClass::GAMEPLAY;
         raw_conf = 0.85;
@@ -1669,16 +1703,7 @@ EventContextInfo CorrelationEngine::classify_event_context(
             }
         } else {
             info.classification = EventContextClass::STATE_TRANSITION;
-            raw_conf = transition_thresholds::CONFIDENCE_REGIME_BASE;
-            if (N >= transition_thresholds::REGIME_HIGH_SAMPLES_THRESHOLD) {
-                raw_conf += transition_thresholds::CONFIDENCE_REGIME_HIGH_SAMPLES_BONUS;
-            }
-            if (info.post_dispersion <= transition_thresholds::REGIME_LOW_DISPERSION_THRESHOLD) {
-                raw_conf += transition_thresholds::CONFIDENCE_REGIME_LOW_DISPERSION_BONUS;
-            }
-            if (s4_present_mode_changed) {
-                raw_conf += transition_thresholds::CONFIDENCE_REGIME_S4_SYNC_BONUS;
-            }
+            raw_conf = compute_regime_confidence(N, info.post_dispersion, s4_present_mode_changed);
         }
     } else if (s2_io_burst && all_post_elevated) {
         // Step 5: I/O burst + elevated post frames but unstable dispersion -> LOADING_SCREEN

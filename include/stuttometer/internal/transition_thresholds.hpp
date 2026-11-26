@@ -5,9 +5,15 @@
 
 namespace stuttometer::transition_thresholds {
 
-// Eligibility gate
+// Eligibility gate (full decision ladder)
 inline constexpr double MIN_DURATION_MS = 100.0;
 inline constexpr double MIN_BASELINE_MULT = 8.0;
+
+// Probe-tier eligibility gate (sub-100 ms menu hitches & adaptive probe window)
+inline constexpr double PROBE_MIN_DURATION_MS = 15.0;
+inline constexpr double PROBE_MIN_BASELINE_MULT = 3.0;
+static_assert(PROBE_MIN_DURATION_MS <= MIN_DURATION_MS, "PROBE_MIN_DURATION_MS must not exceed MIN_DURATION_MS");
+static_assert(PROBE_MIN_BASELINE_MULT <= MIN_BASELINE_MULT, "PROBE_MIN_BASELINE_MULT must not exceed MIN_BASELINE_MULT");
 
 // Adaptive probe window (precomputed and static-asserted cap for Phase B)
 inline constexpr double PROBE_WINDOW_MS = 350.0;

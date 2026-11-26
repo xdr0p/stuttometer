@@ -2084,32 +2084,32 @@ static void test_event_context_eligibility_fallbacks() {
         STUTTO_ASSERT(rep.event_context.policy_applied == false);
     }
 
-    // Case 2: Sub-MIN_DURATION_MS stall (90ms < 100ms)
+    // Case 2: Sub-PROBE_MIN_DURATION_MS stall (14ms < 15ms)
     {
         stuttometer::TriggerInfo trig{};
         trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
         trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
         trig.trigger_timestamp_qpc = base_qpc;
-        trig.duration_ms = stuttometer::transition_thresholds::MIN_DURATION_MS - 10.0;
-        trig.baseline_avg_ms = 10.0;
+        trig.duration_ms = stuttometer::transition_thresholds::PROBE_MIN_DURATION_MS - 1.0;
+        trig.baseline_avg_ms = 1.0;
         trig.target_pid = pid;
-        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 10.0, trig.duration_ms, {10.0, 10.0, 10.0, 10.0});
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 1.0, trig.duration_ms, {1.0, 1.0, 1.0, 1.0});
         auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
         STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
         STUTTO_ASSERT(rep.event_context.confidence == 0.0);
         STUTTO_ASSERT(rep.event_context.policy_applied == false);
     }
 
-    // Case 3: Duration < MIN_BASELINE_MULT * baseline (e.g. 120ms with baseline 20ms -> 6x < 8x)
+    // Case 3: Duration < PROBE_MIN_BASELINE_MULT * baseline (e.g. 40ms with baseline 20ms -> 2x < 3x)
     {
         stuttometer::TriggerInfo trig{};
         trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
         trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
         trig.trigger_timestamp_qpc = base_qpc;
-        trig.duration_ms = 120.0;
+        trig.duration_ms = 40.0;
         trig.baseline_avg_ms = 20.0;
         trig.target_pid = pid;
-        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 20.0, 120.0, {20.0, 20.0, 20.0, 20.0});
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 20.0, 40.0, {20.0, 20.0, 20.0, 20.0});
         auto rep = correlator.correlate(snap, trig, qpc_freq, opts);
         STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
         STUTTO_ASSERT(rep.event_context.confidence == 0.0);
@@ -2581,6 +2581,110 @@ static void test_s4_present_mode_and_policy_activation() {
     std::cout << "  -> S4 present-mode & transition salience policy PASSED.\n";
 }
 
+static void test_event_context_probe_tier_ladder() {
+    std::cout << "[TEST] Validating C1 probe-tier ladder (sub-100ms / sub-8x)...\n";
+    stuttometer::DriverSymbolResolver resolver;
+    stuttometer::CorrelationEngine correlator(resolver);
+    const uint64_t qpc_freq = 10000000ULL;
+    const uint64_t base_qpc = 500000000ULL;
+    const uint32_t pid = 4400;
+    const uint32_t tid = 4401;
+
+    stuttometer::CorrelateOptions opts_on;
+    opts_on.window_pre_ms = 200.0;
+    opts_on.window_post_ms = 350.0;
+    opts_on.enable_transition_salience = true;
+
+    stuttometer::ProviderContext p_ctx{};
+    p_ctx.kernel_dpc_active = true;
+    p_ctx.kernel_cswitch_active = true;
+    p_ctx.kernel_disk_active = true;
+
+    // 1. Sub-100ms impulse return (25 ms at 5 ms baseline -> 5x >= 3x) -> GAMEPLAY, never suppressed
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 25.0;
+        trig.baseline_avg_ms = 5.0;
+        trig.target_pid = pid;
+
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 5.0, 25.0, {5.0, 5.0, 5.0, 5.0});
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts_on, p_ctx);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::GAMEPLAY);
+        STUTTO_ASSERT(rep.event_context.impulse_confirmed == true);
+        STUTTO_ASSERT(std::abs(rep.event_context.confidence - 0.85) < 1e-6);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    // 2. Sub-100ms regime step without S4 (VSync-off menu hitch: 25 ms at 5 ms baseline, 10 post frames @ 16.67 ms)
+    //    -> STATE_TRANSITION with confidence 0.50 + 0.10 (N>=10) + 0.10 (low disp) = 0.70 >= 0.60
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 25.0;
+        trig.baseline_avg_ms = 5.0;
+        trig.target_pid = pid;
+
+        auto snap = make_synthetic_timeline(
+            pid, tid, base_qpc, qpc_freq, 5.0, 25.0,
+            {16.67, 16.67, 16.67, 16.67, 16.67, 16.67, 16.67, 16.67, 16.67, 16.67});
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts_on, p_ctx);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+        STUTTO_ASSERT(rep.event_context.present_mode_changed == false);
+        STUTTO_ASSERT(std::abs(rep.event_context.confidence - 0.70) < 1e-6);
+        STUTTO_ASSERT(rep.event_context.policy_applied == true);
+    }
+
+    // 3. Sub-100ms regime step with S4 bonus (6 post frames @ 16.67 ms, SyncInterval 0 -> 1)
+    //    -> STATE_TRANSITION with confidence 0.50 + 0.10 (low disp) + 0.15 (S4) = 0.75
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 25.0;
+        trig.baseline_avg_ms = 5.0;
+        trig.target_pid = pid;
+
+        auto snap = make_synthetic_timeline(
+            pid, tid, base_qpc, qpc_freq, 5.0, 25.0,
+            {16.67, 16.67, 16.67, 16.67, 16.67, 16.67});
+        for (auto& rec : snap) {
+            if (static_cast<stuttometer::EventCategory>(rec.category) == stuttometer::EventCategory::DXGI) {
+                rec.payload.dxgi_present.sync_interval = (rec.qpc_timestamp < base_qpc) ? 0u : 1u;
+            }
+        }
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts_on, p_ctx);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::STATE_TRANSITION);
+        STUTTO_ASSERT(rep.event_context.present_mode_changed == true);
+        STUTTO_ASSERT(std::abs(rep.event_context.confidence - 0.75) < 1e-6);
+        STUTTO_ASSERT(rep.event_context.policy_applied == true);
+    }
+
+    // 4. Sub-100ms without impulse or regime (only 2 post frames) -> UNCLASSIFIED
+    {
+        stuttometer::TriggerInfo trig{};
+        trig.source = stuttometer::TriggerSource::DXGI_PRESENT_STUTTER;
+        trig.reason = stuttometer::TriggerReason::RELATIVE_SPIKE;
+        trig.trigger_timestamp_qpc = base_qpc;
+        trig.duration_ms = 25.0;
+        trig.baseline_avg_ms = 5.0;
+        trig.target_pid = pid;
+
+        auto snap = make_synthetic_timeline(pid, tid, base_qpc, qpc_freq, 5.0, 25.0, {16.67, 16.67});
+        auto rep = correlator.correlate(snap, trig, qpc_freq, opts_on, p_ctx);
+        STUTTO_ASSERT(rep.event_context.classification == stuttometer::EventContextClass::UNCLASSIFIED);
+        STUTTO_ASSERT(rep.event_context.confidence == 0.0);
+        STUTTO_ASSERT(rep.event_context.policy_applied == false);
+    }
+
+    std::cout << "  -> C1 probe-tier ladder PASSED.\n";
+}
+
 int main() {
     std::cout << "=== Stuttometer Correlation Engine Tests ===\n";
     try {
@@ -2631,6 +2735,7 @@ int main() {
         test_event_context_rule5_unstable_loading();
         test_event_context_rule7_unclassified_fallback();
         test_event_context_approved_coverage_scaling();
+        test_event_context_probe_tier_ladder();
         std::cout << ">>> All Correlation Engine tests PASSED! <<<\n\n";
         return 0;
     } catch (const std::exception& e) {

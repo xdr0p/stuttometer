@@ -111,7 +111,7 @@ static void test_trigger_engine_concurrency_and_claimed_state() {
 
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
     stuttometer::TriggerConfig config;
-    config.present_threshold_ms = 20.0;
+    config.present_threshold_ms = 10.0;
     config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
     config.window_post_ms = 0.0; // Freeze immediately
 
@@ -124,7 +124,7 @@ static void test_trigger_engine_concurrency_and_claimed_state() {
 
     for (int t = 0; t < NUM_THREADS; ++t) {
         workers.emplace_back([&engine, &trigger_initiators, t, base_qpc]() {
-            bool initiated = engine.on_dxgi_present(1000 + t, 2000 + t, 35.0, base_qpc, static_cast<uint8_t>(t));
+            bool initiated = engine.on_dxgi_present(1000 + t, 2000 + t, 14.0, base_qpc, static_cast<uint8_t>(t));
             if (initiated) {
                 trigger_initiators.fetch_add(1, std::memory_order_relaxed);
             }
@@ -143,7 +143,7 @@ static void test_trigger_engine_concurrency_and_claimed_state() {
     stuttometer::TriggerInfo info;
     uint64_t from = 0, to = 0;
     STUTTO_ASSERT(engine.poll_state(base_qpc, info, from, to) == true);
-    STUTTO_ASSERT(info.duration_ms == 35.0);
+    STUTTO_ASSERT(info.duration_ms == 14.0);
 
     std::cout << "  -> Exactly 1 thread claimed trigger; 7 threads cleanly suppressed. CLAIMED lifecycle PASSED.\n";
 }
@@ -153,7 +153,7 @@ static void test_trigger_engine_watchdog_zero_post_window() {
 
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
     stuttometer::TriggerConfig config;
-    config.present_threshold_ms = 20.0;
+    config.present_threshold_ms = 10.0;
     config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
     config.window_post_ms = 0.0;
     config.cooldown_ms = 100.0;
@@ -161,7 +161,7 @@ static void test_trigger_engine_watchdog_zero_post_window() {
     stuttometer::TriggerEngine engine(config, qpc_freq);
     const uint64_t base_qpc = stuttometer::get_current_qpc();
 
-    bool ok = engine.on_dxgi_present(100, 200, 30.0, base_qpc, 1);
+    bool ok = engine.on_dxgi_present(100, 200, 14.0, base_qpc, 1);
     STUTTO_ASSERT(ok == true);
     STUTTO_ASSERT(engine.current_state() == stuttometer::TriggerState::FROZEN);
 

@@ -64,8 +64,8 @@ static void test_kernel_frame_stall_trigger_and_upgrade() {
     uint64_t from_qpc = 0;
     uint64_t to_qpc = 0;
 
-    // Advance past post-window
-    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    // Advance past probe-tier post-window (35.0ms >= PROBE_MIN_DURATION_MS 15.0ms -> 350ms probe window)
+    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 10.0, qpc_freq);
     STUTTO_ASSERT(engine.poll_state(poll_qpc, trig_info, from_qpc, to_qpc));
     STUTTO_ASSERT(trig_info.source == stuttometer::TriggerSource::KERNEL_FRAME_STALL);
     STUTTO_ASSERT(trig_info.duration_ms == 35.0);
@@ -105,8 +105,8 @@ static void test_kernel_frame_stall_trigger_and_upgrade() {
     // Minor GPU stall of 15.0ms arrives during COLLECTING_POST
     STUTTO_ASSERT(engine.on_kernel_frame_stall(100, 200, 15.0, base_qpc3 + stuttometer::ms_to_qpc_delta(2.0, qpc_freq), 0));
 
-    // Poll after post-window -> must NOT downgrade duration to 15.0ms or switch source from DXGI_PRESENT_STUTTER
-    const uint64_t poll_qpc3 = base_qpc3 + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    // Poll after probe-tier post-window (50.0ms >= PROBE_MIN_DURATION_MS 15.0ms -> 350ms probe window)
+    const uint64_t poll_qpc3 = base_qpc3 + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 10.0, qpc_freq);
     STUTTO_ASSERT(engine.poll_state(poll_qpc3, trig_info, from_qpc, to_qpc));
     STUTTO_ASSERT(trig_info.source == stuttometer::TriggerSource::DXGI_PRESENT_STUTTER);
     STUTTO_ASSERT(trig_info.duration_ms == 50.0);
@@ -208,14 +208,14 @@ static void test_gpu_pre_window_scaling() {
     // 1. Large pre-window (1000ms): GPU window should scale to 1200ms (not truncated to 500ms)
     {
         stuttometer::TriggerConfig cfg;
-        cfg.present_threshold_ms = 16.67;
+        cfg.present_threshold_ms = 10.0;
         cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
         cfg.window_pre_ms = 1000.0;
         cfg.window_post_ms = 0.0;
         stuttometer::TriggerEngine engine(cfg, qpc_freq);
 
         const uint64_t trig_ts = 50000000ULL; // 5.0s
-        STUTTO_ASSERT(engine.on_kernel_frame_stall(100, 200, 35.0, trig_ts, 0));
+        STUTTO_ASSERT(engine.on_kernel_frame_stall(100, 200, 14.0, trig_ts, 0));
 
         stuttometer::TriggerInfo info;
         uint64_t from_qpc = 0, to_qpc = 0;
@@ -228,14 +228,14 @@ static void test_gpu_pre_window_scaling() {
     // 2. Minimum pre-window (50ms): GPU window clamps to 250ms minimum lookback
     {
         stuttometer::TriggerConfig cfg;
-        cfg.present_threshold_ms = 16.67;
+        cfg.present_threshold_ms = 10.0;
         cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
         cfg.window_pre_ms = 50.0;
         cfg.window_post_ms = 0.0;
         stuttometer::TriggerEngine engine(cfg, qpc_freq);
 
         const uint64_t trig_ts = 50000000ULL;
-        STUTTO_ASSERT(engine.on_kernel_frame_stall(100, 200, 35.0, trig_ts, 0));
+        STUTTO_ASSERT(engine.on_kernel_frame_stall(100, 200, 14.0, trig_ts, 0));
 
         stuttometer::TriggerInfo info;
         uint64_t from_qpc = 0, to_qpc = 0;
@@ -248,14 +248,14 @@ static void test_gpu_pre_window_scaling() {
     // 3. Default pre-window (250ms): GPU window scales 1.5x to 375ms
     {
         stuttometer::TriggerConfig cfg;
-        cfg.present_threshold_ms = 16.67;
+        cfg.present_threshold_ms = 10.0;
         cfg.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
         cfg.window_pre_ms = 250.0;
         cfg.window_post_ms = 0.0;
         stuttometer::TriggerEngine engine(cfg, qpc_freq);
 
         const uint64_t trig_ts = 50000000ULL;
-        STUTTO_ASSERT(engine.on_kernel_frame_stall(100, 200, 35.0, trig_ts, 0));
+        STUTTO_ASSERT(engine.on_kernel_frame_stall(100, 200, 14.0, trig_ts, 0));
 
         stuttometer::TriggerInfo info;
         uint64_t from_qpc = 0, to_qpc = 0;
@@ -289,7 +289,7 @@ static void test_dwm_glitch_trigger_attribution() {
 
     stuttometer::TriggerInfo info;
     uint64_t from_qpc = 0, to_qpc = 0;
-    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 10.0, qpc_freq);
     STUTTO_ASSERT(engine.poll_state(poll_qpc, info, from_qpc, to_qpc));
     STUTTO_ASSERT(info.source == stuttometer::TriggerSource::DWM_GLITCH);
     STUTTO_ASSERT(info.target_pid == 4321);
@@ -325,12 +325,12 @@ static void test_trigger_engine_single_emission_guarantee() {
     stuttometer::TriggerEngine engine(cfg, qpc_freq);
     const uint64_t base_qpc = stuttometer::get_current_qpc();
 
-    // Trigger stutter
-    STUTTO_ASSERT(engine.on_dxgi_present(1234, 5678, 25.0, base_qpc, 0));
+    // Trigger stutter (14.0 ms < PROBE_MIN_DURATION_MS 15.0 ms -> uses configured 30 ms post-window)
+    STUTTO_ASSERT(engine.on_dxgi_present(1234, 5678, 14.0, base_qpc, 0));
 
     stuttometer::TriggerInfo trig;
     uint64_t from_qpc = 0, to_qpc = 0;
-    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 10.0, qpc_freq);
 
     // 1st poll -> transitions to FROZEN and returns true
     STUTTO_ASSERT(engine.poll_state(poll_qpc, trig, from_qpc, to_qpc));
@@ -373,7 +373,7 @@ static void test_static_trigger_on_pacing_table_exhaustion() {
 
     stuttometer::TriggerInfo trig;
     uint64_t from_qpc = 0, to_qpc = 0;
-    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(35.0, qpc_freq);
+    const uint64_t poll_qpc = base_qpc + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 10.0, qpc_freq);
     STUTTO_ASSERT(engine.poll_state(poll_qpc, trig, from_qpc, to_qpc));
     STUTTO_ASSERT(trig.source == stuttometer::TriggerSource::DXGI_PRESENT_STUTTER);
     STUTTO_ASSERT(trig.reason == stuttometer::TriggerReason::STATIC_THRESHOLD);
@@ -1326,22 +1326,22 @@ static void test_adaptive_probe_window_coupling() {
         engine.on_report_completed(ready_poll);
     }
 
-    // Test 2: Ineligible spike (duration 50 ms < MIN_DURATION_MS 100 ms) -> config window used
+    // Test 2: Ineligible spike (duration 14 ms < PROBE_MIN_DURATION_MS 15 ms) -> config window used
     {
         stuttometer::TriggerConfig config{};
         config.target_pid = target_pid;
         config.frame_trigger_mode = stuttometer::FrameTriggerMode::STATIC_ONLY;
         config.window_pre_ms = 100.0;
         config.window_post_ms = 40.0;
-        config.present_threshold_ms = 25.0;
+        config.present_threshold_ms = 10.0;
         config.cooldown_ms = 500.0;
         config.min_report_severity = stuttometer::ReportSeverity::ALL;
 
         stuttometer::TriggerEngine engine(config, qpc_freq);
 
         const uint64_t trig_ts = 2000000ULL;
-        // Stall of 50 ms (< 100 ms)
-        bool triggered = engine.on_dxgi_present(target_pid, tid, 50.0, trig_ts, 2);
+        // Stall of 14 ms (< 15 ms)
+        bool triggered = engine.on_dxgi_present(target_pid, tid, 14.0, trig_ts, 2);
         STUTTO_ASSERT(triggered);
 
         // After configured window_post_ms (40 ms + 10 ms margin), poll_state returns true immediately
@@ -1354,6 +1354,43 @@ static void test_adaptive_probe_window_coupling() {
         const uint64_t expected_config_delta = stuttometer::ms_to_qpc_delta(40.0, qpc_freq);
         STUTTO_ASSERT(to_qpc > trig.trigger_timestamp_qpc);
         STUTTO_ASSERT((to_qpc - trig.trigger_timestamp_qpc) == expected_config_delta);
+
+        engine.on_report_completed(ready_poll);
+    }
+
+    // Test 2b: Sub-100ms probe-tier eligible spike (25 ms >= 15 ms, 5x >= 3x at 200 FPS) -> probe window used
+    {
+        stuttometer::TriggerConfig config{};
+        config.target_pid = target_pid;
+        config.frame_trigger_mode = stuttometer::FrameTriggerMode::HYBRID;
+        config.window_pre_ms = 100.0;
+        config.window_post_ms = 40.0;
+        config.present_threshold_ms = 500.0;
+        config.spike_multiplier = 2.0;
+        config.min_spike_delta_ms = 4.0;
+        config.cooldown_ms = 500.0;
+        config.min_report_severity = stuttometer::ReportSeverity::ALL;
+
+        stuttometer::TriggerEngine engine(config, qpc_freq);
+        uint64_t ts = 2100000ULL;
+        for (int i = 0; i < 10; ++i) {
+            ts += stuttometer::ms_to_qpc_delta(5.0, qpc_freq);
+            STUTTO_ASSERT(!engine.on_dxgi_present(target_pid, tid, 5.0, ts, 1));
+        }
+
+        ts += stuttometer::ms_to_qpc_delta(25.0, qpc_freq);
+        STUTTO_ASSERT(engine.on_dxgi_present(target_pid, tid, 25.0, ts, 1));
+
+        stuttometer::TriggerInfo trig{};
+        uint64_t from_qpc = 0, to_qpc = 0;
+        const uint64_t early_poll = stuttometer::get_current_qpc() + stuttometer::ms_to_qpc_delta(50.0, qpc_freq);
+        STUTTO_ASSERT(!engine.poll_state(early_poll, trig, from_qpc, to_qpc));
+
+        const uint64_t ready_poll = stuttometer::get_current_qpc()
+                                  + stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS + 50.0, qpc_freq);
+        STUTTO_ASSERT(engine.poll_state(ready_poll, trig, from_qpc, to_qpc));
+        const uint64_t expected_probe_delta = stuttometer::ms_to_qpc_delta(stuttometer::transition_thresholds::PROBE_WINDOW_MS, qpc_freq);
+        STUTTO_ASSERT((to_qpc - trig.trigger_timestamp_qpc) == expected_probe_delta);
 
         engine.on_report_completed(ready_poll);
     }
