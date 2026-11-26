@@ -591,19 +591,19 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     const int c2_y = scale_y(266);
     const int c2_w = col_w;
 
-    int p0_y = c2_y + scale_y(26);
+    int p0_y = c2_y + scale_y(30);
     MoveWindow(state->h_combo_preset, c2_x + scale_dpi(134), p0_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
 
-    int p1_y = c2_y + scale_y(52);
+    int p1_y = c2_y + scale_y(58);
     MoveWindow(state->h_combo_trig_mode, c2_x + scale_dpi(134), p1_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
 
-    int p2_y = c2_y + scale_y(78);
+    int p2_y = c2_y + scale_y(86);
     MoveWindow(state->h_combo_pacing_profile, c2_x + scale_dpi(134), p2_y + scale_dpi(1), c2_w - scale_dpi(148), scale_dpi(150), TRUE);
 
-    int p3_y = c2_y + scale_y(104);
+    int p3_y = c2_y + scale_y(114);
     MoveWindow(state->h_edit_target_fps, c2_x + scale_dpi(134), p3_y + scale_dpi(1), scale_dpi(48), ctrl_h, TRUE);
 
-    int p4_y = c2_y + scale_y(132);
+    int p4_y = c2_y + scale_y(142);
     int sm_edit_x = c2_x + scale_dpi(134);
     int th_pacing_w = scale_dpi(48);
     MoveWindow(state->h_edit_spike_mult, sm_edit_x, p4_y + scale_dpi(1), th_pacing_w, ctrl_h, TRUE);
@@ -611,22 +611,22 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     int md_edit_x = c2_x + scale_dpi(354);
     MoveWindow(state->h_edit_min_delta, md_edit_x, p4_y + scale_dpi(1), th_pacing_w, ctrl_h, TRUE);
 
-    int p5_hint_y = c2_y + scale_y(160);
-    MoveWindow(state->h_lbl_profile_hint, c2_x + scale_dpi(14), p5_hint_y, c2_w - scale_dpi(28), scale_dpi(18), TRUE);
+    int p5_hint_y = c2_y + scale_y(170);
+    MoveWindow(state->h_lbl_profile_hint, c2_x + scale_dpi(14), p5_hint_y, c2_w - scale_dpi(28), scale_y(18), TRUE);
 
-    int p6_jud_y = c2_y + scale_y(186);
+    int p6_jud_y = c2_y + scale_y(194);
     MoveWindow(state->h_chk_judder, c2_x + scale_dpi(14), p6_jud_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
     state->rc_lbl_judder = { c2_x + scale_dpi(32), p6_jud_y, (std::min<int>)(c2_x + scale_dpi(32) + static_cast<int>(sz_jud.cx) + scale_dpi(6), c2_x + scale_dpi(230)), p6_jud_y + ctrl_h };
 
     int j_edit_x = c2_x + scale_dpi(354);
     MoveWindow(state->h_edit_judder_min_alt, j_edit_x, p6_jud_y + scale_dpi(1), th_pacing_w, ctrl_h, TRUE);
 
-    int p7_sal_y = c2_y + scale_y(214);
+    int p7_sal_y = c2_y + scale_y(222);
     MoveWindow(state->h_chk_transition_salience, c2_x + scale_dpi(14), p7_sal_y + (ctrl_h - scale_dpi(18)) / 2, scale_dpi(18), scale_dpi(18), TRUE);
     state->rc_lbl_transition_salience = { c2_x + scale_dpi(32), p7_sal_y, (std::min<int>)(c2_x + scale_dpi(32) + static_cast<int>(sz_sal.cx) + scale_dpi(6), c2_x + c2_w - scale_dpi(14)), p7_sal_y + ctrl_h };
 
     // ==========================================
-    // RIGHT COLUMN: Card 4 (Kernel & System Anomaly Thresholds) (Y: 266, H: 232)
+    // RIGHT COLUMN: Card 4 (Kernel & System Anomaly Thresholds) (Y: 266, H: 260)
     // Organized into 2 balanced sub-columns
     // ==========================================
     const int c4_x = c_right_x;
@@ -636,11 +636,11 @@ static void layout_settings_controls(HWND hwnd, SettingsDialogState* state) {
     const int col2_edit_x = c4_x + scale_dpi(354);
     const int th_edit_w = scale_dpi(48);
 
-    int k1_y = c4_y + scale_y(52);
-    int k2_y = c4_y + scale_y(84);
-    int k3_y = c4_y + scale_y(116);
-    int k4_y = c4_y + scale_y(148);
-    int k5_y = c4_y + scale_y(180);
+    int k1_y = c4_y + scale_y(58);
+    int k2_y = c4_y + scale_y(90);
+    int k3_y = c4_y + scale_y(122);
+    int k4_y = c4_y + scale_y(154);
+    int k5_y = c4_y + scale_y(186);
 
     // Left Sub-Column (CPU & GPU Pipeline)
     MoveWindow(state->h_edit_dpc, col1_edit_x, k1_y + scale_dpi(1), th_edit_w, ctrl_h, TRUE);
@@ -1110,16 +1110,16 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SelectObject(mem_dc, g_font_ui_sm_bold);
             SetTextColor(mem_dc, COLOR_TEXT_LABEL);
 
-            RECT t1 = { c1_x + scale_dpi(14), c1_y + scale_dpi(8), c1_x + c1_w, c1_y + scale_dpi(24) };
+            RECT t1 = { c1_x + scale_dpi(14), c1_y + scale_y(8), c1_x + c1_w, c1_y + scale_y(24) };
             DrawTextW(mem_dc, L"GENERAL PREFERENCES", -1, &t1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT t3 = { c3_x + scale_dpi(14), c3_y + scale_dpi(8), c3_x + c3_w, c3_y + scale_dpi(24) };
+            RECT t3 = { c3_x + scale_dpi(14), c3_y + scale_y(8), c3_x + c3_w, c3_y + scale_y(24) };
             DrawTextW(mem_dc, L"ADVANCED ENGINE & BUFFER TUNING", -1, &t3, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT t2 = { c2_x + scale_dpi(14), c2_y + scale_dpi(8), c2_x + c2_w, c2_y + scale_dpi(24) };
+            RECT t2 = { c2_x + scale_dpi(14), c2_y + scale_y(8), c2_x + c2_w, c2_y + scale_y(24) };
             DrawTextW(mem_dc, L"FRAME PACING & JUDDER TRIGGERS", -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT t4 = { c4_x + scale_dpi(14), c4_y + scale_dpi(8), c4_x + c4_w, c4_y + scale_dpi(24) };
+            RECT t4 = { c4_x + scale_dpi(14), c4_y + scale_y(8), c4_x + c4_w, c4_y + scale_y(24) };
             DrawTextW(mem_dc, L"KERNEL & SYSTEM ANOMALY THRESHOLDS", -1, &t4, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             // Card 1 Labels (General Preferences)
@@ -1186,12 +1186,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             // Card 2 Labels (Frame Pacing & Judder Triggers)
             SelectObject(mem_dc, g_font_ui_bold);
 
-            int p0_y = c2_y + scale_y(26);
+            int p0_y = c2_y + scale_y(30);
             RECT rc_lbl_preset = { c2_x + scale_dpi(14), p0_y, c2_x + scale_dpi(130), p0_y + ctrl_h };
             SetTextColor(mem_dc, COLOR_TEXT_LABEL);
             DrawTextW(mem_dc, L"Detection Preset:", -1, &rc_lbl_preset, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            int p1_y = c2_y + scale_y(52);
+            int p1_y = c2_y + scale_y(58);
             RECT rc_lbl_tm = { c2_x + scale_dpi(14), p1_y, c2_x + scale_dpi(130), p1_y + ctrl_h };
             SetTextColor(mem_dc, adv_lbl_color);
             DrawTextW(mem_dc, L"Trigger Mode:", -1, &rc_lbl_tm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -1201,12 +1201,12 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
 
             COLORREF prof_lbl_color = (mode_paint != FrameTriggerMode::STATIC_ONLY) ? COLOR_TEXT_LABEL : COLOR_TEXT_MUTED;
             SetTextColor(mem_dc, prof_lbl_color);
-            int p2_y = c2_y + scale_y(78);
+            int p2_y = c2_y + scale_y(86);
             RECT rc_lbl_prof = { c2_x + scale_dpi(14), p2_y, c2_x + scale_dpi(130), p2_y + ctrl_h };
             DrawTextW(mem_dc, L"Sensitivity Profile:", -1, &rc_lbl_prof, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SetTextColor(mem_dc, adv_lbl_color);
-            int p3_y = c2_y + scale_y(104);
+            int p3_y = c2_y + scale_y(114);
             RECT rc_lbl_fps = { c2_x + scale_dpi(14), p3_y, c2_x + scale_dpi(130), p3_y + ctrl_h };
             DrawTextW(mem_dc, L"Target FPS Floor:", -1, &rc_lbl_fps, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
@@ -1253,7 +1253,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
                 }
             }
 
-            int p4_y = c2_y + scale_y(132);
+            int p4_y = c2_y + scale_y(142);
             int sm_edit_x = c2_x + scale_dpi(134);
             int sm_edit_w = scale_dpi(48);
             int md_edit_x = c2_x + scale_dpi(354);
@@ -1277,7 +1277,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             RECT rc_lbl_md_unit = { md_edit_x + md_edit_w + scale_dpi(6), p4_y, c2_x + c2_w - scale_dpi(10), p4_y + ctrl_h };
             DrawTextW(mem_dc, L"1\u201350ms", -1, &rc_lbl_md_unit, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            int p6_jud_y = c2_y + scale_y(186);
+            int p6_jud_y = c2_y + scale_y(194);
             SelectObject(mem_dc, g_font_ui_bold);
             SetTextColor(mem_dc, adv_lbl_color);
             DrawTextW(mem_dc, L"Enable Judder Detection", -1, &state->rc_lbl_judder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -1304,20 +1304,20 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, 
             SelectObject(mem_dc, g_font_ui_sm_bold);
             SetTextColor(mem_dc, COLOR_TEXT_MUTED);
 
-            RECT rc_sub_cpu = { c4_x + scale_dpi(14), c4_y + scale_y(28), c4_x + scale_dpi(220), c4_y + scale_y(44) };
+            RECT rc_sub_cpu = { c4_x + scale_dpi(14), c4_y + scale_y(30), c4_x + scale_dpi(220), c4_y + scale_y(46) };
             DrawTextW(mem_dc, L"CPU & GPU PIPELINE", -1, &rc_sub_cpu, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            RECT rc_sub_mem = { c4_x + scale_dpi(234), c4_y + scale_y(28), c4_x + c4_w - scale_dpi(14), c4_y + scale_y(44) };
+            RECT rc_sub_mem = { c4_x + scale_dpi(234), c4_y + scale_y(30), c4_x + c4_w - scale_dpi(14), c4_y + scale_y(46) };
             DrawTextW(mem_dc, L"MEMORY & STORAGE", -1, &rc_sub_mem, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             SelectObject(mem_dc, g_font_ui_bold);
             SetTextColor(mem_dc, adv_lbl_color);
 
-            int k1_y = c4_y + scale_y(52);
-            int k2_y = c4_y + scale_y(84);
-            int k3_y = c4_y + scale_y(116);
-            int k4_y = c4_y + scale_y(148);
-            int k5_y = c4_y + scale_y(180);
+            int k1_y = c4_y + scale_y(58);
+            int k2_y = c4_y + scale_y(90);
+            int k3_y = c4_y + scale_y(122);
+            int k4_y = c4_y + scale_y(154);
+            int k5_y = c4_y + scale_y(186);
 
             // Left Sub-Column Labels (CPU & GPU Pipeline)
             int col1_lbl_x = c4_x + scale_dpi(14);

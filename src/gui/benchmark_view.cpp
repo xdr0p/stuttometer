@@ -389,32 +389,22 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             FillRect(hdc, &rc, bg_parent);
             DeleteObject(bg_parent);
 
-            // Match main_gui.cpp BtnStyle palettes
-            COLORREF bg;
-            COLORREF border;
-            COLORREF text_color;
-
-            if (is_disabled) {
-                bg = RGB(22, 25, 33);
-                border = RGB(38, 46, 62);
-                text_color = RGB(100, 116, 139);
-            } else if (pDIS->CtlID == IDC_BENCH_RESET_SESSION) {
-                // DangerRed palette matching main_gui.cpp BtnStyle::DangerRed
-                bg = is_pressed ? RGB(153, 27, 27) : (is_hovered ? RGB(220, 38, 38) : RGB(185, 28, 28));
-                border = is_pressed ? RGB(185, 28, 28) : (is_hovered ? RGB(239, 68, 68) : RGB(220, 38, 38));
-                text_color = RGB(255, 255, 255);
-            } else {
-                bg = is_pressed ? RGB(22, 26, 36) : (is_hovered ? RGB(38, 45, 62) : RGB(28, 33, 46));
-                border = is_pressed ? RGB(44, 52, 72) : (is_hovered ? RGB(65, 78, 105) : RGB(50, 60, 82));
-                text_color = is_hovered ? RGB(241, 245, 249) : RGB(226, 232, 240);
-            }
+            // Resolve button palette from g_theme via shared helper
+            const BtnStyle style = (pDIS->CtlID == IDC_BENCH_RESET_SESSION)
+                ? BtnStyle::DangerRed
+                : BtnStyle::SecondarySlate;
+            const auto pal = resolve_button_palette(style, is_disabled, is_pressed, is_hovered);
 
             int dpi = state->dpi;
             int radius_px = MulDiv(12, dpi, 96); // True 6px radius via 12px diameter, matching main_gui.cpp
-            draw_rounded_card(hdc, rc, bg, border, radius_px);
+            HGDIOBJ old_br = SelectObject(hdc, pal.brush);
+            HGDIOBJ old_pen = SelectObject(hdc, pal.pen);
+            RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius_px, radius_px);
+            SelectObject(hdc, old_pen);
+            SelectObject(hdc, old_br);
 
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, text_color);
+            SetTextColor(hdc, pal.text_color);
             HGDIOBJ old_font = SelectObject(hdc, state->font_bold);
 
             std::wstring text;
