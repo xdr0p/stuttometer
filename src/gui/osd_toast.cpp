@@ -1,4 +1,5 @@
 #include "osd_toast.hpp"
+#include "gui_helpers.hpp"
 #include "theme.hpp"
 #include "gui_string_utils.hpp"
 #include "stuttometer/internal/redaction_utils.hpp"
@@ -227,7 +228,6 @@ void OsdToast::show(const DiagnosticReport& report, uint32_t duration_ms, OsdPos
         current_data_.source = report.trigger.source;
         current_data_.glitch_count = report.trigger.glitch_count;
         current_data_.duration_ms = report.trigger.duration_ms;
-        current_data_.spike_ratio = report.trigger.spike_ratio;
         current_data_.attribution = report.attribution;
         current_data_.present_threshold_ms = report.present_threshold_ms;
         current_data_.hardware_vblank_ms = report.hardware_vblank_ms;
@@ -419,9 +419,7 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
         int width = rc.right - rc.left;
         int height = rc.bottom - rc.top;
 
-        HDC mem_dc = CreateCompatibleDC(hdc);
-        HBITMAP mem_bmp = CreateCompatibleBitmap(hdc, width, height);
-        HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem_dc, mem_bmp));
+        MemoryPaintDC mem_dc(hdc, width, height);
 
         init_gdi_resources();
 
@@ -433,23 +431,7 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
         MetricSeverity sev = classify_severity(current_data_.trigger, vblank_ref);
         COLORREF col_severity = get_severity_color(sev);
         HBRUSH br_stripe = get_severity_brush(sev);
-        std::wstring attr_tag;
-
-        switch (current_data_.attribution) {
-            case AttributionTag::GAME_ENGINE:
-                attr_tag = L"GAME ENGINE";
-                break;
-            case AttributionTag::DWM_COMPOSITION:
-                attr_tag = L"DWM COMPOSITION";
-                break;
-            case AttributionTag::EXTERNAL_CONTENTION:
-                attr_tag = L"EXTERNAL CONTENTION";
-                break;
-            case AttributionTag::UNKNOWN:
-            default:
-                attr_tag = L"UNKNOWN";
-                break;
-        }
+        std::wstring attr_tag = attribution_display_label(current_data_.attribution);
 
         UINT dpi = current_dpi_ > 0 ? current_dpi_ : 96;
         int stripe_w = MulDiv(5, dpi, 96);
@@ -533,13 +515,10 @@ void OsdToast::render(HDC hdc, const RECT& rc) noexcept {
         }
 
         // BitBlt to screen
-        BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+        mem_dc.blit();
 
         SelectObject(mem_dc, prev_font);
         SelectObject(mem_dc, old_br);
-        SelectObject(mem_dc, old_bmp);
-        DeleteObject(mem_bmp);
-        DeleteDC(mem_dc);
     } catch (...) {
     }
 }

@@ -72,6 +72,7 @@ private:
 bool equals_case_insensitive(std::string_view a, std::string_view b) noexcept;
 bool matches_process_name(std::string_view actual, std::string_view target) noexcept;
 std::string utf16_to_utf8(std::wstring_view wstr);
+std::wstring utf8_to_utf16(std::string_view str);
 
 // Process ID to process name resolver with TTL cache
 std::string get_process_name_by_pid(uint32_t pid);

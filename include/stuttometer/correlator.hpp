@@ -190,10 +190,6 @@ constexpr std::string_view event_context_class_to_string(EventContextClass c) no
     }
 }
 
-inline std::string event_context_class_to_std_string(EventContextClass c) {
-    return std::string(event_context_class_to_string(c));
-}
-
 struct EventContextInfo {
     EventContextClass classification{EventContextClass::UNCLASSIFIED};
     double confidence{0.0};

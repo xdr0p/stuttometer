@@ -24,13 +24,7 @@ void apply_combo_popup_border(HWND h_combo, COLORREF color) {
     );
 }
 
-void apply_edit_centered_padding(HWND hwnd, HFONT hFont) {
-    RECT rc_client;
-    GetClientRect(hwnd, &rc_client);
-    const int box_h = rc_client.bottom - rc_client.top;
-    const int box_w = rc_client.right - rc_client.left;
-    if (box_h <= 0 || box_w <= scale_dpi(4)) return;
-
+int measure_edit_font_height(HWND hwnd, HFONT hFont) noexcept {
     if (!hFont) {
         hFont = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
     }
@@ -48,6 +42,91 @@ void apply_edit_centered_padding(HWND hwnd, HFONT hFont) {
             ReleaseDC(hwnd, hdc);
         }
     }
+    return font_h;
+}
+
+LRESULT calc_edit_nc_size(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept {
+    if (!wParam) return 0;
+    auto* p = reinterpret_cast<LPNCCALCSIZE_PARAMS>(lParam);
+    int h = p->rgrc[0].bottom - p->rgrc[0].top;
+    if (h > 0) {
+        int font_h = measure_edit_font_height(hwnd);
+        int top_pad = (h > font_h) ? ((h - font_h) / 2) : 0;
+        const int horz_pad = scale_dpi(4);
+        p->rgrc[0].left += horz_pad;
+        p->rgrc[0].right -= horz_pad;
+        p->rgrc[0].top += top_pad;
+        p->rgrc[0].bottom = (std::max<LONG>)(p->rgrc[0].top + font_h, p->rgrc[0].bottom - (h - font_h - top_pad));
+    }
+    return 0;
+}
+
+void paint_edit_nc_frame(HWND hwnd) noexcept {
+    HDC hdc = GetWindowDC(hwnd);
+    if (!hdc) return;
+
+    RECT rc_win;
+    GetWindowRect(hwnd, &rc_win);
+    RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
+
+    POINT pt_client = { 0, 0 };
+    ClientToScreen(hwnd, &pt_client);
+    RECT rc_client;
+    GetClientRect(hwnd, &rc_client);
+    int cl_left = pt_client.x - rc_win.left;
+    int cl_top = pt_client.y - rc_win.top;
+    int cl_right = cl_left + (rc_client.right - rc_client.left);
+    int cl_bottom = cl_top + (rc_client.bottom - rc_client.top);
+
+    // Mask and fill only the 4 outer corner regions outside the rounded border
+    // with the parent card brush, preventing any rectangular inner-border artifact.
+    HRGN hrgn_total = CreateRectRgn(rc.left, rc.top, rc.right, rc.bottom);
+    HRGN hrgn_round = CreateRoundRectRgn(rc.left, rc.top, rc.right + 1, rc.bottom + 1, scale_dpi(6), scale_dpi(6));
+    HRGN hrgn_corners = CreateRectRgn(0, 0, 0, 0);
+    CombineRgn(hrgn_corners, hrgn_total, hrgn_round, RGN_DIFF);
+    FillRgn(hdc, hrgn_corners, g_theme.br_card);
+    DeleteObject(hrgn_corners);
+    DeleteObject(hrgn_round);
+    DeleteObject(hrgn_total);
+
+    // Fill the non-client padding area between the rounded border and the client area with input background
+    ExcludeClipRect(hdc, cl_left, cl_top, cl_right, cl_bottom);
+    FillRect(hdc, &rc, g_theme.br_input);
+    SelectClipRgn(hdc, NULL);
+
+    HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
+    SelectObject(hdc, old_br);
+    SelectObject(hdc, old_pen);
+    ReleaseDC(hwnd, hdc);
+}
+
+void paint_edit_border(HWND hwnd) noexcept {
+    HDC hdc = GetWindowDC(hwnd);
+    if (!hdc) return;
+
+    RECT rc_win;
+    GetWindowRect(hwnd, &rc_win);
+    RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
+    HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
+    SelectObject(hdc, old_br);
+    SelectObject(hdc, old_pen);
+    ReleaseDC(hwnd, hdc);
+}
+
+void apply_edit_centered_padding(HWND hwnd, HFONT hFont) {
+    RECT rc_client;
+    GetClientRect(hwnd, &rc_client);
+    const int box_h = rc_client.bottom - rc_client.top;
+    const int box_w = rc_client.right - rc_client.left;
+    if (box_h <= 0 || box_w <= scale_dpi(4)) return;
+
+    const int font_h = measure_edit_font_height(hwnd, hFont);
 
     LONG style = GetWindowLongW(hwnd, GWL_STYLE);
     if (style & ES_MULTILINE) {
@@ -68,31 +147,7 @@ LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
         case WM_NCCALCSIZE: {
             LONG style = GetWindowLongW(hwnd, GWL_STYLE);
             if (!(style & ES_MULTILINE) && wParam) {
-                auto* p = reinterpret_cast<LPNCCALCSIZE_PARAMS>(lParam);
-                int h = p->rgrc[0].bottom - p->rgrc[0].top;
-                if (h > 0) {
-                    HFONT hFont = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
-                    int font_h = scale_dpi(14);
-                    if (hFont) {
-                        HDC hdc = GetDC(hwnd);
-                        if (hdc) {
-                            HFONT old = reinterpret_cast<HFONT>(SelectObject(hdc, hFont));
-                            TEXTMETRICW tm{};
-                            if (GetTextMetricsW(hdc, &tm)) {
-                                font_h = tm.tmHeight + tm.tmExternalLeading;
-                            }
-                            SelectObject(hdc, old);
-                            ReleaseDC(hwnd, hdc);
-                        }
-                    }
-                    int top_pad = (h > font_h) ? ((h - font_h) / 2) : 0;
-                    const int horz_pad = scale_dpi(4);
-                    p->rgrc[0].left += horz_pad;
-                    p->rgrc[0].right -= horz_pad;
-                    p->rgrc[0].top += top_pad;
-                    p->rgrc[0].bottom = (std::max<LONG>)(p->rgrc[0].top + font_h, p->rgrc[0].bottom - (h - font_h - top_pad));
-                }
-                return 0;
+                return calc_edit_nc_size(hwnd, wParam, lParam);
             }
             break;
         }
@@ -100,45 +155,7 @@ LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
         case WM_NCPAINT: {
             LONG style = GetWindowLongW(hwnd, GWL_STYLE);
             if (!(style & ES_MULTILINE)) {
-                HDC hdc = GetWindowDC(hwnd);
-                if (hdc) {
-                    RECT rc_win;
-                    GetWindowRect(hwnd, &rc_win);
-                    RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
-
-                    POINT pt_client = { 0, 0 };
-                    ClientToScreen(hwnd, &pt_client);
-                    RECT rc_client;
-                    GetClientRect(hwnd, &rc_client);
-                    int cl_left = pt_client.x - rc_win.left;
-                    int cl_top = pt_client.y - rc_win.top;
-                    int cl_right = cl_left + (rc_client.right - rc_client.left);
-                    int cl_bottom = cl_top + (rc_client.bottom - rc_client.top);
-
-                    // Mask and fill only the 4 outer corner regions outside the rounded border
-                    // with the parent card brush, preventing any rectangular inner-border artifact.
-                    HRGN hrgn_total = CreateRectRgn(rc.left, rc.top, rc.right, rc.bottom);
-                    HRGN hrgn_round = CreateRoundRectRgn(rc.left, rc.top, rc.right + 1, rc.bottom + 1, scale_dpi(6), scale_dpi(6));
-                    HRGN hrgn_corners = CreateRectRgn(0, 0, 0, 0);
-                    CombineRgn(hrgn_corners, hrgn_total, hrgn_round, RGN_DIFF);
-                    FillRgn(hdc, hrgn_corners, g_theme.br_card);
-                    DeleteObject(hrgn_corners);
-                    DeleteObject(hrgn_round);
-                    DeleteObject(hrgn_total);
-
-                    // Fill the non-client padding area between the rounded border and the client area with input background
-                    ExcludeClipRect(hdc, cl_left, cl_top, cl_right, cl_bottom);
-                    FillRect(hdc, &rc, g_theme.br_input);
-                    SelectClipRgn(hdc, NULL);
-
-                    HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
-                    HGDIOBJ old_pen = SelectObject(hdc, pen);
-                    HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
-                    SelectObject(hdc, old_br);
-                    SelectObject(hdc, old_pen);
-                    ReleaseDC(hwnd, hdc);
-                }
+                paint_edit_nc_frame(hwnd);
                 return 0;
             }
             break;
@@ -175,19 +192,7 @@ LRESULT CALLBACK EditCenteredSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 
         case WM_PAINT: {
             LRESULT res = DefSubclassProc(hwnd, uMsg, wParam, lParam);
-            HDC hdc = GetWindowDC(hwnd);
-            if (hdc) {
-                RECT rc_win;
-                GetWindowRect(hwnd, &rc_win);
-                RECT rc = { 0, 0, rc_win.right - rc_win.left, rc_win.bottom - rc_win.top };
-                HPEN pen = IsWindowEnabled(hwnd) ? g_theme.pen_input_border : g_theme.pen_card_border;
-                HGDIOBJ old_pen = SelectObject(hdc, pen);
-                HGDIOBJ old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, scale_dpi(6), scale_dpi(6));
-                SelectObject(hdc, old_br);
-                SelectObject(hdc, old_pen);
-                ReleaseDC(hwnd, hdc);
-            }
+            paint_edit_border(hwnd);
             return res;
         }
     }
@@ -239,6 +244,13 @@ LRESULT CALLBACK DarkButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_MOUSELEAVE: {
             RemovePropW(hwnd, L"Hovered");
             InvalidateRect(hwnd, NULL, FALSE);
+            break;
+        }
+        case WM_ENABLE: {
+            if (!wParam) {
+                RemovePropW(hwnd, L"Hovered");
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             break;
         }
     }

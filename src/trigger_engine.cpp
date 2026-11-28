@@ -62,17 +62,10 @@ void TriggerEngine::record_filtered_event(
         sink->ingest_filtered_event(pid, duration_ms, reason);
     }
 
-    TriggerInfo tmp{};
-    tmp.source = src;
-    tmp.reason = reason;
-    tmp.duration_ms = duration_ms;
-    tmp.baseline_avg_ms = baseline_avg_ms;
-    tmp.spike_ratio = spike_ratio;
-    tmp.target_pid = pid;
-    tmp.target_tid = tid;
-    tmp.cpu_index = cpu_index;
-    tmp.judder_alternations = judder_alternations;
-    tmp.judder_max_swing_q100 = judder_max_swing_q100;
+    const TriggerInfo tmp = make_trigger_info(
+        src, reason, /*timestamp_qpc=*/0, duration_ms, pid, tid, cpu_index,
+        /*glitch_count=*/0, baseline_avg_ms, /*baseline_fps=*/0.0, spike_ratio,
+        judder_alternations, judder_max_swing_q100);
 
     const MetricSeverity sev = classify_severity(tmp, vblank_interval_ms());
 
@@ -107,20 +100,10 @@ bool TriggerEngine::initiate_trigger_atomic(
     uint16_t judder_max_swing_q100
 ) noexcept {
     // ---- Pre-Claim Severity Gate (Evaluated before acquiring writer_lock_) ----
-    TriggerInfo candidate{};
-    candidate.source = src;
-    candidate.reason = reason;
-    candidate.trigger_timestamp_qpc = timestamp_qpc;
-    candidate.duration_ms = duration_ms;
-    candidate.baseline_avg_ms = baseline_avg_ms;
-    candidate.baseline_fps = baseline_fps;
-    candidate.spike_ratio = spike_ratio;
-    candidate.glitch_count = glitch_count;
-    candidate.target_pid = pid;
-    candidate.target_tid = tid;
-    candidate.cpu_index = cpu_index;
-    candidate.judder_alternations = judder_alternations;
-    candidate.judder_max_swing_q100 = judder_max_swing_q100;
+    const TriggerInfo candidate = make_trigger_info(
+        src, reason, timestamp_qpc, duration_ms, pid, tid, cpu_index,
+        glitch_count, baseline_avg_ms, baseline_fps, spike_ratio,
+        judder_alternations, judder_max_swing_q100);
 
     const MetricSeverity sev = classify_severity(candidate, vblank_interval_ms());
     if (!meets_min_severity(sev, min_report_severity_.load(std::memory_order_acquire))) {
@@ -505,13 +488,10 @@ bool TriggerEngine::on_dwm_glitch(uint32_t pid, uint32_t tid, uint32_t missed_vb
     // DWM glitches originate from dwm.exe, not the game PID directly.
     // Instead of filtering via should_trigger_on_process(pid) which would reject dwm.exe,
     // we attribute the glitch trigger to the configured target PID (with tid = 0).
-    const uint64_t target_state = target_state_.load(std::memory_order_acquire);
-    const bool waiting = (target_state & 1ULL) != 0;
-    if (waiting) {
+    uint32_t effective_pid = 0;
+    if (!resolve_non_game_target_pid(effective_pid)) {
         return false;
     }
-    const uint32_t target_pid = static_cast<uint32_t>(target_state >> 32);
-    const uint32_t effective_pid = (target_pid != 0) ? target_pid : 0;
     const uint32_t effective_tid = 0;
 
     const double spike_ratio = (vblank_ms > 0.0) ? (duration_ms / vblank_ms) : 1.0;
@@ -537,16 +517,12 @@ bool TriggerEngine::on_audio_glitch(uint32_t /*pid*/, uint32_t /*tid*/, uint32_t
         return false;
     }
     // If target process is configured but not yet running, suppress audio triggers
-    const uint64_t target_state = target_state_.load(std::memory_order_acquire);
-    const bool waiting = (target_state & 1ULL) != 0;
-    if (waiting) {
-        return false;
-    }
-
     // Audio glitches originate from audiodg.exe or audio service, not the game PID directly.
     // If a target PID is actively configured and running, attribute trigger to target PID with target_tid = 0.
-    const uint32_t target_pid = static_cast<uint32_t>(target_state >> 32);
-    const uint32_t effective_pid = (target_pid != 0) ? target_pid : 0;
+    uint32_t effective_pid = 0;
+    if (!resolve_non_game_target_pid(effective_pid)) {
+        return false;
+    }
     const uint32_t effective_tid = 0;
 
     return initiate_trigger_atomic(

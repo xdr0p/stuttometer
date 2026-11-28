@@ -250,6 +250,47 @@ public:
     }
 
 private:
+    inline bool resolve_non_game_target_pid(uint32_t& out_effective_pid) const noexcept {
+        const uint64_t target_state = target_state_.load(std::memory_order_acquire);
+        if ((target_state & 1ULL) != 0) {
+            return false;
+        }
+        out_effective_pid = static_cast<uint32_t>(target_state >> 32);
+        return true;
+    }
+
+    static constexpr TriggerInfo make_trigger_info(
+        TriggerSource src,
+        TriggerReason reason,
+        uint64_t timestamp_qpc,
+        double duration_ms,
+        uint32_t pid,
+        uint32_t tid,
+        uint8_t cpu_index,
+        uint32_t glitch_count = 0,
+        double baseline_avg_ms = 0.0,
+        double baseline_fps = 0.0,
+        double spike_ratio = 0.0,
+        uint16_t judder_alternations = 0,
+        uint16_t judder_max_swing_q100 = 0
+    ) noexcept {
+        TriggerInfo info{};
+        info.source = src;
+        info.reason = reason;
+        info.trigger_timestamp_qpc = timestamp_qpc;
+        info.duration_ms = duration_ms;
+        info.baseline_avg_ms = baseline_avg_ms;
+        info.baseline_fps = baseline_fps;
+        info.spike_ratio = spike_ratio;
+        info.glitch_count = glitch_count;
+        info.target_pid = pid;
+        info.target_tid = tid;
+        info.cpu_index = cpu_index;
+        info.judder_alternations = judder_alternations;
+        info.judder_max_swing_q100 = judder_max_swing_q100;
+        return info;
+    }
+
     inline bool should_trigger_on_process(uint32_t pid) const noexcept {
         const uint64_t state = target_state_.load(std::memory_order_acquire);
         const bool waiting = (state & 1ULL) != 0;

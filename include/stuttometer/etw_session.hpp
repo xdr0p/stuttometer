@@ -20,7 +20,6 @@
 #include "trigger_engine.hpp"
 #include "fixed_table.hpp"
 #include "privilege_utils.hpp"
-#include "constants.hpp"
 
 namespace stuttometer {
 

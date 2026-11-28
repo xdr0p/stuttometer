@@ -1,4 +1,5 @@
 #include "gui_state.hpp"
+#include "stuttometer/privilege_utils.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
 #include "stuttometer/privilege_utils.hpp"
 
@@ -76,21 +77,11 @@ void append_engine_log(std::wstring log_msg) {
 }
 
 std::wstring utf8_to_wstring(std::string_view str) {
-    if (str.empty()) return std::wstring();
-    int num_chars = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.length()), NULL, 0);
-    if (num_chars <= 0) return std::wstring();
-    std::wstring result(num_chars, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.length()), result.data(), num_chars);
-    return result;
+    return stuttometer::utf8_to_utf16(str);
 }
 
 std::string wstring_to_utf8(const std::wstring& wstr) {
-    if (wstr.empty()) return std::string();
-    int num_bytes = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.length()), NULL, 0, NULL, NULL);
-    if (num_bytes <= 0) return std::string();
-    std::string result(num_bytes, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.length()), result.data(), num_bytes, NULL, NULL);
-    return result;
+    return stuttometer::utf16_to_utf8(wstr);
 }
 
 std::wstring format_hotkey_display(UINT fsModifiers, UINT vk) {

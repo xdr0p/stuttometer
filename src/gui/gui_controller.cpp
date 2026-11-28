@@ -4,6 +4,7 @@
 #include "stuttometer/session_bundle.hpp"
 #include "stuttometer/constants.hpp"
 #include "stuttometer/internal/gui_constants.hpp"
+#include "stuttometer/internal/session_helpers.hpp"
 #include <psapi.h>
 #include <algorithm>
 #include <iomanip>
@@ -216,10 +217,6 @@ bool GuiController::start_session_async(const GuiConfig& config) {
     }
 
     stop_worker_requested_.store(false, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> te_lock(trigger_engine_mutex_);
-        target_process_name_ = config.target_process_name;
-    }
     state_.store(GuiSessionState::STARTING, std::memory_order_release);
     PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::STARTING), 0);
 
@@ -249,7 +246,6 @@ void GuiController::update_target_filter(uint32_t pid, const std::string& proces
     bool should_start_watcher = false;
     {
         std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-        target_process_name_ = process_name;
         if (active_trigger_engine_) {
             active_trigger_engine_->update_target_pid(pid, (pid == 0 && !process_name.empty()));
         }
@@ -347,19 +343,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
             active_trigger_engine_ = std::move(trigger_engine);
         }
 
-        EtwSessionConfig etw_config;
-        etw_config.enable_dxgi = true;
-        etw_config.enable_audio = config.enable_audio;
-        etw_config.enable_kernel_dpc = (config.provider_tier != "minimal");
-        etw_config.enable_kernel_disk = (config.provider_tier != "minimal");
-        etw_config.enable_kernel_cswitch = (config.provider_tier == "full");
-        etw_config.enable_dxgkrnl = (config.provider_tier != "minimal");
-        etw_config.enable_dwm_core = (config.provider_tier != "minimal");
-        etw_config.enable_kernel_pagefault = (config.provider_tier != "minimal");
-        etw_config.enable_processor_power = (config.provider_tier != "minimal");
-        etw_config.enable_antimalware = (config.provider_tier != "minimal");
-        etw_config.enable_d3d12 = (config.provider_tier != "minimal");
-        etw_config.enable_kernel_memory = (config.provider_tier != "minimal");
+        EtwSessionConfig etw_config = session_helpers::make_etw_config(config.provider_tier, config.enable_audio);
 
         const uint32_t requested_slots = (config.buffer_slots >= MIN_BUFFER_SLOTS) ? std::min(config.buffer_slots, MAX_BUFFER_SLOTS) : DEFAULT_BUFFER_SLOTS;
         const uint32_t slots = compute_recommended_buffer_slots(etw_config, requested_slots);
@@ -373,25 +357,15 @@ void GuiController::session_worker_loop(GuiConfig config) {
         const auto start_result = session_mgr->start();
         if (start_result == SessionStartResult::FAILED) {
             std::cerr << "[STUTTOMETER] Error: Failed to start ETW trace sessions.\n";
-            state_.store(GuiSessionState::IDLE, std::memory_order_release);
-            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
             session_mgr.reset();
-            {
-                std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-                active_trigger_engine_.reset();
-            }
+            finish_session_idle();
             return;
         }
 
         if (stop_worker_requested_.load(std::memory_order_acquire)) {
-            state_.store(GuiSessionState::IDLE, std::memory_order_release);
-            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
             session_mgr->stop();
             session_mgr.reset();
-            {
-                std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-                active_trigger_engine_.reset();
-            }
+            finish_session_idle();
             return;
         } else if (start_result == SessionStartResult::DEGRADED_USER_ONLY) {
             state_.store(GuiSessionState::DEGRADED_USER_ONLY, std::memory_order_release);
@@ -405,20 +379,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
         }
 
     DriverSymbolResolver driver_resolver;
-    CorrelatorThresholds thresholds;
-    thresholds.dpc_threshold_us = config.dpc_threshold_us;
-    thresholds.isr_threshold_us = config.isr_threshold_us;
-    thresholds.disk_threshold_ms = config.disk_threshold_ms;
-    thresholds.cswitch_preempt_ms = config.cswitch_preempt_ms;
-    thresholds.smi_severity_threshold_ms = config.smi_severity_threshold_ms;
-    thresholds.d3d12_pso_threshold_ms = config.d3d12_pso_threshold_ms;
-    thresholds.vram_demoted_threshold_mb = config.vram_demoted_threshold_mb;
-    thresholds.mem_alloc_threshold_mb = config.mem_alloc_threshold_mb;
-    thresholds.mem_trim_threshold_mb = config.mem_trim_threshold_mb;
-    thresholds.mem_physical_latency_us = config.mem_physical_latency_us;
-    if (config.smi_threshold_manual || config.smi_severity_threshold_ms != 33.3) {
-        thresholds.auto_scale_smi = false;
-    }
+    CorrelatorThresholds thresholds = session_helpers::make_correlator_thresholds(config);
     CorrelationEngine correlator(driver_resolver, thresholds);
 
     // Dedicated background thread for asynchronous process name watcher (zero jitter on trigger loop)
@@ -471,21 +432,7 @@ void GuiController::session_worker_loop(GuiConfig config) {
             auto* p_metrics = new GuiMetrics();
             const uint64_t head = flight_recorder.current_head();
             const uint64_t dropped = flight_recorder.total_dropped_events();
-            p_metrics->head_sequence = head;
             p_metrics->total_events_recorded = (head >= dropped) ? (head - dropped) : head;
-            p_metrics->events_lost = session_mgr->events_lost();
-            p_metrics->buffers_lost = session_mgr->buffers_lost();
-            p_metrics->unpaired_evictions = session_mgr->unpaired_evictions();
-            p_metrics->insertion_failures = session_mgr->insertion_failures();
-            {
-                std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-                if (active_trigger_engine_) {
-                    p_metrics->suppressed_triggers = static_cast<uint32_t>(active_trigger_engine_->suppressed_trigger_count());
-                    p_metrics->filtered_reports = active_trigger_engine_->filtered_reports();
-                    p_metrics->filtered_stall_ms = active_trigger_engine_->filtered_stall_ms();
-                    p_metrics->filtered_events_dropped = active_trigger_engine_->filtered_events_dropped();
-                }
-            }
 
             if (!PostMessage(hwnd_, WM_STUTTO_METRICS, 0, reinterpret_cast<LPARAM>(p_metrics))) {
                 delete p_metrics;
@@ -538,34 +485,10 @@ void GuiController::session_worker_loop(GuiConfig config) {
             } guard{active_trigger_engine_, trigger_engine_mutex_};
 
             try {
-                // Synchronously flush active buffers and deterministically drain post-trigger window
-                session_mgr->flush_buffers();
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(POST_TRIGGER_DRAIN_BUDGET_MS);
-                while (session_mgr->last_processed_qpc() < to_qpc && std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(POST_TRIGGER_DRAIN_STEP_MS));
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(POST_TRIGGER_DRAIN_STEP_MS));
-
                 uint64_t drops = 0;
-                flight_recorder.snapshot(from_qpc, to_qpc, snapshot_buffer, &drops);
+                session_helpers::capture_trigger_snapshot(*session_mgr, flight_recorder, from_qpc, to_qpc, snapshot_buffer, drops);
 
-                ProviderContext p_ctx;
-                p_ctx.kernel_dpc_active = session_mgr->is_kernel_session_active() && etw_config.enable_kernel_dpc;
-                p_ctx.kernel_disk_active = session_mgr->is_kernel_session_active() && etw_config.enable_kernel_disk;
-                p_ctx.kernel_cswitch_active = session_mgr->is_kernel_session_active() && etw_config.enable_kernel_cswitch;
-                p_ctx.user_dxgi_active = session_mgr->is_user_session_active() && etw_config.enable_dxgi;
-                p_ctx.user_audio_active = session_mgr->is_user_session_active() && etw_config.enable_audio;
-                p_ctx.user_dxgkrnl_active = session_mgr->is_user_session_active() && etw_config.enable_dxgkrnl;
-                p_ctx.user_dwm_active = session_mgr->is_user_session_active() && etw_config.enable_dwm_core;
-                p_ctx.kernel_pagefault_active = session_mgr->is_kernel_session_active() && etw_config.enable_kernel_pagefault;
-                p_ctx.user_processor_power_active = session_mgr->is_user_session_active() && etw_config.enable_processor_power;
-                p_ctx.user_antimalware_active = session_mgr->is_user_session_active() && etw_config.enable_antimalware;
-                p_ctx.user_d3d12_active = session_mgr->is_user_session_active() && etw_config.enable_d3d12;
-                p_ctx.user_vram_paging_active = session_mgr->is_user_session_active() && etw_config.enable_dxgkrnl;
-                // Note: Kernel-Memory provider runs on the user trace session, not the NT Kernel Logger
-                p_ctx.kernel_memory_active = session_mgr->is_user_session_active() && etw_config.enable_kernel_memory;
-                p_ctx.etw_events_lost = session_mgr->events_lost();
-                p_ctx.etw_buffers_lost = session_mgr->buffers_lost();
+                ProviderContext p_ctx = session_helpers::build_provider_context(*session_mgr, etw_config);
 
                 uint64_t unpaired_evicts = session_mgr->unpaired_evictions();
                 uint64_t ins_failures = session_mgr->insertion_failures();
@@ -594,17 +517,8 @@ void GuiController::session_worker_loop(GuiConfig config) {
                             std::cerr << "[STUTTOMETER] Warning: Failed to append report to session bundle.\n";
                         }
                     } else {
-                        const std::filesystem::path dir(config.output_dir);
-                        const std::string json_name = "stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json";
-                        if (reporter.save_to_file(report, dir / json_name, config.redact)) {
-                            rotate_directory_by_prefix(dir, "stutto_report_", ".json", 100);
-                        } else {
-                            std::cerr << "[STUTTOMETER] Warning: Failed to auto-save JSON report to '" << (dir / json_name).generic_string() << "'\n";
-                        }
-                        const std::string csv_name = "stutto_pacing_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".csv";
-                        if (stuttometer::csv::export_to_file(report, dir / csv_name)) {
-                            rotate_directory_by_prefix(dir, "stutto_pacing_", ".csv", 100);
-                        }
+                        session_helpers::save_per_trigger_reports(
+                            report, std::filesystem::path(config.output_dir), report_count, current_qpc, config.redact, reporter, "[STUTTOMETER] Warning: ");
                     }
                 }
                 ++report_count;
@@ -643,37 +557,27 @@ void GuiController::session_worker_loop(GuiConfig config) {
         bundle_writer.close();
     }
 
+    finish_session_idle();
+    } catch (const std::exception& ex) {
+        std::cerr << "[STUTTOMETER] Fatal error in session worker loop: " << ex.what() << "\n";
+        finish_session_idle(/*stop_watcher=*/true);
+    } catch (...) {
+        std::cerr << "[STUTTOMETER] Unknown fatal error in session worker loop.\n";
+        finish_session_idle(/*stop_watcher=*/true);
+    }
+}
+
+void GuiController::finish_session_idle(bool stop_watcher) noexcept {
+    if (stop_watcher) {
+        watcher_.stop();
+    }
     {
         std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
         active_trigger_engine_.reset();
     }
-
     state_.store(GuiSessionState::IDLE, std::memory_order_release);
     if (hwnd_ && IsWindow(hwnd_)) {
         PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
-    }
-    } catch (const std::exception& ex) {
-        std::cerr << "[STUTTOMETER] Fatal error in session worker loop: " << ex.what() << "\n";
-        watcher_.stop();
-        {
-            std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-            active_trigger_engine_.reset();
-        }
-        state_.store(GuiSessionState::IDLE, std::memory_order_release);
-        if (hwnd_ && IsWindow(hwnd_)) {
-            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
-        }
-    } catch (...) {
-        std::cerr << "[STUTTOMETER] Unknown fatal error in session worker loop.\n";
-        watcher_.stop();
-        {
-            std::lock_guard<std::mutex> lock(trigger_engine_mutex_);
-            active_trigger_engine_.reset();
-        }
-        state_.store(GuiSessionState::IDLE, std::memory_order_release);
-        if (hwnd_ && IsWindow(hwnd_)) {
-            PostMessage(hwnd_, WM_STUTTO_STATE_CHANGE, static_cast<WPARAM>(GuiSessionState::IDLE), 0);
-        }
     }
 }
 

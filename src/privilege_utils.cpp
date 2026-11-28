@@ -125,7 +125,7 @@ std::string utf16_to_utf8(std::wstring_view wstr) {
     return result;
 }
 
-static std::wstring utf8_to_utf16(const std::string& str) {
+std::wstring utf8_to_utf16(std::string_view str) {
     if (str.empty()) return {};
     int size_needed = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0);
     if (size_needed <= 0) return {};

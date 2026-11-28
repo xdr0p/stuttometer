@@ -114,14 +114,50 @@ void destroy_theme_fonts() {
     s_retired_fonts.clear();
 }
 
+namespace {
+
+template <typename Fn>
+void for_each_theme_brush(GdiThemeCache& t, Fn&& fn) {
+    HBRUSH* brushes[] = {
+        &t.br_bg, &t.br_header, &t.br_card, &t.br_input, &t.br_list_bg,
+        &t.br_pill, &t.br_badge, &t.br_list_hdr_bg,
+        &t.br_btn_emerald, &t.br_btn_emerald_hover, &t.br_btn_emerald_pressed,
+        &t.br_btn_danger, &t.br_btn_danger_hover, &t.br_btn_danger_pressed,
+        &t.br_btn_slate, &t.br_btn_slate_hover, &t.br_btn_slate_pressed,
+        &t.br_btn_quick, &t.br_btn_quick_hover, &t.br_btn_quick_pressed,
+        &t.br_btn_disabled,
+        &t.br_sev_normal, &t.br_sev_warning, &t.br_sev_danger
+    };
+    for (auto* b : brushes) {
+        fn(*b);
+    }
+}
+
+template <typename Fn>
+void for_each_theme_pen(GdiThemeCache& t, Fn&& fn) {
+    HPEN* pens[] = {
+        &t.pen_header_border, &t.pen_card_border, &t.pen_card_divider,
+        &t.pen_input_border, &t.pen_pill_border, &t.pen_badge_border,
+        &t.pen_list_hdr_border,
+        &t.pen_btn_emerald, &t.pen_btn_emerald_hover, &t.pen_btn_emerald_pressed,
+        &t.pen_btn_danger, &t.pen_btn_danger_hover, &t.pen_btn_danger_pressed,
+        &t.pen_btn_slate, &t.pen_btn_slate_hover, &t.pen_btn_slate_pressed,
+        &t.pen_btn_quick, &t.pen_btn_quick_hover, &t.pen_btn_quick_pressed,
+        &t.pen_btn_disabled
+    };
+    for (auto* p : pens) {
+        fn(*p);
+    }
+}
+
+} // namespace
+
 void GdiThemeCache::init() {
     br_bg = CreateSolidBrush(COLOR_BG);
     br_header = CreateSolidBrush(COLOR_HEADER_BG);
     br_card = CreateSolidBrush(COLOR_CARD_BG);
     br_input = CreateSolidBrush(COLOR_INPUT_BG);
     br_list_bg = CreateSolidBrush(COLOR_LIST_BG);
-    br_list_alt = CreateSolidBrush(COLOR_LIST_ROW_ALT);
-    br_list_sel = CreateSolidBrush(COLOR_LIST_SEL);
     br_pill = CreateSolidBrush(COLOR_CARD_BG);
     br_badge = CreateSolidBrush(COLOR_BADGE_BG);
     br_list_hdr_bg = CreateSolidBrush(COLOR_LIST_HDR_BG);
@@ -158,13 +194,6 @@ void GdiThemeCache::init() {
     pen_btn_quick_hover = CreatePen(PS_SOLID, 1, RGB(65, 78, 105));
     pen_btn_quick_pressed = CreatePen(PS_SOLID, 1, RGB(42, 50, 68));
 
-    // Cached Attribution & Iconography Brushes (unified 35% desaturated palette)
-    br_attr_game_engine = CreateSolidBrush(COLOR_ATTR_GAME_ENGINE);
-    br_attr_dwm_composition = CreateSolidBrush(COLOR_ATTR_DWM_COMPOSITION);
-    br_attr_external_contention = CreateSolidBrush(COLOR_ATTR_EXTERNAL_CONTENTION);
-    br_attr_unknown = CreateSolidBrush(COLOR_ATTR_UNKNOWN);
-    br_beacon_idle = CreateSolidBrush(RGB(75, 85, 99));
-
     // Cached Severity Brushes
     br_sev_normal = CreateSolidBrush(COLOR_SEV_NORMAL);
     br_sev_warning = CreateSolidBrush(COLOR_SEV_WARNING);
@@ -174,127 +203,33 @@ void GdiThemeCache::init() {
     br_btn_disabled = CreateSolidBrush(RGB(20, 23, 31));
     pen_btn_disabled = CreatePen(PS_SOLID, 1, RGB(32, 38, 50));
 
+    pen_header_border = CreatePen(PS_SOLID, 1, COLOR_HEADER_BORDER);
     pen_card_border = CreatePen(PS_SOLID, 1, COLOR_CARD_BORDER);
     pen_card_divider = CreatePen(PS_SOLID, 1, COLOR_CARD_DIVIDER);
     pen_input_border = CreatePen(PS_SOLID, 1, COLOR_INPUT_BORDER);
     pen_pill_border = CreatePen(PS_SOLID, 1, RGB(48, 58, 78));
     pen_badge_border = CreatePen(PS_SOLID, 1, COLOR_BADGE_BORDER);
     pen_list_hdr_border = CreatePen(PS_SOLID, 1, COLOR_LIST_HDR_BORDER);
-    pen_focus_border = CreatePen(PS_SOLID, 1, COLOR_ACCENT_EMERALD);
 
     // Fallback for extreme GDI resource exhaustion
     HBRUSH default_brush = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     HPEN default_pen = static_cast<HPEN>(GetStockObject(BLACK_PEN));
 
-    HBRUSH* brushes[] = {
-        &br_bg, &br_header, &br_card, &br_input, &br_list_bg,
-        &br_list_alt, &br_list_sel, &br_pill, &br_badge, &br_list_hdr_bg,
-        &br_btn_emerald, &br_btn_emerald_hover, &br_btn_emerald_pressed,
-        &br_btn_danger, &br_btn_danger_hover, &br_btn_danger_pressed,
-        &br_btn_slate, &br_btn_slate_hover, &br_btn_slate_pressed,
-        &br_btn_quick, &br_btn_quick_hover, &br_btn_quick_pressed,
-        &br_btn_disabled,
-        &br_attr_game_engine, &br_attr_dwm_composition,
-        &br_attr_external_contention, &br_attr_unknown, &br_beacon_idle,
-        &br_sev_normal, &br_sev_warning, &br_sev_danger
-    };
-    for (auto* b : brushes) {
-        if (!*b) *b = default_brush;
-    }
-
-    HPEN* pens[] = {
-        &pen_header_border, &pen_card_border, &pen_card_divider,
-        &pen_input_border, &pen_pill_border, &pen_badge_border,
-        &pen_list_hdr_border, &pen_focus_border,
-        &pen_btn_emerald, &pen_btn_emerald_hover, &pen_btn_emerald_pressed,
-        &pen_btn_danger, &pen_btn_danger_hover, &pen_btn_danger_pressed,
-        &pen_btn_slate, &pen_btn_slate_hover, &pen_btn_slate_pressed,
-        &pen_btn_quick, &pen_btn_quick_hover, &pen_btn_quick_pressed,
-        &pen_btn_disabled
-    };
-    for (auto* p : pens) {
-        if (!*p) *p = default_pen;
-    }
+    for_each_theme_brush(*this, [default_brush](HBRUSH& b) {
+        if (!b) b = default_brush;
+    });
+    for_each_theme_pen(*this, [default_pen](HPEN& p) {
+        if (!p) p = default_pen;
+    });
 }
 
 void GdiThemeCache::destroy() {
-    auto safe_delete_brush = [](HBRUSH& b) {
+    for_each_theme_brush(*this, [](HBRUSH& b) {
         if (b) { DeleteObject(b); b = nullptr; }
-    };
-    auto safe_delete_pen = [](HPEN& p) {
+    });
+    for_each_theme_pen(*this, [](HPEN& p) {
         if (p) { DeleteObject(p); p = nullptr; }
-    };
-
-    safe_delete_brush(br_bg);
-    safe_delete_brush(br_header);
-    safe_delete_brush(br_card);
-    safe_delete_brush(br_input);
-    safe_delete_brush(br_list_bg);
-    safe_delete_brush(br_list_alt);
-    safe_delete_brush(br_list_sel);
-    safe_delete_brush(br_pill);
-    safe_delete_brush(br_badge);
-    safe_delete_brush(br_list_hdr_bg);
-
-    safe_delete_brush(br_btn_emerald);
-    safe_delete_brush(br_btn_emerald_hover);
-    safe_delete_brush(br_btn_emerald_pressed);
-    safe_delete_brush(br_btn_danger);
-    safe_delete_brush(br_btn_danger_hover);
-    safe_delete_brush(br_btn_danger_pressed);
-    safe_delete_brush(br_btn_slate);
-    safe_delete_brush(br_btn_slate_hover);
-    safe_delete_brush(br_btn_slate_pressed);
-    safe_delete_brush(br_btn_quick);
-    safe_delete_brush(br_btn_quick_hover);
-    safe_delete_brush(br_btn_quick_pressed);
-    safe_delete_brush(br_btn_disabled);
-    safe_delete_brush(br_attr_game_engine);
-    safe_delete_brush(br_attr_dwm_composition);
-    safe_delete_brush(br_attr_external_contention);
-    safe_delete_brush(br_attr_unknown);
-    safe_delete_brush(br_beacon_idle);
-    safe_delete_brush(br_sev_normal);
-    safe_delete_brush(br_sev_warning);
-    safe_delete_brush(br_sev_danger);
-
-    safe_delete_pen(pen_header_border);
-    safe_delete_pen(pen_card_border);
-    safe_delete_pen(pen_card_divider);
-    safe_delete_pen(pen_input_border);
-    safe_delete_pen(pen_pill_border);
-    safe_delete_pen(pen_badge_border);
-    safe_delete_pen(pen_list_hdr_border);
-    safe_delete_pen(pen_focus_border);
-
-    safe_delete_pen(pen_btn_emerald);
-    safe_delete_pen(pen_btn_emerald_hover);
-    safe_delete_pen(pen_btn_emerald_pressed);
-    safe_delete_pen(pen_btn_danger);
-    safe_delete_pen(pen_btn_danger_hover);
-    safe_delete_pen(pen_btn_danger_pressed);
-    safe_delete_pen(pen_btn_slate);
-    safe_delete_pen(pen_btn_slate_hover);
-    safe_delete_pen(pen_btn_slate_pressed);
-    safe_delete_pen(pen_btn_quick);
-    safe_delete_pen(pen_btn_quick_hover);
-    safe_delete_pen(pen_btn_quick_pressed);
-    safe_delete_pen(pen_btn_disabled);
-}
-
-HBRUSH get_attribution_brush(AttributionTag tag) noexcept {
-    HBRUSH fallback = g_theme.br_attr_unknown ? g_theme.br_attr_unknown : static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-    switch (tag) {
-        case AttributionTag::GAME_ENGINE:
-            return g_theme.br_attr_game_engine ? g_theme.br_attr_game_engine : fallback;
-        case AttributionTag::DWM_COMPOSITION:
-            return g_theme.br_attr_dwm_composition ? g_theme.br_attr_dwm_composition : fallback;
-        case AttributionTag::EXTERNAL_CONTENTION:
-            return g_theme.br_attr_external_contention ? g_theme.br_attr_external_contention : fallback;
-        case AttributionTag::UNKNOWN:
-        default:
-            return fallback;
-    }
+    });
 }
 
 HBRUSH get_severity_brush(MetricSeverity sev) noexcept {

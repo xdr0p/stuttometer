@@ -44,16 +44,7 @@ using stuttometer::GuiConfig;
 using stuttometer::OsdPosition;
 
 struct GuiMetrics {
-    uint64_t head_sequence{0};
     uint64_t total_events_recorded{0};
-    uint32_t events_lost{0};
-    uint32_t buffers_lost{0};
-    uint64_t unpaired_evictions{0};
-    uint64_t insertion_failures{0};
-    uint32_t suppressed_triggers{0};
-    uint64_t filtered_reports{0};
-    uint64_t filtered_stall_ms{0};
-    uint64_t filtered_events_dropped{0};
 };
 
 struct ProcessEntry {
@@ -131,6 +122,7 @@ public:
 
 private:
     void session_worker_loop(GuiConfig config);
+    void finish_session_idle(bool stop_watcher = false) noexcept;
 
     HWND hwnd_{nullptr};
     std::atomic<GuiSessionState> state_{GuiSessionState::IDLE};
@@ -143,7 +135,6 @@ private:
     std::mutex worker_mutex_;
 
     std::unique_ptr<GuiLogRedirector> log_redirector_;
-    std::string target_process_name_;
     ProcessWatcher watcher_;
     WatcherCallbacks make_watcher_callbacks();
     // Declared before active_trigger_engine_ to guarantee session_benchmark_ outlives the engine (Resolves M-10-5)

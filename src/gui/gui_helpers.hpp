@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <locale.h>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -147,5 +148,48 @@ struct NumericEditDef {
                                        HFONT font) noexcept;
 
 int show_centered_message_box(HWND hOwner, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType) noexcept;
+
+bool register_window_class_once(bool& registered, const wchar_t* class_name, WNDPROC wnd_proc, HINSTANCE hInstance) noexcept;
+[[nodiscard]] RECT compute_centered_dialog_rect(HWND parent, int base_w, int base_h, DWORD dwStyle) noexcept;
+std::optional<int> run_modal_message_loop(HWND hDlg, HWND hParent) noexcept;
+void dismiss_modal_dialog(HWND hDlg) noexcept;
+
+bool copy_utf8_to_clipboard(HWND hwnd, const std::string& utf8_text);
+bool prompt_save_file(HWND hwnd, const wchar_t* filter, const wchar_t* def_ext, wchar_t (&buf)[MAX_PATH]) noexcept;
+void show_button_feedback(HWND owner_hwnd, HWND btn_hwnd, const wchar_t* label, UINT duration_ms) noexcept;
+
+struct MemoryPaintDC {
+    HDC target_dc{nullptr};
+    HDC dc{nullptr};
+    HBITMAP bmp{nullptr};
+    HBITMAP old_bmp{nullptr};
+    int width{0};
+    int height{0};
+
+    MemoryPaintDC(HDC hdc, int w, int h) noexcept
+        : target_dc(hdc), width(w), height(h)
+    {
+        dc = CreateCompatibleDC(hdc);
+        bmp = CreateCompatibleBitmap(hdc, w, h);
+        old_bmp = static_cast<HBITMAP>(SelectObject(dc, bmp));
+    }
+
+    ~MemoryPaintDC() {
+        if (dc) {
+            SelectObject(dc, old_bmp);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+        }
+    }
+
+    MemoryPaintDC(const MemoryPaintDC&) = delete;
+    MemoryPaintDC& operator=(const MemoryPaintDC&) = delete;
+
+    operator HDC() const noexcept { return dc; }
+
+    void blit() const noexcept {
+        BitBlt(target_dc, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+    }
+};
 
 } // namespace stuttometer::gui

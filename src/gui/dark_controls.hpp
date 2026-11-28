@@ -16,6 +16,12 @@ enum class BtnStyle : INT_PTR {
 // Common helper: Dynamically vertically centers text in multiline edit controls based on font metrics
 void apply_edit_centered_padding(HWND hwnd, HFONT hFont = nullptr);
 
+// Shared non-client / border helpers for single-line custom-framed EDIT controls
+[[nodiscard]] int measure_edit_font_height(HWND hwnd, HFONT hFont = nullptr) noexcept;
+LRESULT calc_edit_nc_size(HWND hwnd, WPARAM wParam, LPARAM lParam) noexcept;
+void paint_edit_nc_frame(HWND hwnd) noexcept;
+void paint_edit_border(HWND hwnd) noexcept;
+
 // Applies custom border color to a combo box's popup listbox window (DWM on Win11)
 void apply_combo_popup_border(HWND h_combo, COLORREF color);
 

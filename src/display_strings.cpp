@@ -46,12 +46,4 @@ std::string_view hypothesis_display(std::string_view raw) noexcept {
     return raw;
 }
 
-std::string_view event_context_display(std::string_view raw) noexcept {
-    if (raw == "UNCLASSIFIED" || raw == "Unclassified")         return "Unclassified";
-    if (raw == "GAMEPLAY" || raw == "Gameplay")                 return "Gameplay";
-    if (raw == "STATE_TRANSITION" || raw == "State Transition") return "State Transition";
-    if (raw == "LOADING_SCREEN" || raw == "Loading Screen")     return "Loading Screen";
-    return raw;
-}
-
 } // namespace stuttometer::display

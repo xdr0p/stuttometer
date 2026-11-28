@@ -77,7 +77,6 @@ void draw_table(HDC hdc, const RECT& table_rc, int dpi,
                 const std::vector<std::vector<RowCell>>& rows,
                 HFONT font_header, HFONT font_cell,
                 HBRUSH br_alt_row, HPEN pen_divider,
-                const std::function<HBRUSH(size_t)>& attr_stripe_fn,
                 const wchar_t* empty_msg = nullptr)
 {
     auto scale = [dpi](int px) { return MulDiv(px, dpi, 96); };
@@ -90,7 +89,6 @@ void draw_table(HDC hdc, const RECT& table_rc, int dpi,
     const int v_bot    = scale(18);
     const int outer    = scale(16);
     const int inner    = scale(8);
-    const int stripe_w = scale(3);
 
     std::vector<std::pair<int,int>> col_bounds;
     col_bounds.reserve(num_columns);
@@ -148,14 +146,6 @@ void draw_table(HDC hdc, const RECT& table_rc, int dpi,
                 RECT rr = { table_rc.left + inner, row_y,
                             table_rc.right - inner, row_y + row_h };
                 FillRect(hdc, &rr, br_alt_row);
-            }
-            if (attr_stripe_fn) {
-                HBRUSH stripe = attr_stripe_fn(r);
-                if (stripe) {
-                    RECT sr = { table_rc.left + inner, row_y,
-                                table_rc.left + inner + stripe_w, row_y + row_h };
-                    FillRect(hdc, &sr, stripe);
-                }
             }
             const auto& cells = rows[r];
             for (size_t c = 0; c < cells.size() && c < num_columns; ++c) {
@@ -231,57 +221,12 @@ struct BenchmarkInitParams {
     std::function<bool()> is_capturing_fn{nullptr};
 };
 
-static LRESULT CALLBACK BenchmarkButtonSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
-    switch (uMsg) {
-        case WM_NCDESTROY:
-            RemovePropW(hwnd, L"Hovered");
-            RemoveWindowSubclass(hwnd, BenchmarkButtonSubclassProc, uIdSubclass);
-            break;
-        case WM_MOUSEMOVE: {
-            bool is_hovered = GetPropW(hwnd, L"Hovered") != nullptr;
-            if (!is_hovered) {
-                SetPropW(hwnd, L"Hovered", (HANDLE)1);
-                TRACKMOUSEEVENT tme{};
-                tme.cbSize = sizeof(tme);
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hwnd;
-                TrackMouseEvent(&tme);
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
-            break;
-        }
-        case WM_MOUSELEAVE: {
-            RemovePropW(hwnd, L"Hovered");
-            InvalidateRect(hwnd, NULL, FALSE);
-            break;
-        }
-        case WM_ENABLE: {
-            if (!wParam) {
-                RemovePropW(hwnd, L"Hovered");
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
-            break;
-        }
-    }
-    return DefSubclassProc(hwnd, uMsg, wParam, lParam);
-}
-
-static void dismiss_benchmark_view(HWND hDlg) {
-    HWND hParent = GetWindow(hDlg, GW_OWNER);
-    if (hParent && IsWindow(hParent)) {
-        EnableWindow(hParent, TRUE);
-        SetForegroundWindow(hParent);
-        SetFocus(hParent);
-    }
-    DestroyWindow(hDlg);
-}
-
 static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<BenchmarkViewState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (uMsg) {
         case WM_CLOSE: {
-            dismiss_benchmark_view(hwnd);
+            dismiss_modal_dialog(hwnd);
             return 0;
         }
 
@@ -310,10 +255,10 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             state->h_btn_close = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                                  0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)IDC_BENCH_CLOSE, hInst, NULL);
 
-            SetWindowSubclass(state->h_btn_copy, BenchmarkButtonSubclassProc, IDC_BENCH_COPY_SUMMARY, 0);
-            SetWindowSubclass(state->h_btn_export, BenchmarkButtonSubclassProc, IDC_BENCH_EXPORT_JSON, 0);
-            SetWindowSubclass(state->h_btn_reset, BenchmarkButtonSubclassProc, IDC_BENCH_RESET_SESSION, 0);
-            SetWindowSubclass(state->h_btn_close, BenchmarkButtonSubclassProc, IDC_BENCH_CLOSE, 0);
+            SetWindowSubclass(state->h_btn_copy, DarkButtonSubclassProc, IDC_BENCH_COPY_SUMMARY, 0);
+            SetWindowSubclass(state->h_btn_export, DarkButtonSubclassProc, IDC_BENCH_EXPORT_JSON, 0);
+            SetWindowSubclass(state->h_btn_reset, DarkButtonSubclassProc, IDC_BENCH_RESET_SESSION, 0);
+            SetWindowSubclass(state->h_btn_close, DarkButtonSubclassProc, IDC_BENCH_CLOSE, 0);
 
             SetTimer(hwnd, IDT_BENCH_REFRESH, gui_constants::BENCHMARK_REFRESH_MS, NULL);
             refresh_cached_summary(state);
@@ -430,7 +375,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             if (!state || !state->benchmark) break;
 
             if (id == IDC_BENCH_CLOSE || id == IDCANCEL) {
-                dismiss_benchmark_view(hwnd);
+                dismiss_modal_dialog(hwnd);
                 return 0;
             } else if (id == IDC_BENCH_RESET_SESSION) {
                 int res = show_centered_message_box(hwnd,
@@ -450,39 +395,13 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 if (state->h_btn_close) SetFocus(state->h_btn_close);
             } else if (id == IDC_BENCH_COPY_SUMMARY) {
                 auto summary = state->benchmark->get_summary(state->redact);
-                std::string md = summary.to_markdown();
-                int wlen = MultiByteToWideChar(CP_UTF8, 0, md.c_str(), -1, nullptr, 0);
-                bool ok = false;
-                if (wlen > 0 && OpenClipboard(hwnd)) {
-                    EmptyClipboard();
-                    HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, wlen * sizeof(wchar_t));
-                    if (hGlob) {
-                        wchar_t* pMem = static_cast<wchar_t*>(GlobalLock(hGlob));
-                        if (pMem) {
-                            MultiByteToWideChar(CP_UTF8, 0, md.c_str(), -1, pMem, wlen);
-                            GlobalUnlock(hGlob);
-                            if (SetClipboardData(CF_UNICODETEXT, hGlob)) {
-                                ok = true;
-                            }
-                        }
-                        if (!ok) GlobalFree(hGlob);
-                    }
-                    CloseClipboard();
-                }
+                const bool ok = copy_utf8_to_clipboard(hwnd, summary.to_markdown());
                 state->copy_btn_text = ok ? L"Copied \u2713" : L"Failed \u2715";
                 InvalidateRect(state->h_btn_copy, NULL, TRUE);
             } else if (id == IDC_BENCH_EXPORT_JSON) {
                 auto summary = state->benchmark->get_summary(state->redact);
                 wchar_t filename_buf[MAX_PATH] = L"stutto_benchmark_summary.json";
-                OPENFILENAMEW ofn{};
-                ofn.lStructSize = sizeof(ofn);
-                ofn.hwndOwner = hwnd;
-                ofn.lpstrFilter = L"JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0";
-                ofn.lpstrFile = filename_buf;
-                ofn.nMaxFile = MAX_PATH;
-                ofn.lpstrDefExt = L"json";
-                ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-                if (GetSaveFileNameW(&ofn)) {
+                if (prompt_save_file(hwnd, L"JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0", L"json", filename_buf)) {
                     std::ofstream ofs(filename_buf);
                     bool ok = false;
                     if (ofs.is_open()) {
@@ -510,9 +429,7 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             int height = client_rc.bottom - client_rc.top;
 
             // Double buffering
-            HDC mem_dc = CreateCompatibleDC(hdc);
-            HBITMAP mem_bm = CreateCompatibleBitmap(hdc, width, height);
-            HGDIOBJ old_bm = SelectObject(mem_dc, mem_bm);
+            MemoryPaintDC mem_dc(hdc, width, height);
 
             // Fill background
             HBRUSH bg_br = CreateSolidBrush(RGB(17, 19, 23));
@@ -841,21 +758,16 @@ static LRESULT CALLBACK BenchmarkWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
             HBRUSH br_alt = CreateSolidBrush(COLOR_TABLE_ROW_ALT);
             HPEN   pen_dv = CreatePen(PS_SOLID, 1, RGB(40, 48, 66));
-            std::function<HBRUSH(size_t)> attr_stripe; // empty = no stripes drawn
 
             draw_table(mem_dc, table_rc, dpi, columns, 5, rows,
                        state->font_small, state->font_regular,
-                       br_alt, pen_dv, attr_stripe, empty_msg);
+                       br_alt, pen_dv, empty_msg);
 
             DeleteObject(br_alt);
             DeleteObject(pen_dv);
 
             // Blit buffer to screen
-            BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
-
-            SelectObject(mem_dc, old_bm);
-            DeleteObject(mem_bm);
-            DeleteDC(mem_dc);
+            mem_dc.blit();
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -908,48 +820,10 @@ void ShowBenchmarkView(
     HINSTANCE hInstance = parent_hwnd ? (HINSTANCE)GetWindowLongPtrW(parent_hwnd, GWLP_HINSTANCE) : GetModuleHandleW(NULL);
 
     static bool s_class_registered = false;
-    if (!s_class_registered) {
-        WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(WNDCLASSEXW);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc = BenchmarkWindowProc;
-        wc.hInstance = hInstance;
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = NULL;
-        wc.lpszClassName = L"StuttometerBenchmarkWindowClass";
-        ATOM atom = RegisterClassExW(&wc);
-        s_class_registered = (atom != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
-    }
+    register_window_class_once(s_class_registered, L"StuttometerBenchmarkWindowClass", BenchmarkWindowProc, hInstance);
 
-    UINT dpi = parent_hwnd ? GetDpiForWindow(parent_hwnd) : 96;
-    if (dpi == 0) dpi = 96;
-
-    int client_w = MulDiv(840, dpi, 96);
-    int client_h = MulDiv(670, dpi, 96);
-
-    DWORD dwStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-    RECT rc = { 0, 0, client_w, client_h };
-    AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
-    int outer_w = rc.right - rc.left;
-    int outer_h = rc.bottom - rc.top;
-
-    RECT rc_work{};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc_work, 0);
-    if (outer_h > (rc_work.bottom - rc_work.top) - 20) {
-        outer_h = (rc_work.bottom - rc_work.top) - 20;
-    }
-    if (outer_w > (rc_work.right - rc_work.left) - 20) {
-        outer_w = (rc_work.right - rc_work.left) - 20;
-    }
-
-    int pos_x = (rc_work.right - rc_work.left - outer_w) / 2;
-    int pos_y = (rc_work.bottom - rc_work.top - outer_h) / 2;
-    if (parent_hwnd) {
-        RECT rc_parent{};
-        GetWindowRect(parent_hwnd, &rc_parent);
-        pos_x = rc_parent.left + ((rc_parent.right - rc_parent.left) - outer_w) / 2;
-        pos_y = rc_parent.top + ((rc_parent.bottom - rc_parent.top) - outer_h) / 2;
-    }
+    const DWORD dwStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+    const RECT rc = compute_centered_dialog_rect(parent_hwnd, 840, 670, dwStyle);
 
     BenchmarkInitParams params{ benchmark, redact, is_capturing_fn };
 
@@ -958,8 +832,8 @@ void ShowBenchmarkView(
         L"StuttometerBenchmarkWindowClass",
         L"Session Summary",
         dwStyle,
-        pos_x, pos_y,
-        outer_w, outer_h,
+        rc.left, rc.top,
+        rc.right - rc.left, rc.bottom - rc.top,
         parent_hwnd, NULL, hInstance, &params
     );
 
@@ -968,36 +842,11 @@ void ShowBenchmarkView(
         return;
     }
 
-    apply_window_dark_titlebar(hDlg);
-
-    if (parent_hwnd) {
-        EnableWindow(parent_hwnd, FALSE);
-    }
-    ShowWindow(hDlg, SW_SHOW);
-    UpdateWindow(hDlg);
-
-    MSG msg{};
-    while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (parent_hwnd && !IsWindow(parent_hwnd)) {
-            DestroyWindow(hDlg);
-            break;
-        }
-        if (!IsDialogMessageW(hDlg, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        if (!IsWindow(hDlg)) break;
-    }
-
-    if (parent_hwnd && IsWindow(parent_hwnd)) {
-        EnableWindow(parent_hwnd, TRUE);
-        SetForegroundWindow(parent_hwnd);
-        SetFocus(parent_hwnd);
-    }
+    const auto quit_code = run_modal_message_loop(hDlg, parent_hwnd);
     s_benchmark_dialog_open.store(false, std::memory_order_release);
 
-    if (msg.message == WM_QUIT) {
-        PostQuitMessage(static_cast<int>(msg.wParam));
+    if (quit_code.has_value()) {
+        PostQuitMessage(*quit_code);
     }
 }
 

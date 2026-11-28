@@ -104,6 +104,16 @@ inline constexpr COLORREF COLOR_SEV_DANGER               = RGB(239, 68, 68);   /
     }
 }
 
+[[nodiscard]] inline const wchar_t* attribution_display_label(AttributionTag tag) noexcept {
+    switch (tag) {
+        case AttributionTag::GAME_ENGINE:         return L"GAME ENGINE";
+        case AttributionTag::DWM_COMPOSITION:     return L"DWM COMPOSITION";
+        case AttributionTag::EXTERNAL_CONTENTION: return L"EXTERNAL CONTENTION";
+        case AttributionTag::UNKNOWN:
+        default:                                  return L"UNKNOWN";
+    }
+}
+
 [[nodiscard]] inline constexpr COLORREF get_severity_color(MetricSeverity sev) noexcept {
     switch (sev) {
         case MetricSeverity::DANGER:  return COLOR_SEV_DANGER;
@@ -113,7 +123,6 @@ inline constexpr COLORREF COLOR_SEV_DANGER               = RGB(239, 68, 68);   /
     }
 }
 
-[[nodiscard]] HBRUSH get_attribution_brush(AttributionTag tag) noexcept;
 [[nodiscard]] HBRUSH get_severity_brush(MetricSeverity sev) noexcept;
 
 // DPI Tracking & Scaling
@@ -140,8 +149,6 @@ struct GdiThemeCache {
     HBRUSH br_card{nullptr};
     HBRUSH br_input{nullptr};
     HBRUSH br_list_bg{nullptr};
-    HBRUSH br_list_alt{nullptr};
-    HBRUSH br_list_sel{nullptr};
     HBRUSH br_pill{nullptr};
     HBRUSH br_badge{nullptr};
     HBRUSH br_list_hdr_bg{nullptr};
@@ -161,13 +168,6 @@ struct GdiThemeCache {
     HBRUSH br_btn_quick_pressed{nullptr};
     HBRUSH br_btn_disabled{nullptr};
 
-    // Cached Attribution & Iconography Brushes
-    HBRUSH br_attr_game_engine{nullptr};
-    HBRUSH br_attr_dwm_composition{nullptr};
-    HBRUSH br_attr_external_contention{nullptr};
-    HBRUSH br_attr_unknown{nullptr};
-    HBRUSH br_beacon_idle{nullptr};
-
     // Cached Severity Brushes
     HBRUSH br_sev_normal{nullptr};
     HBRUSH br_sev_warning{nullptr};
@@ -180,7 +180,6 @@ struct GdiThemeCache {
     HPEN pen_pill_border{nullptr};
     HPEN pen_badge_border{nullptr};
     HPEN pen_list_hdr_border{nullptr};
-    HPEN pen_focus_border{nullptr};
 
     // Cached Button Pens
     HPEN pen_btn_emerald{nullptr};

@@ -3,6 +3,7 @@
 #include "stuttometer/correlator.hpp"
 #include "stuttometer/json_reporter.hpp"
 #include "stuttometer/etw_session.hpp"
+#include "stuttometer/internal/session_helpers.hpp"
 #include "stuttometer/privilege_utils.hpp"
 #include "stuttometer/ndjson_writer.hpp"
 #include "stuttometer/csv_exporter.hpp"
@@ -85,16 +86,6 @@ int main(int argc, char** argv) {
     double present_threshold_ms = config.present_threshold_ms;
     bool enable_audio = config.enable_audio;
     double cooldown_ms = config.cooldown_ms;
-    uint32_t dpc_threshold_us = config.dpc_threshold_us;
-    uint32_t isr_threshold_us = config.isr_threshold_us;
-    uint32_t disk_threshold_ms = config.disk_threshold_ms;
-    uint32_t cswitch_preempt_ms = config.cswitch_preempt_ms;
-    double smi_severity_threshold_ms = config.smi_severity_threshold_ms;
-    uint32_t d3d12_pso_threshold_ms = config.d3d12_pso_threshold_ms;
-    uint32_t vram_demoted_threshold_mb = config.vram_demoted_threshold_mb;
-    uint32_t mem_alloc_threshold_mb = config.mem_alloc_threshold_mb;
-    uint32_t mem_trim_threshold_mb = config.mem_trim_threshold_mb;
-    uint32_t mem_physical_latency_us = config.mem_physical_latency_us;
     uint32_t buffer_slots = config.buffer_slots;
     uint32_t target_pid = config.target_pid;
     std::string target_process_name = config.target_process_name;
@@ -198,19 +189,7 @@ int main(int argc, char** argv) {
     info << "info: [STUTTOMETER] Initializing Stuttometer v" << stuttometer::TOOL_VERSION << " (Elevated Mode)...\n";
     const uint64_t qpc_freq = stuttometer::get_qpc_frequency();
 
-    stuttometer::EtwSessionConfig etw_config;
-    etw_config.enable_dxgi = true;
-    etw_config.enable_audio = enable_audio;
-    etw_config.enable_kernel_dpc = (provider_tier != "minimal");
-    etw_config.enable_kernel_disk = (provider_tier != "minimal");
-    etw_config.enable_kernel_cswitch = (provider_tier == "full");
-    etw_config.enable_dxgkrnl = (provider_tier != "minimal");
-    etw_config.enable_dwm_core = (provider_tier != "minimal");
-    etw_config.enable_kernel_pagefault = (provider_tier != "minimal");
-    etw_config.enable_processor_power = (provider_tier != "minimal");
-    etw_config.enable_antimalware = (provider_tier != "minimal");
-    etw_config.enable_d3d12 = (provider_tier != "minimal");
-    etw_config.enable_kernel_memory = (provider_tier != "minimal");
+    stuttometer::EtwSessionConfig etw_config = stuttometer::session_helpers::make_etw_config(provider_tier, enable_audio);
 
     const uint32_t requested_slots = buffer_slots;
     buffer_slots = stuttometer::compute_recommended_buffer_slots(etw_config, requested_slots);
@@ -311,20 +290,7 @@ int main(int argc, char** argv) {
     info << "Press Ctrl+C to stop.\n\n";
 
     stuttometer::DriverSymbolResolver driver_resolver;
-    stuttometer::CorrelatorThresholds thresholds;
-    thresholds.dpc_threshold_us = dpc_threshold_us;
-    thresholds.isr_threshold_us = isr_threshold_us;
-    thresholds.disk_threshold_ms = disk_threshold_ms;
-    thresholds.cswitch_preempt_ms = cswitch_preempt_ms;
-    thresholds.smi_severity_threshold_ms = smi_severity_threshold_ms;
-    thresholds.d3d12_pso_threshold_ms = d3d12_pso_threshold_ms;
-    thresholds.vram_demoted_threshold_mb = vram_demoted_threshold_mb;
-    thresholds.mem_alloc_threshold_mb = mem_alloc_threshold_mb;
-    thresholds.mem_trim_threshold_mb = mem_trim_threshold_mb;
-    thresholds.mem_physical_latency_us = mem_physical_latency_us;
-    if (config.smi_threshold_manual || config.smi_severity_threshold_ms != 33.3) {
-        thresholds.auto_scale_smi = false;
-    }
+    stuttometer::CorrelatorThresholds thresholds = stuttometer::session_helpers::make_correlator_thresholds(config);
 
     stuttometer::CorrelationEngine correlator(driver_resolver, thresholds);
     stuttometer::JsonReporter reporter;
@@ -403,22 +369,7 @@ int main(int argc, char** argv) {
         }
 
         if (ndjson_writer) {
-            stuttometer::FilteredEvent fe;
-            int drained = 0;
-            while (drained < 64 && trigger_engine.pop_filtered_event(fe)) {
-                stuttometer::EtwEventRecord rec{};
-                rec.qpc_timestamp  = fe.qpc_timestamp;
-                rec.duration_us    = static_cast<uint32_t>(fe.duration_ms * 1000.0);
-                rec.pid            = fe.target_pid;
-                rec.tid            = fe.target_tid;
-                rec.cpu_index      = fe.cpu_index;
-                rec.category       = static_cast<uint16_t>(stuttometer::EventCategory::TRIGGER_FILTERED);
-                rec.event_id       = fe.reason;
-                rec.flags          = fe.source;
-                rec.auxiliary_data = static_cast<uint64_t>(fe.severity) | (static_cast<uint64_t>(fe.filter_kind) << 4);
-                ndjson_writer->push(rec);
-                ++drained;
-            }
+            stuttometer::session_helpers::drain_filtered_events(trigger_engine, *ndjson_writer, 64);
         }
 
         if (trigger_engine.poll_state(current_qpc, trigger_info, from_qpc, to_qpc)) {
@@ -430,34 +381,10 @@ int main(int argc, char** argv) {
             } guard{trigger_engine};
 
             try {
-                // Synchronously flush active buffers and deterministically drain post-trigger window
-                session_mgr.flush_buffers();
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_BUDGET_MS);
-                while (session_mgr.last_processed_qpc() < to_qpc && std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_STEP_MS));
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(stuttometer::POST_TRIGGER_DRAIN_STEP_MS));
-
                 uint64_t drops = 0;
-                flight_recorder.snapshot(from_qpc, to_qpc, snapshot_buffer, &drops);
+                stuttometer::session_helpers::capture_trigger_snapshot(session_mgr, flight_recorder, from_qpc, to_qpc, snapshot_buffer, drops);
 
-                stuttometer::ProviderContext p_ctx;
-                p_ctx.kernel_dpc_active = session_mgr.is_kernel_session_active() && etw_config.enable_kernel_dpc;
-                p_ctx.kernel_disk_active = session_mgr.is_kernel_session_active() && etw_config.enable_kernel_disk;
-                p_ctx.kernel_cswitch_active = session_mgr.is_kernel_session_active() && etw_config.enable_kernel_cswitch;
-                p_ctx.user_dxgi_active = session_mgr.is_user_session_active() && etw_config.enable_dxgi;
-                p_ctx.user_audio_active = session_mgr.is_user_session_active() && etw_config.enable_audio;
-                p_ctx.user_dxgkrnl_active = session_mgr.is_user_session_active() && etw_config.enable_dxgkrnl;
-                p_ctx.user_dwm_active = session_mgr.is_user_session_active() && etw_config.enable_dwm_core;
-                p_ctx.kernel_pagefault_active = session_mgr.is_kernel_session_active() && etw_config.enable_kernel_pagefault;
-                p_ctx.user_processor_power_active = session_mgr.is_user_session_active() && etw_config.enable_processor_power;
-                p_ctx.user_antimalware_active = session_mgr.is_user_session_active() && etw_config.enable_antimalware;
-                p_ctx.user_d3d12_active = session_mgr.is_user_session_active() && etw_config.enable_d3d12;
-                p_ctx.user_vram_paging_active = session_mgr.is_user_session_active() && etw_config.enable_dxgkrnl;
-                // Note: Kernel-Memory provider runs on the user trace session, not the NT Kernel Logger
-                p_ctx.kernel_memory_active = session_mgr.is_user_session_active() && etw_config.enable_kernel_memory;
-                p_ctx.etw_events_lost = session_mgr.events_lost();
-                p_ctx.etw_buffers_lost = session_mgr.buffers_lost();
+                stuttometer::ProviderContext p_ctx = stuttometer::session_helpers::build_provider_context(session_mgr, etw_config);
 
                 uint64_t unpaired_evicts = session_mgr.unpaired_evictions();
                 uint64_t ins_failures = session_mgr.insertion_failures();
@@ -497,17 +424,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (!output_dir.empty() && config.auto_save_mode == "per_trigger") {
-                    const std::filesystem::path dir(output_dir);
-                    const std::string json_name = "stutto_report_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".json";
-                    if (reporter.save_to_file(report, dir / json_name, redact)) {
-                        stuttometer::rotate_directory_by_prefix(dir, "stutto_report_", ".json", 100);
-                    } else {
-                        std::cerr << "error: [STUTTOMETER] Failed to write report to '" << (dir / json_name).string() << "'\n";
-                    }
-                    const std::string csv_name = "stutto_pacing_" + std::to_string(report_count + 1) + "_" + std::to_string(current_qpc) + ".csv";
-                    if (stuttometer::csv::export_to_file(report, dir / csv_name)) {
-                        stuttometer::rotate_directory_by_prefix(dir, "stutto_pacing_", ".csv", 100);
-                    }
+                    stuttometer::session_helpers::save_per_trigger_reports(
+                        report, std::filesystem::path(output_dir), report_count, current_qpc, redact, reporter, "error: [STUTTOMETER] ");
                 }
 
                 ++report_count;
@@ -533,20 +451,7 @@ int main(int argc, char** argv) {
         bundle_writer.close();
     }
     if (ndjson_writer) {
-        stuttometer::FilteredEvent fe;
-        while (trigger_engine.pop_filtered_event(fe)) {
-            stuttometer::EtwEventRecord rec{};
-            rec.qpc_timestamp  = fe.qpc_timestamp;
-            rec.duration_us    = static_cast<uint32_t>(fe.duration_ms * 1000.0);
-            rec.pid            = fe.target_pid;
-            rec.tid            = fe.target_tid;
-            rec.cpu_index      = fe.cpu_index;
-            rec.category       = static_cast<uint16_t>(stuttometer::EventCategory::TRIGGER_FILTERED);
-            rec.event_id       = fe.reason;
-            rec.flags          = fe.source;
-            rec.auxiliary_data = static_cast<uint64_t>(fe.severity) | (static_cast<uint64_t>(fe.filter_kind) << 4);
-            ndjson_writer->push(rec);
-        }
+        stuttometer::session_helpers::drain_filtered_events(trigger_engine, *ndjson_writer);
         ndjson_writer->stop();
         info << "info: [STUTTOMETER] NDJSON writer: " << ndjson_writer->written_records()
              << " written, " << ndjson_writer->dropped_records() << " dropped.\n";

@@ -146,6 +146,50 @@ BannerRects compute_banner_rects(
     };
 }
 
+struct AnchorAndPeak {
+    size_t trig_idx{0};
+    size_t peak_idx{0};
+    double peak_dur{0.0};
+};
+
+static AnchorAndPeak find_anchor_and_peak(const DiagnosticReport& report) noexcept {
+    const size_t pt_count = report.frame_timeline.size();
+    size_t trig_idx = pt_count / 2;
+    bool found_trig = false;
+    for (size_t i = 0; i < pt_count; ++i) {
+        if (report.frame_timeline[i].relative_index == 0) {
+            trig_idx = i;
+            found_trig = true;
+            break;
+        }
+    }
+    if (!found_trig) {
+        for (size_t i = 0; i < pt_count; ++i) {
+            if (report.frame_timeline[i].is_trigger_frame) {
+                trig_idx = i;
+                break;
+            }
+        }
+    }
+
+    size_t peak_idx = 0;
+    double peak_dur = -1.0;
+    for (size_t i = 0; i < pt_count; ++i) {
+        if (report.frame_timeline[i].duration_ms > peak_dur) {
+            peak_dur = report.frame_timeline[i].duration_ms;
+            peak_idx = i;
+        }
+    }
+
+    // Prefer the anchor if it's the actual spike; else use the highest sample
+    if (trig_idx < pt_count && report.frame_timeline[trig_idx].duration_ms >= peak_dur) {
+        peak_idx = trig_idx;
+        peak_dur = report.frame_timeline[trig_idx].duration_ms;
+    }
+
+    return { trig_idx, peak_idx, peak_dur };
+}
+
 Gdiplus::PointF compute_peak_pixel(
     const DiagnosticReport& report, int width, int /*height*/, float s
 ) {
@@ -177,49 +221,15 @@ Gdiplus::PointF compute_peak_pixel(
     if (max_ms > 5000.0) max_ms = 5000.0;
 
     const size_t pt_count = report.frame_timeline.size();
-
-    // Anchor / trigger frame
-    size_t trig_idx = pt_count / 2;
-    bool found_trig = false;
-    for (size_t i = 0; i < pt_count; ++i) {
-        if (report.frame_timeline[i].relative_index == 0) {
-            trig_idx = i;
-            found_trig = true;
-            break;
-        }
-    }
-    if (!found_trig) {
-        for (size_t i = 0; i < pt_count; ++i) {
-            if (report.frame_timeline[i].is_trigger_frame) {
-                trig_idx = i;
-                break;
-            }
-        }
-    }
+    const AnchorAndPeak ap = find_anchor_and_peak(report);
 
     auto x_at = [&](size_t i) -> float {
         if (pt_count <= 1) return plot_x + plot_w / 2.0f;
         return plot_x + (static_cast<float>(i) / static_cast<float>(pt_count - 1)) * plot_w;
     };
 
-    // Find the max-duration point in the retained timeline
-    size_t peak_idx = 0;
-    double peak_dur = -1.0;
-    for (size_t i = 0; i < pt_count; ++i) {
-        if (report.frame_timeline[i].duration_ms > peak_dur) {
-            peak_dur = report.frame_timeline[i].duration_ms;
-            peak_idx = i;
-        }
-    }
-
-    // Prefer the anchor if it's the actual spike; else use the highest sample
-    if (trig_idx < pt_count && report.frame_timeline[trig_idx].duration_ms >= peak_dur) {
-        peak_idx = trig_idx;
-        peak_dur = report.frame_timeline[trig_idx].duration_ms;
-    }
-
-    float px = x_at(peak_idx);
-    double d_clamp = std::clamp(report.frame_timeline[peak_idx].duration_ms, 0.0, max_ms);
+    float px = x_at(ap.peak_idx);
+    double d_clamp = std::clamp(report.frame_timeline[ap.peak_idx].duration_ms, 0.0, max_ms);
     float py = plot_y + plot_h - static_cast<float>((d_clamp / max_ms) * plot_h);
     return Gdiplus::PointF(px, py);
 }
@@ -228,40 +238,7 @@ double compute_peak_duration(const DiagnosticReport& report) {
     if (report.frame_timeline.empty()) {
         return report.trigger.duration_ms;
     }
-    const size_t pt_count = report.frame_timeline.size();
-
-    size_t trig_idx = pt_count / 2;
-    bool found_trig = false;
-    for (size_t i = 0; i < pt_count; ++i) {
-        if (report.frame_timeline[i].relative_index == 0) {
-            trig_idx = i;
-            found_trig = true;
-            break;
-        }
-    }
-    if (!found_trig) {
-        for (size_t i = 0; i < pt_count; ++i) {
-            if (report.frame_timeline[i].is_trigger_frame) {
-                trig_idx = i;
-                break;
-            }
-        }
-    }
-
-    size_t peak_idx = 0;
-    double peak_dur = -1.0;
-    for (size_t i = 0; i < pt_count; ++i) {
-        if (report.frame_timeline[i].duration_ms > peak_dur) {
-            peak_dur = report.frame_timeline[i].duration_ms;
-            peak_idx = i;
-        }
-    }
-
-    if (trig_idx < pt_count && report.frame_timeline[trig_idx].duration_ms >= peak_dur) {
-        peak_dur = report.frame_timeline[trig_idx].duration_ms;
-    }
-
-    return peak_dur;
+    return find_anchor_and_peak(report).peak_dur;
 }
 } // namespace detail
 
@@ -331,32 +308,15 @@ static void draw_card(
     Color color_card = to_gdiplus_color(COLOR_CARD_BG);
     Color color_card_border = to_gdiplus_color(COLOR_CARD_BORDER);
     Color color_inset_border = to_gdiplus_color(COLOR_INSET_BORDER);
-    Color color_text_pri = to_gdiplus_color(COLOR_TEXT_BRIGHT);
     Color color_text_bright = to_gdiplus_color(COLOR_TEXT_BRIGHT);
     Color color_text_label = to_gdiplus_color(COLOR_TEXT_LABEL);
     Color color_text_muted = to_gdiplus_color(COLOR_TEXT_MUTED);
     Color color_accent_emerald = to_gdiplus_color(COLOR_ACCENT_EMERALD);
-    Color color_accent_danger = to_gdiplus_color(COLOR_SEV_DANGER);
     Color color_accent_amb = to_gdiplus_color(COLOR_SEV_WARNING);
 
     // Attribution accent (unified 35% desaturated palette)
     Color color_attr = to_gdiplus_color(get_attribution_color(report.attribution));
-    std::wstring attr_label;
-    switch (report.attribution) {
-        case AttributionTag::GAME_ENGINE:
-            attr_label = L"GAME ENGINE";
-            break;
-        case AttributionTag::DWM_COMPOSITION:
-            attr_label = L"DWM COMPOSITION";
-            break;
-        case AttributionTag::EXTERNAL_CONTENTION:
-            attr_label = L"EXTERNAL CONTENTION";
-            break;
-        case AttributionTag::UNKNOWN:
-        default:
-            attr_label = L"UNKNOWN";
-            break;
-    }
+    std::wstring attr_label = attribution_display_label(report.attribution);
 
     // ---- 1. Canvas Background ----
     SolidBrush bg_brush(color_bg);
@@ -402,7 +362,6 @@ static void draw_card(
     fmt_center.SetLineAlignment(StringAlignmentCenter);
     fmt_center.SetFormatFlags(StringFormatFlagsNoWrap);
 
-    SolidBrush br_pri(color_text_pri);
     SolidBrush br_bright(color_text_bright);
     SolidBrush br_label(color_text_label);
     SolidBrush br_muted(color_text_muted);
@@ -509,7 +468,7 @@ static void draw_card(
         // Shift down for visual vertical centering of 18px font within the 24px banner row
         rc_culprit.Y += 3.5f * s;
 
-        g.DrawString(culprit_w.c_str(), -1, &font_callout, rc_culprit, &fmt_left, &br_pri);
+        g.DrawString(culprit_w.c_str(), -1, &font_callout, rc_culprit, &fmt_left, &br_bright);
     }
 
     // Confidence badge (right)
@@ -772,25 +731,7 @@ static void draw_card(
                          -1, &font_regular, rc_empty, &fmt_center, &br_muted);
         } else {
             const size_t pt_count = report.frame_timeline.size();
-
-            // Anchor / trigger frame
-            size_t trig_idx = pt_count / 2;
-            bool found_trig = false;
-            for (size_t i = 0; i < pt_count; ++i) {
-                if (report.frame_timeline[i].relative_index == 0) {
-                    trig_idx = i;
-                    found_trig = true;
-                    break;
-                }
-            }
-            if (!found_trig) {
-                for (size_t i = 0; i < pt_count; ++i) {
-                    if (report.frame_timeline[i].is_trigger_frame) {
-                        trig_idx = i;
-                        break;
-                    }
-                }
-            }
+            const size_t trig_idx = detail::find_anchor_and_peak(report).trig_idx;
 
             auto x_at = [&](size_t i) -> float {
                 if (pt_count <= 1) return plot_x + plot_w / 2.0f;
@@ -844,7 +785,7 @@ static void draw_card(
             if (pt_count > 1) {
                 g.DrawLines(&curve_pen, line_pts.data(), static_cast<INT>(line_pts.size()));
             } else {
-                g.FillEllipse(&br_pri, line_pts[0].X - 3.0f, line_pts[0].Y - 3.0f, 6.0f, 6.0f);
+                g.FillEllipse(&br_bright, line_pts[0].X - 3.0f, line_pts[0].Y - 3.0f, 6.0f, 6.0f);
             }
 
             // ---- Peak marker dot ----

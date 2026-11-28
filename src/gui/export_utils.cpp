@@ -1,5 +1,6 @@
 #include "export_utils.hpp"
 #include "gui_state.hpp"
+#include "gui_helpers.hpp"
 #include "card_renderer.hpp"
 #include <stuttometer/json_reporter.hpp>
 #include <stuttometer/session_bundle.hpp>
@@ -16,28 +17,6 @@
 namespace stuttometer::gui {
 
 namespace {
-
-bool copy_utf8_to_clipboard(HWND hwnd, const std::string& utf8_text) {
-    std::wstring wtext = utf8_to_wstring(utf8_text);
-    bool ok = false;
-    if (OpenClipboard(hwnd)) {
-        EmptyClipboard();
-        HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (wtext.size() + 1) * sizeof(wchar_t));
-        if (hGlob) {
-            wchar_t* pMem = static_cast<wchar_t*>(GlobalLock(hGlob));
-            if (pMem) {
-                wcscpy_s(pMem, wtext.size() + 1, wtext.c_str());
-                GlobalUnlock(hGlob);
-                if (SetClipboardData(CF_UNICODETEXT, hGlob)) {
-                    ok = true;
-                }
-            }
-            if (!ok) GlobalFree(hGlob);
-        }
-        CloseClipboard();
-    }
-    return ok;
-}
 
 bool collect_session_export_data(
     std::vector<DiagnosticReport>& reports,
@@ -131,11 +110,7 @@ void copy_session_bundle(HWND hwnd) {
         ok = copy_utf8_to_clipboard(hwnd, json);
     }
 
-    if (g_h_btn_copy) {
-        SetWindowTextW(g_h_btn_copy, ok ? L"Copied \u2713" : L"Failed \u2715");
-        InvalidateRect(g_h_btn_copy, NULL, TRUE);
-        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy), gui_constants::BUTTON_FEEDBACK_MS, NULL);
-    }
+    show_button_feedback(hwnd, g_h_btn_copy, ok ? L"Copied \u2713" : L"Failed \u2715", gui_constants::BUTTON_FEEDBACK_MS);
 }
 
 void export_session_bundle(HWND hwnd) {
@@ -147,23 +122,10 @@ void export_session_bundle(HWND hwnd) {
     }
 
     wchar_t filename_buf[MAX_PATH] = L"stutto_session.json";
-    OPENFILENAMEW ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0";
-    ofn.lpstrFile = filename_buf;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"json";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-
-    if (GetSaveFileNameW(&ofn)) {
+    if (prompt_save_file(hwnd, L"JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0", L"json", filename_buf)) {
         const std::filesystem::path out_path(filename_buf);
         const bool ok = SessionBundleExporter::export_session(out_path, reports, summary, redact);
-        if (g_h_btn_export) {
-            SetWindowTextW(g_h_btn_export, ok ? L"Exported \u2713" : L"Failed \u2715");
-            InvalidateRect(g_h_btn_export, NULL, TRUE);
-            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export), gui_constants::BUTTON_FEEDBACK_MS, NULL);
-        }
+        show_button_feedback(hwnd, g_h_btn_export, ok ? L"Exported \u2713" : L"Failed \u2715", gui_constants::BUTTON_FEEDBACK_MS);
     }
 }
 
@@ -179,11 +141,7 @@ void copy_selected_report_card(HWND hwnd) {
     CardRenderOptions opts;
     bool ok = CardRenderer::copy_card_to_clipboard(hwnd, *item.report, opts);
 
-    if (g_h_btn_copy_card) {
-        SetWindowTextW(g_h_btn_copy_card, ok ? L"Copied \u2713" : L"Failed \u2715");
-        InvalidateRect(g_h_btn_copy_card, NULL, TRUE);
-        SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_copy_card), gui_constants::BUTTON_FEEDBACK_MS, NULL);
-    }
+    show_button_feedback(hwnd, g_h_btn_copy_card, ok ? L"Copied \u2713" : L"Failed \u2715", gui_constants::BUTTON_FEEDBACK_MS);
 }
 
 void export_selected_report_card(HWND hwnd) {
@@ -196,23 +154,10 @@ void export_selected_report_card(HWND hwnd) {
         return;
     }
     wchar_t filename_buf[MAX_PATH] = L"stutto_card.png";
-    OPENFILENAMEW ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"PNG Image (*.png)\0*.png\0All Files (*.*)\0*.*\0";
-    ofn.lpstrFile = filename_buf;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"png";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-
-    if (GetSaveFileNameW(&ofn)) {
+    if (prompt_save_file(hwnd, L"PNG Image (*.png)\0*.png\0All Files (*.*)\0*.*\0", L"png", filename_buf)) {
         CardRenderOptions opts;
         bool ok = CardRenderer::save_card_to_png(*item.report, std::filesystem::path(filename_buf), opts);
-        if (g_h_btn_export_card) {
-            SetWindowTextW(g_h_btn_export_card, ok ? L"Exported \u2713" : L"Failed \u2715");
-            InvalidateRect(g_h_btn_export_card, NULL, TRUE);
-            SetTimer(hwnd, reinterpret_cast<UINT_PTR>(g_h_btn_export_card), gui_constants::BUTTON_FEEDBACK_MS, NULL);
-        }
+        show_button_feedback(hwnd, g_h_btn_export_card, ok ? L"Exported \u2713" : L"Failed \u2715", gui_constants::BUTTON_FEEDBACK_MS);
     }
 }
 

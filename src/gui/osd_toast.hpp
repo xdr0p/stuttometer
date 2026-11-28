@@ -18,7 +18,6 @@ namespace stuttometer::gui {
 struct OsdToastData {
     std::string process_name;
     double duration_ms{0.0};
-    double spike_ratio{0.0};
     AttributionTag attribution{AttributionTag::UNKNOWN};
     std::string culprit; // Mirrors report.attribution_process (e.g. nvlddmkm.sys)
     std::string summary; // Mirrors top diagnosis summary (e.g. DPC routine spike)

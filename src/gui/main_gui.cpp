@@ -5,6 +5,7 @@
 #include "sound_cues.hpp"
 #include "theme.hpp"
 #include "gui_state.hpp"
+#include "gui_helpers.hpp"
 #include "dark_controls.hpp"
 #include "export_utils.hpp"
 #include "settings_dialog.hpp"
@@ -27,14 +28,11 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
-#include <fstream>
 #include <memory>
 #include <algorithm>
 #include <iterator>
 #include <cmath>
 #include <cstring>
-#include <numbers>
-#include <mutex>
 
 namespace stuttometer::gui {
 
@@ -54,6 +52,24 @@ static RECT get_telemetry_badge_rect(int client_width) {
     const int badge_w = g_settings_config.enable_audio ? scale_dpi(270) : scale_dpi(210);
     const int badge_x = client_width - scale_dpi(16) - badge_w;
     return { badge_x, act_y, badge_x + badge_w, act_y + act_h };
+}
+
+static void invalidate_inflated_rect(HWND hwnd, const RECT& base_rc) noexcept {
+    const int pad = scale_dpi(2);
+    RECT rc_inv = { base_rc.left - pad, base_rc.top - pad, base_rc.right + pad, base_rc.bottom + pad };
+    InvalidateRect(hwnd, &rc_inv, FALSE);
+}
+
+static void invalidate_status_pill(HWND hwnd) noexcept {
+    RECT client_rc{};
+    GetClientRect(hwnd, &client_rc);
+    invalidate_inflated_rect(hwnd, get_status_pill_rect(client_rc.right - client_rc.left));
+}
+
+static void invalidate_telemetry_badge(HWND hwnd) noexcept {
+    RECT client_rc{};
+    GetClientRect(hwnd, &client_rc);
+    invalidate_inflated_rect(hwnd, get_telemetry_badge_rect(client_rc.right - client_rc.left));
 }
 
 static std::wstring get_trigger_mode_text() {
@@ -417,15 +433,8 @@ static void handle_new_report(std::unique_ptr<DiagnosticReport> report) {
     update_clear_button_state();
     update_metrics_text();
 
-    RECT client_rc;
-    GetClientRect(g_hwnd_main, &client_rc);
-    RECT rc_pill_base = get_status_pill_rect(client_rc.right - client_rc.left);
-    RECT rc_pill = { rc_pill_base.left - scale_dpi(2), rc_pill_base.top - scale_dpi(2), rc_pill_base.right + scale_dpi(2), rc_pill_base.bottom + scale_dpi(2) };
-    InvalidateRect(g_hwnd_main, &rc_pill, FALSE);
-
-    RECT rc_b = get_telemetry_badge_rect(client_rc.right - client_rc.left);
-    RECT rc_inv = { rc_b.left - scale_dpi(2), rc_b.top - scale_dpi(2), rc_b.right + scale_dpi(2), rc_b.bottom + scale_dpi(2) };
-    InvalidateRect(g_hwnd_main, &rc_inv, FALSE);
+    invalidate_status_pill(g_hwnd_main);
+    invalidate_telemetry_badge(g_hwnd_main);
 }
 
 static void update_clear_button_state() {
@@ -1102,9 +1111,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             int width = client_rc.right;
             int height = client_rc.bottom;
 
-            HDC mem_dc = CreateCompatibleDC(hdc);
-            HBITMAP mem_bmp = CreateCompatibleBitmap(hdc, width, height);
-            HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem_dc, mem_bmp));
+            MemoryPaintDC mem_dc(hdc, width, height);
             HBRUSH old_br = static_cast<HBRUSH>(GetCurrentObject(mem_dc, OBJ_BRUSH));
             HFONT old_font = static_cast<HFONT>(GetCurrentObject(mem_dc, OBJ_FONT));
             HPEN old_pen = static_cast<HPEN>(GetCurrentObject(mem_dc, OBJ_PEN));
@@ -1318,10 +1325,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             SelectObject(mem_dc, old_font);
             SelectObject(mem_dc, old_br);
 
-            BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
-            SelectObject(mem_dc, old_bmp);
-            DeleteObject(mem_bmp);
-            DeleteDC(mem_dc);
+            mem_dc.blit();
 
             EndPaint(hwnd, &ps);
             return 0;
@@ -1710,11 +1714,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 update_clear_button_state();
 
                 // Invalidate the telemetry badge region with inflation
-                RECT client_rc;
-                GetClientRect(hwnd, &client_rc);
-                RECT rc_b = get_telemetry_badge_rect(client_rc.right - client_rc.left);
-                RECT rc_inv = { rc_b.left - scale_dpi(2), rc_b.top - scale_dpi(2), rc_b.right + scale_dpi(2), rc_b.bottom + scale_dpi(2) };
-                InvalidateRect(hwnd, &rc_inv, FALSE);
+                invalidate_telemetry_badge(hwnd);
             }
             return 0;
         }
@@ -1745,17 +1745,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             update_session_ui_state(g_current_session_state);
             update_metrics_text();
 
-            RECT client_rc;
-            GetClientRect(hwnd, &client_rc);
-            RECT rc_pill_base = get_status_pill_rect(client_rc.right - client_rc.left);
-            RECT rc_pill = { rc_pill_base.left - scale_dpi(2), rc_pill_base.top - scale_dpi(2),
-                             rc_pill_base.right + scale_dpi(2), rc_pill_base.bottom + scale_dpi(2) };
-            InvalidateRect(hwnd, &rc_pill, FALSE);
-
-            RECT rc_b = get_telemetry_badge_rect(client_rc.right - client_rc.left);
-            RECT rc_inv = { rc_b.left - scale_dpi(2), rc_b.top - scale_dpi(2),
-                            rc_b.right + scale_dpi(2), rc_b.bottom + scale_dpi(2) };
-            InvalidateRect(hwnd, &rc_inv, FALSE);
+            invalidate_status_pill(hwnd);
+            invalidate_telemetry_badge(hwnd);
             return 0;
         }
 

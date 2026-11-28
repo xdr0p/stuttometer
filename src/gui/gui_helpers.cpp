@@ -1,4 +1,6 @@
 #include "gui_helpers.hpp"
+#include "stuttometer/privilege_utils.hpp"
+#include <commdlg.h>
 
 namespace stuttometer::gui {
 
@@ -156,6 +158,137 @@ int show_centered_message_box(HWND hOwner, LPCWSTR lpText, LPCWSTR lpCaption, UI
     t_target_owner = nullptr;
 
     return result;
+}
+
+bool register_window_class_once(bool& registered, const wchar_t* class_name, WNDPROC wnd_proc, HINSTANCE hInstance) noexcept {
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = wnd_proc;
+        wc.hInstance = hInstance;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = NULL;
+        wc.lpszClassName = class_name;
+        ATOM atom = RegisterClassExW(&wc);
+        registered = (atom != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+    }
+    return registered;
+}
+
+RECT compute_centered_dialog_rect(HWND parent, int base_w, int base_h, DWORD dwStyle) noexcept {
+    UINT dpi = parent ? GetDpiForWindow(parent) : 96;
+    if (dpi == 0) dpi = 96;
+
+    int client_w = MulDiv(base_w, dpi, 96);
+    int client_h = MulDiv(base_h, dpi, 96);
+
+    RECT rc = { 0, 0, client_w, client_h };
+    AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
+    int outer_w = rc.right - rc.left;
+    int outer_h = rc.bottom - rc.top;
+
+    RECT rc_work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc_work, 0);
+    int work_w = rc_work.right - rc_work.left;
+    int work_h = rc_work.bottom - rc_work.top;
+    if (outer_h > work_h - 20) outer_h = work_h - 20;
+    if (outer_w > work_w - 20) outer_w = work_w - 20;
+
+    int pos_x = rc_work.left + (work_w - outer_w) / 2;
+    int pos_y = rc_work.top + (work_h - outer_h) / 2;
+    if (parent) {
+        RECT rc_parent{};
+        GetWindowRect(parent, &rc_parent);
+        pos_x = rc_parent.left + ((rc_parent.right - rc_parent.left) - outer_w) / 2;
+        pos_y = rc_parent.top + ((rc_parent.bottom - rc_parent.top) - outer_h) / 2;
+    }
+
+    return { pos_x, pos_y, pos_x + outer_w, pos_y + outer_h };
+}
+
+std::optional<int> run_modal_message_loop(HWND hDlg, HWND hParent) noexcept {
+    apply_window_dark_titlebar(hDlg);
+    if (hParent) {
+        EnableWindow(hParent, FALSE);
+    }
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+
+    MSG msg{};
+    while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (hParent && !IsWindow(hParent)) {
+            DestroyWindow(hDlg);
+            break;
+        }
+        if (!IsDialogMessageW(hDlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!IsWindow(hDlg)) break;
+    }
+
+    if (hParent && IsWindow(hParent)) {
+        EnableWindow(hParent, TRUE);
+        SetForegroundWindow(hParent);
+        SetFocus(hParent);
+    }
+
+    if (msg.message == WM_QUIT) {
+        return static_cast<int>(msg.wParam);
+    }
+    return std::nullopt;
+}
+
+void dismiss_modal_dialog(HWND hDlg) noexcept {
+    HWND hParent = GetWindow(hDlg, GW_OWNER);
+    if (hParent && IsWindow(hParent)) {
+        EnableWindow(hParent, TRUE);
+        SetForegroundWindow(hParent);
+        SetFocus(hParent);
+    }
+    DestroyWindow(hDlg);
+}
+
+bool copy_utf8_to_clipboard(HWND hwnd, const std::string& utf8_text) {
+    std::wstring wtext = stuttometer::utf8_to_utf16(utf8_text);
+    bool ok = false;
+    if (OpenClipboard(hwnd)) {
+        EmptyClipboard();
+        HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (wtext.size() + 1) * sizeof(wchar_t));
+        if (hGlob) {
+            wchar_t* pMem = static_cast<wchar_t*>(GlobalLock(hGlob));
+            if (pMem) {
+                wcscpy_s(pMem, wtext.size() + 1, wtext.c_str());
+                GlobalUnlock(hGlob);
+                if (SetClipboardData(CF_UNICODETEXT, hGlob)) {
+                    ok = true;
+                }
+            }
+            if (!ok) GlobalFree(hGlob);
+        }
+        CloseClipboard();
+    }
+    return ok;
+}
+
+bool prompt_save_file(HWND hwnd, const wchar_t* filter, const wchar_t* def_ext, wchar_t (&buf)[MAX_PATH]) noexcept {
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = def_ext;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    return GetSaveFileNameW(&ofn) != FALSE;
+}
+
+void show_button_feedback(HWND owner_hwnd, HWND btn_hwnd, const wchar_t* label, UINT duration_ms) noexcept {
+    if (!btn_hwnd) return;
+    SetWindowTextW(btn_hwnd, label);
+    InvalidateRect(btn_hwnd, NULL, TRUE);
+    SetTimer(owner_hwnd, reinterpret_cast<UINT_PTR>(btn_hwnd), duration_ms, NULL);
 }
 
 } // namespace stuttometer::gui
